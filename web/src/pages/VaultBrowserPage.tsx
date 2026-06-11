@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import * as api from "../api";
 import { FolderTree, buildTree } from "../components/FolderTree";
+import MarkdownView from "../components/MarkdownView";
+import { useTheme, type Theme } from "../hooks/useTheme";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,7 @@ export default function VaultBrowserPage() {
   const [fileView, setFileView] = useState<FileViewState>({ kind: "idle" });
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const uploadRef = useRef<HTMLInputElement>(null);
+  const { theme, setTheme } = useTheme();
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -238,6 +241,22 @@ export default function VaultBrowserPage() {
           </button>
         </div>
 
+        <div style={styles.themeRow}>
+          {(["light", "dark", "sepia"] as Theme[]).map((t) => (
+            <button
+              key={t}
+              style={{
+                ...styles.themeBtn,
+                ...(theme === t ? styles.themeBtnActive : {}),
+              }}
+              onClick={() => setTheme(t)}
+              title={`${t} theme`}
+            >
+              {t === "light" ? "☀" : t === "dark" ? "🌙" : "📜"}
+            </button>
+          ))}
+        </div>
+
         <div style={styles.treeScroll}>
           {manifestError ? (
             <p style={styles.sidebarError}>{manifestError}</p>
@@ -262,6 +281,7 @@ export default function VaultBrowserPage() {
         <FileView
           view={fileView}
           vaultId={vaultId ?? ""}
+          vaultPaths={manifest ? Object.values(manifest.entries).map((e) => e.path) : []}
           onEdit={(path, content) =>
             setFileView({ kind: "editing", path, content, saving: false })
           }
@@ -271,6 +291,10 @@ export default function VaultBrowserPage() {
           }
           onRename={openRenameModal}
           onDelete={openDeleteModal}
+          onOpenFile={openFile}
+          onCreateNote={(path) => {
+            setModal({ kind: "newNote", value: path, error: null });
+          }}
         />
       </main>
 
@@ -348,14 +372,24 @@ export default function VaultBrowserPage() {
 interface FileViewProps {
   view: FileViewState;
   vaultId: string;
+  vaultPaths: string[];
   onEdit: (path: string, content: string) => void;
   onSave: (path: string, content: string) => void;
   onCancelEdit: (path: string, content: string) => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onCreateNote: (path: string) => void;
 }
 
-function FileView({ view, vaultId, onEdit, onSave, onCancelEdit, onRename, onDelete }: FileViewProps) {
+function isMarkdown(contentType: string, path: string): boolean {
+  return (
+    contentType === "text/markdown" ||
+    path.toLowerCase().endsWith(".md")
+  );
+}
+
+function FileView({ view, vaultId, vaultPaths, onEdit, onSave, onCancelEdit, onRename, onDelete, onOpenFile, onCreateNote }: FileViewProps) {
   if (view.kind === "idle") {
     return (
       <div style={styles.placeholder}>
@@ -420,6 +454,7 @@ function FileView({ view, vaultId, onEdit, onSave, onCancelEdit, onRename, onDel
   }
 
   if (view.kind === "text") {
+    const isMd = isMarkdown(view.contentType, view.path);
     return (
       <div style={styles.textPane}>
         <div style={styles.fileHeader}>
@@ -436,7 +471,19 @@ function FileView({ view, vaultId, onEdit, onSave, onCancelEdit, onRename, onDel
             </button>
           </div>
         </div>
-        <pre style={styles.pre}>{view.content}</pre>
+        {isMd ? (
+          <div style={styles.markdownScroll}>
+            <MarkdownView
+              source={view.content}
+              vaultId={vaultId}
+              vaultPaths={vaultPaths}
+              onCreateNote={onCreateNote}
+              onNavigate={onOpenFile}
+            />
+          </div>
+        ) : (
+          <pre style={styles.pre}>{view.content}</pre>
+        )}
       </div>
     );
   }
@@ -588,10 +635,34 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: "pointer",
   },
+  themeRow: {
+    display: "flex",
+    padding: "0.35rem 0.6rem",
+    borderBottom: "1px solid #e0e0e0",
+    gap: "0.3rem",
+  },
+  themeBtn: {
+    flex: 1,
+    background: "none",
+    border: "1px solid #e0e0e0",
+    borderRadius: 4,
+    padding: "0.25rem",
+    cursor: "pointer",
+    fontSize: "0.9rem",
+    lineHeight: 1,
+  },
+  themeBtnActive: {
+    background: "#ede8f8",
+    borderColor: "#7c5cbf",
+  },
   treeScroll: {
     flex: 1,
     overflowY: "auto",
     padding: "0.5rem 0",
+  },
+  markdownScroll: {
+    flex: 1,
+    overflowY: "auto",
   },
   sidebarMuted: {
     color: "#6b6b6b",
