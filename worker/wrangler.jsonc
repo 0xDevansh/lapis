@@ -1,0 +1,59 @@
+{
+  "name": "lapis",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+
+  // Durable Objects
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VAULT_COORDINATOR",
+        "class_name": "VaultCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["VaultCoordinator"]
+    }
+  ],
+
+  // R2 bucket for vault content
+  "r2_buckets": [
+    {
+      "binding": "VAULT_BUCKET",
+      "bucket_name": "lapis-vault"
+    }
+  ],
+
+  // D1 database for auth + search
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lapis-db",
+      "database_id": "local"
+    }
+  ],
+
+  // KV for session storage
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "local"
+    }
+  ],
+
+  // Secrets (set via wrangler secret or .dev.vars)
+  // BETTER_AUTH_SECRET
+  // BETTER_AUTH_URL
+
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS"
+  }
+}
