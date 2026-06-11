@@ -3,6 +3,7 @@ import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
 import { contentKey } from "./manifest";
+import { indexFile, removeFromIndex, renameInIndex } from "../search/indexer";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
 
@@ -189,6 +190,15 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
 
   try {
     const entry = await stub.putFile(id, filePath, body, storageContentType);
+
+    // Update search index (fire-and-forget; don't fail the request if indexing fails)
+    const textContent = storageContentType.startsWith("text/") || storageContentType === "application/json"
+      ? new TextDecoder().decode(body)
+      : undefined;
+    const manifest = await stub.getManifest(id);
+    const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+    indexFile(c.env.DB, { vaultId: id, path: filePath, content: textContent, vaultPaths }).catch(() => {});
+
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -223,6 +233,20 @@ vaultRoutes.patch("/:id/files/*", requireSession, async (c) => {
 
   try {
     const entry = await stub.renameFile(id, oldPath, newPath);
+
+    // Update search index for the renamed file (fetch content if it's text)
+    let newContent: string | undefined;
+    if (entry.contentType.startsWith("text/") || entry.contentType === "application/json") {
+      try {
+        const r2Key = contentKey(id, newPath);
+        const obj = await c.env.VAULT_BUCKET.get(r2Key);
+        if (obj) newContent = await obj.text();
+      } catch { /* ignore */ }
+    }
+    const manifest = await stub.getManifest(id);
+    const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+    renameInIndex(c.env.DB, id, oldPath, newPath, newContent, vaultPaths).catch(() => {});
+
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -252,6 +276,10 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
 
   try {
     await stub.deleteFile(id, filePath);
+
+    // Remove from search index
+    removeFromIndex(c.env.DB, id, filePath).catch(() => {});
+
     return c.json({ ok: true });
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };

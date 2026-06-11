@@ -189,3 +189,39 @@ export async function deleteFile(
     { method: "DELETE" }
   );
 }
+
+// ── Search, backlinks, tags (Slice 06) ────────────────────────────────────────
+
+export interface SearchResult {
+  path: string;
+  snippet: string;
+}
+
+export async function searchVault(
+  vaultId: string,
+  q: string
+): Promise<SearchResult[]> {
+  const params = new URLSearchParams({ q });
+  return apiFetch<SearchResult[]>(`/api/vaults/${vaultId}/search?${params}`);
+}
+
+export interface BacklinkResult {
+  sourcePath: string;
+}
+
+export async function getBacklinks(
+  vaultId: string,
+  path: string
+): Promise<BacklinkResult[]> {
+  const params = new URLSearchParams({ path });
+  return apiFetch<BacklinkResult[]>(`/api/vaults/${vaultId}/backlinks?${params}`);
+}
+
+export interface TagResult {
+  tag: string;
+  count: number;
+}
+
+export async function getVaultTags(vaultId: string): Promise<TagResult[]> {
+  return apiFetch<TagResult[]>(`/api/vaults/${vaultId}/tags`);
+}

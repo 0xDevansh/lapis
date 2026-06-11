@@ -3,6 +3,8 @@ import { useParams, Link } from "react-router-dom";
 import * as api from "../api";
 import { FolderTree, buildTree } from "../components/FolderTree";
 import MarkdownView from "../components/MarkdownView";
+import SearchPanel from "../components/SearchPanel";
+import BacklinksPanel from "../components/BacklinksPanel";
 import { useTheme, type Theme } from "../hooks/useTheme";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -257,6 +259,10 @@ export default function VaultBrowserPage() {
           ))}
         </div>
 
+        {vaultId && (
+          <SearchPanel vaultId={vaultId} onSelect={openFile} />
+        )}
+
         <div style={styles.treeScroll}>
           {manifestError ? (
             <p style={styles.sidebarError}>{manifestError}</p>
@@ -478,6 +484,11 @@ function FileView({ view, vaultId, vaultPaths, onEdit, onSave, onCancelEdit, onR
               vaultId={vaultId}
               vaultPaths={vaultPaths}
               onCreateNote={onCreateNote}
+              onNavigate={onOpenFile}
+            />
+            <BacklinksPanel
+              vaultId={vaultId}
+              path={view.path}
               onNavigate={onOpenFile}
             />
           </div>
