@@ -95,6 +95,8 @@ export interface ManifestEntry {
   size: number;
   contentType: string;
   updatedAt: string;
+  /** Monotonic revision counter, incremented on every accepted write. */
+  revision: number;
 }
 
 export interface VaultManifest {

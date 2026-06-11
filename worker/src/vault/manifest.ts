@@ -22,6 +22,13 @@ export interface ManifestEntry {
   contentType: string;
   /** ISO timestamp of last accepted revision */
   updatedAt: string;
+  /**
+   * Monotonic revision counter for this file.
+   * Incremented on every accepted write (web or plugin).
+   * Used by the sync protocol to detect staleness.
+   * 0 or undefined for entries created before Slice 09.
+   */
+  revision: number;
 }
 
 export interface VaultManifest {
