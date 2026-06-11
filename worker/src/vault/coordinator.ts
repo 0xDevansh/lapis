@@ -42,9 +42,51 @@ type VaultMetaRow = Record<string, SqlStorageValue> & {
  *   - syncApplyPatch: apply a unified diff if base revision matches
  *   - syncRenameFile: rename via device sync (same guards as web)
  *   - syncDeleteFile: delete via device sync
+ *
+ * Slice 10 additions:
+ *   - Hibernatable WebSocket support via fetch() /ws endpoint
+ *   - broadcast(message): fan-out change notifications to all connected clients
+ *   - Presence tracking: open-file awareness via {"type":"open","path":"..."} messages
+ *   - webSocketMessage / webSocketClose handlers
  */
+
+/**
+ * Notification message broadcast to all connected WebSocket clients.
+ * Small payload — clients re-fetch changed content via authenticated APIs.
+ */
+export interface ChangeNotification {
+  type: "change";
+  path: string;
+  kind: "put" | "rename" | "delete";
+  revision?: number;
+  newPath?: string; // only present for kind=rename
+  ts: string;      // ISO timestamp
+}
+
+/** Presence notification sent to all clients when someone connects/disconnects. */
+export interface PresenceNotification {
+  type: "presence";
+  sessions: Array<{ identity: string; openPath: string | null }>;
+}
+
+/** Same-file warning sent to a newly-connecting client. */
+export interface SameFileWarning {
+  type: "same_file_warning";
+  path: string;
+  others: string[]; // identities of other clients with this file open
+}
+
+type ServerMessage = ChangeNotification | PresenceNotification | SameFileWarning;
+
+/** Per-connection presence metadata (ephemeral, in memory). */
+interface PresenceEntry {
+  identity: string;
+  openPath: string | null;
+}
 export class VaultCoordinator extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  /** Ephemeral presence map — keyed by WebSocket object identity. */
+  private readonly presence = new Map<WebSocket, PresenceEntry>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -161,6 +203,9 @@ export class VaultCoordinator extends DurableObject<Env> {
     manifest.entries[path.toLowerCase()] = entry;
     await this.writeManifest(manifest);
 
+    // Notify all connected clients
+    this.broadcast({ type: "change", path, kind: "put", revision: entry.revision, ts: entry.updatedAt });
+
     return entry;
   }
 
@@ -233,6 +278,16 @@ export class VaultCoordinator extends DurableObject<Env> {
     // Delete old R2 object
     await this.env.VAULT_BUCKET.delete(srcKey);
 
+    // Notify connected clients
+    this.broadcast({
+      type: "change",
+      path: oldPath,
+      kind: "rename",
+      revision: newEntry.revision,
+      newPath,
+      ts: newEntry.updatedAt,
+    });
+
     return newEntry;
   }
 
@@ -253,6 +308,9 @@ export class VaultCoordinator extends DurableObject<Env> {
     await this.env.VAULT_BUCKET.delete(entry.r2Key);
     delete manifest.entries[lower];
     await this.writeManifest(manifest);
+
+    // Notify connected clients
+    this.broadcast({ type: "change", path, kind: "delete", ts: new Date().toISOString() });
   }
 
   // ── Sync protocol methods (Slice 09) ──────────────────────────────────────
@@ -316,6 +374,9 @@ export class VaultCoordinator extends DurableObject<Env> {
 
     manifest.entries[lower] = entry;
     await this.writeManifest(manifest);
+
+    // Notify connected clients
+    this.broadcast({ type: "change", path, kind: "put", revision: entry.revision, ts: entry.updatedAt });
 
     return entry;
   }
@@ -382,6 +443,9 @@ export class VaultCoordinator extends DurableObject<Env> {
     manifest.entries[lower] = entry;
     await this.writeManifest(manifest);
 
+    // Notify connected clients
+    this.broadcast({ type: "change", path, kind: "put", revision: entry.revision, ts: entry.updatedAt });
+
     return entry;
   }
 
@@ -405,6 +469,94 @@ export class VaultCoordinator extends DurableObject<Env> {
     return this.deleteFile(vaultId, path);
   }
 
+  // ── WebSocket / Presence methods (Slice 10) ───────────────────────────────
+
+  /**
+   * Broadcast a message to all connected WebSocket clients.
+   * Called after every accepted file mutation.
+   */
+  broadcast(message: ServerMessage): void {
+    const payload = JSON.stringify(message);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(payload);
+      } catch {
+        // Client disconnected — remove from presence
+        this.presence.delete(ws);
+      }
+    }
+  }
+
+  /** Build the current presence snapshot for all connected clients. */
+  private presenceSnapshot(): PresenceNotification {
+    const sessions: PresenceNotification["sessions"] = [];
+    for (const [, entry] of this.presence) {
+      sessions.push({ identity: entry.identity, openPath: entry.openPath });
+    }
+    return { type: "presence", sessions };
+  }
+
+  /** Send a message to a single WebSocket. */
+  private sendTo(ws: WebSocket, message: ServerMessage): void {
+    try {
+      ws.send(JSON.stringify(message));
+    } catch { /* ignore */ }
+  }
+
+  // ── DurableObject WebSocket lifecycle handlers ─────────────────────────────
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    if (typeof message !== "string") return;
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(message) as Record<string, unknown>;
+    } catch {
+      return; // ignore invalid JSON
+    }
+
+    // {"type": "open", "path": "notes/foo.md"}
+    if (parsed.type === "open") {
+      const path = typeof parsed.path === "string" ? parsed.path : null;
+      const entry = this.presence.get(ws);
+      if (entry) {
+        entry.openPath = path;
+      }
+
+      // Warn if other clients have the same file open
+      if (path) {
+        const others: string[] = [];
+        for (const [otherWs, otherEntry] of this.presence) {
+          if (otherWs !== ws && otherEntry.openPath === path) {
+            others.push(otherEntry.identity);
+          }
+        }
+        if (others.length > 0) {
+          this.sendTo(ws, { type: "same_file_warning", path, others });
+        }
+      }
+
+      // Broadcast updated presence to all clients
+      this.broadcast(this.presenceSnapshot());
+    }
+
+    // {"type": "close_file"}
+    if (parsed.type === "close_file") {
+      const entry = this.presence.get(ws);
+      if (entry) entry.openPath = null;
+      this.broadcast(this.presenceSnapshot());
+    }
+  }
+
+  webSocketClose(ws: WebSocket): void {
+    this.presence.delete(ws);
+    this.broadcast(this.presenceSnapshot());
+  }
+
+  webSocketError(ws: WebSocket): void {
+    this.presence.delete(ws);
+  }
+
   /** Handle HTTP requests forwarded from the main Worker. */
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -419,6 +571,29 @@ export class VaultCoordinator extends DurableObject<Env> {
       const body = (await request.json()) as VaultMeta;
       await this.initialize(body);
       return new Response("OK");
+    }
+
+    // WebSocket upgrade endpoint
+    // URL: /ws?identity=<session-or-device-id>
+    if (url.pathname === "/ws" && request.method === "GET") {
+      const upgradeHeader = request.headers.get("Upgrade");
+      if (upgradeHeader !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+
+      const identity = url.searchParams.get("identity") ?? "unknown";
+      const { 0: client, 1: server } = new WebSocketPair();
+
+      this.ctx.acceptWebSocket(server);
+      this.presence.set(server, { identity, openPath: null });
+
+      // Send initial presence snapshot to the new client
+      server.send(JSON.stringify(this.presenceSnapshot()));
+
+      // Broadcast updated presence to all others
+      this.broadcast(this.presenceSnapshot());
+
+      return new Response(null, { status: 101, webSocket: client });
     }
 
     return new Response("Not found", { status: 404 });

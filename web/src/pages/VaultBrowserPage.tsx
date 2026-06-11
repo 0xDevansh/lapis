@@ -5,7 +5,9 @@ import { FolderTree, buildTree } from "../components/FolderTree";
 import MarkdownView from "../components/MarkdownView";
 import SearchPanel from "../components/SearchPanel";
 import BacklinksPanel from "../components/BacklinksPanel";
+import PresenceBar from "../components/PresenceBar";
 import { useTheme, type Theme } from "../hooks/useTheme";
+import { useVaultNotify } from "../hooks/useVaultNotify";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -47,6 +49,30 @@ export default function VaultBrowserPage() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const { theme, setTheme } = useTheme();
 
+  // ── Live notifications (Slice 10) ───────────────────────────────────────────
+
+  const [dismissedWarning, setDismissedWarning] = useState(false);
+  // Stable ref to refreshManifest — updated after it's defined below
+  const refreshManifestRef = useRef<() => Promise<void>>(async () => {});
+
+  const { connected, presence, sameFileWarning } = useVaultNotify(
+    vaultId,
+    selectedPath,
+    {
+      onChange: useCallback(() => {
+        void refreshManifestRef.current();
+      }, []),
+      onReconnect: useCallback(() => {
+        void refreshManifestRef.current();
+      }, []),
+    }
+  );
+
+  // Reset dismissed state whenever a new warning arrives for a new path
+  useEffect(() => {
+    if (sameFileWarning) setDismissedWarning(false);
+  }, [sameFileWarning?.path]);
+
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const refreshManifest = useCallback(async () => {
@@ -58,6 +84,11 @@ export default function VaultBrowserPage() {
       setManifestError((e as Error).message);
     }
   }, [vaultId]);
+
+  // Keep ref in sync with the latest refreshManifest
+  useEffect(() => {
+    refreshManifestRef.current = refreshManifest;
+  }, [refreshManifest]);
 
   useEffect(() => {
     if (!vaultId) return;
@@ -236,6 +267,14 @@ export default function VaultBrowserPage() {
           </div>
           <span style={styles.vaultName}>{vault?.name ?? "…"}</span>
         </div>
+
+        {/* Live presence bar */}
+        <PresenceBar
+          connected={connected}
+          presence={presence}
+          sameFileWarning={dismissedWarning ? null : sameFileWarning}
+          onDismissWarning={() => setDismissedWarning(true)}
+        />
 
         <div style={styles.sidebarActions}>
           <button style={styles.actionBtn} title="New note" onClick={openNewNoteModal}>

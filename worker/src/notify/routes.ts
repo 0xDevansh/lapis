@@ -1,0 +1,96 @@
+/**
+ * WebSocket notification routes — Slice 10.
+ *
+ * Two upgrade endpoints:
+ *
+ * 1. GET /api/vaults/:id/notify        (session cookie auth)
+ *    Web browser connects here to receive live vault change notifications.
+ *
+ * 2. GET /api/sync/:vaultId/notify     (device Bearer token auth)
+ *    Plugin connects here to receive change notifications for its vault.
+ *
+ * Both upgrade the connection and forward it to the VaultCoordinator DO's
+ * /ws endpoint, passing an identity string so the DO can track presence.
+ *
+ * The DO broadcasts small ChangeNotification payloads; clients re-fetch
+ * the affected file content via authenticated REST APIs.
+ */
+
+import { Hono } from "hono";
+import type { Env } from "../types";
+import { requireSession } from "../middleware/auth";
+import { requireDevice } from "../middleware/syncAuth";
+
+const notifyRoutes = new Hono<{ Bindings: Env }>();
+
+// ── Helper ─────────────────────────────────────────────────────────────────
+
+async function resolveVaultOwner(
+  db: D1Database,
+  vaultId: string,
+  userId: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`)
+    .bind(vaultId, userId)
+    .first<{ id: string }>();
+  return !!row;
+}
+
+function upgradeToWebSocket(
+  request: Request,
+  vaultId: string,
+  identity: string,
+  env: Env
+): Response {
+  const upgradeHeader = request.headers.get("Upgrade");
+  if (upgradeHeader !== "websocket") {
+    return new Response("Expected WebSocket upgrade", { status: 426 });
+  }
+
+  // Forward WebSocket upgrade to the VaultCoordinator DO
+  const doId = env.VAULT_COORDINATOR.idFromName(vaultId);
+  const stub = env.VAULT_COORDINATOR.get(doId);
+
+  // Pass identity in the URL so the DO knows who this is
+  const wsUrl = `https://do-internal/ws?identity=${encodeURIComponent(identity)}`;
+  return stub.fetch(new Request(wsUrl, {
+    method: "GET",
+    headers: request.headers,
+  })) as unknown as Response;
+}
+
+// ── GET /api/vaults/:id/notify  (session auth) ─────────────────────────────
+
+notifyRoutes.get("/vaults/:id/notify", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id: vaultId } = c.req.param();
+
+  const owned = await resolveVaultOwner(c.env.DB, vaultId, session.userId);
+  if (!owned) return c.json({ error: "Not found" }, 404);
+
+  // Identity: "session:<sessionId>"
+  const identity = `session:${session.sessionId}`;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return upgradeToWebSocket(c.req.raw, vaultId, identity, c.env) as any;
+});
+
+// ── GET /api/sync/:vaultId/notify  (device auth) ───────────────────────────
+
+notifyRoutes.get("/sync/:vaultId/notify", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+
+  if (device.vaultId !== vaultId) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  // Identity: "device:<deviceName>"
+  const identity = `device:${device.deviceName}`;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return upgradeToWebSocket(c.req.raw, vaultId, identity, c.env) as any;
+});
+
+export { notifyRoutes };

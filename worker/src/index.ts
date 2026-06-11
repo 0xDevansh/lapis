@@ -7,6 +7,7 @@ import { vaultRoutes } from "./vault/routes";
 import { searchRoutes } from "./search/routes";
 import { deviceRoutes } from "./device/routes";
 import { syncRoutes } from "./sync/routes";
+import { notifyRoutes } from "./notify/routes";
 
 export { VaultCoordinator } from "./vault/coordinator";
 
@@ -33,6 +34,7 @@ app.route("/api/vaults", vaultRoutes);
 app.route("/api/vaults", searchRoutes);
 app.route("/api", deviceRoutes);
 app.route("/api/sync", syncRoutes);
+app.route("/api", notifyRoutes);
 
 // ── Dev utility: apply D1 schema ─────────────────────────────────────────────
 app.post("/api/admin/migrate", async (c) => {
