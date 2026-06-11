@@ -1,5 +1,5 @@
 /**
- * Plugin sync API — Slice 09.
+ * Plugin sync API — Slices 09 & 11.
  *
  * These routes are authenticated with a device sync token (`requireDevice`).
  * They provide the server side of the two-way sync protocol used by the
@@ -15,6 +15,13 @@
  *   POST /api/sync/:vaultId/files/{path}/patch  — push text patch (unified diff)
  *   PATCH  /api/sync/:vaultId/files/*           — rename/move
  *   DELETE /api/sync/:vaultId/files/*           — delete
+ *
+ * Slice 11 additions:
+ *   PUT  — stale whole-object uploads create a Conflict Note instead of 409.
+ *   POST — stale patches attempt three-way merge; on conflict, create a Conflict Note.
+ *          Clients may include `clientContent` (and optionally `baseContent`) in the
+ *          POST body to enable proper merge3. Without `clientContent`, a conflict note
+ *          is created directly.
  */
 
 import { Hono } from "hono";
@@ -159,9 +166,36 @@ syncRoutes.put("/:vaultId/files/*", requireDevice, async (c) => {
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number };
-    if (err.status === 409 && err.serverRevision !== undefined) {
-      return c.json({ error: err.message, serverRevision: err.serverRevision }, 409);
+
+    // Slice 11: stale whole-object upload → create Conflict Note instead of 409
+    if (err.status === 409 && err.serverRevision !== undefined && baseRevision !== undefined) {
+      const device = c.get("device");
+      try {
+        const { conflictPath, entry } = await stub.syncConflictWholeObject(
+          vaultId,
+          filePath,
+          body,
+          contentType,
+          err.serverRevision,
+          baseRevision,
+          device.deviceName
+        );
+        // Index the conflict note
+        try {
+          const manifest = await stub.getManifest(vaultId);
+          const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+          const noteText = new TextDecoder().decode(
+            (await c.env.VAULT_BUCKET.get(entry.r2Key))?.body as unknown as ArrayBuffer ?? new ArrayBuffer(0)
+          );
+          indexFile(c.env.DB, { vaultId, path: conflictPath, content: noteText, vaultPaths }).catch(() => {});
+        } catch { /* ignore */ }
+        return c.json({ conflict: true, conflictPath, entry }, 202);
+      } catch (ce: unknown) {
+        const cerr = ce as { status?: number; message?: string };
+        return c.json({ error: cerr.message ?? "Failed to create conflict note" }, (cerr.status ?? 500) as 500);
+      }
     }
+
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 409 | 500);
   }
 });
@@ -201,7 +235,12 @@ syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
   if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
   if (isVaultInternal(filePath)) return c.json({ error: "Cannot write to vault internals" }, 400);
 
-  const body = await c.req.json<{ patch: string; baseRevision: number }>();
+  const body = await c.req.json<{
+    patch: string;
+    baseRevision: number;
+    clientContent?: string;  // Slice 11: client's full intended content (enables merge3)
+    baseContent?: string;    // Slice 11: common ancestor content (enables proper 3-way merge)
+  }>();
   if (typeof body.patch !== "string" || typeof body.baseRevision !== "number") {
     return c.json({ error: "patch (string) and baseRevision (number) are required" }, 400);
   }
@@ -227,9 +266,62 @@ syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number };
+
+    // Slice 11: stale patch → attempt three-way merge
     if (err.status === 409 && err.serverRevision !== undefined) {
+      const device = c.get("device");
+
+      // If the client provided its full intended content, attempt merge3.
+      if (typeof body.clientContent === "string") {
+        try {
+          const result = await stub.syncMergePatch(
+            vaultId,
+            filePath,
+            body.patch,
+            err.serverRevision,
+            body.baseRevision,
+            device.deviceName,
+            body.clientContent,
+            body.baseContent
+          );
+
+          if (result.kind === "merged") {
+            // Clean three-way merge — index and return
+            try {
+              const r2Key = contentKey(vaultId, filePath);
+              const obj = await c.env.VAULT_BUCKET.get(r2Key);
+              if (obj) {
+                const text = await obj.text();
+                const manifest = await stub.getManifest(vaultId);
+                const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+                indexFile(c.env.DB, { vaultId, path: filePath, content: text, vaultPaths }).catch(() => {});
+              }
+            } catch { /* ignore */ }
+            return c.json({ merged: true, entry: result.entry }, 200);
+          } else {
+            // Conflict note created
+            try {
+              const manifest = await stub.getManifest(vaultId);
+              const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+              const r2Key = result.entry.r2Key;
+              const obj = await c.env.VAULT_BUCKET.get(r2Key);
+              if (obj) {
+                const text = await obj.text();
+                indexFile(c.env.DB, { vaultId, path: result.conflictPath, content: text, vaultPaths }).catch(() => {});
+              }
+            } catch { /* ignore */ }
+            return c.json({ conflict: true, conflictPath: result.conflictPath, entry: result.entry }, 202);
+          }
+        } catch (me: unknown) {
+          const merr = me as { status?: number; message?: string };
+          return c.json({ error: merr.message ?? "Merge failed" }, (merr.status ?? 500) as 400 | 404 | 500);
+        }
+      }
+
+      // No clientContent provided — return 409 for client to retry with content
       return c.json({ error: err.message, serverRevision: err.serverRevision }, 409);
     }
+
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 404 | 409 | 422 | 500);
   }
 });

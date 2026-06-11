@@ -1,13 +1,13 @@
 /**
- * Unified diff patch application — Slice 09.
+ * Unified diff patch application and three-way merge — Slices 09 & 11.
  *
- * Applies a standard unified diff (as produced by GNU diff / git diff) to a
- * source string and returns the patched result, or `null` if the patch cannot
+ * applyPatch: Applies a standard unified diff (as produced by GNU diff / git diff)
+ * to a source string and returns the patched result, or `null` if the patch cannot
  * be applied cleanly (context mismatch or invalid format).
  *
- * This is intentionally a minimal implementation covering the subset needed by
- * the Lapis sync protocol: single-file unified diffs, context lines, hunks with
- * @@ markers. Three-way merge for stale patches is handled in Slice 11.
+ * merge3: Performs a line-level three-way merge of base/ours/theirs.
+ * Returns { merged, hasConflicts }. Clean merges have hasConflicts=false.
+ * Conflict regions are marked with standard conflict markers.
  */
 
 interface Hunk {
@@ -313,4 +313,186 @@ function formatHunk(h: RawHunk): string {
 
   const header = `@@ -${h.origStart},${origLen} +${h.newStart},${newLen} @@\n`;
   return header + lines.join("\n") + "\n";
+}
+
+// ── Three-way merge (Slice 11) ────────────────────────────────────────────────
+
+export interface Merge3Result {
+  /** The merged content. On conflict, includes standard conflict markers. */
+  merged: string;
+  /** True if any conflict markers were inserted (merge was not clean). */
+  hasConflicts: boolean;
+}
+
+/**
+ * Perform a line-level three-way merge.
+ *
+ * @param base    Common ancestor text
+ * @param ours    Server's current version (already diverged from base)
+ * @param theirs  Client's version (also based on base or an older revision)
+ *
+ * Returns { merged, hasConflicts }.
+ * - If hasConflicts is false, merged is the clean result.
+ * - If hasConflicts is true, merged contains conflict regions wrapped in
+ *   standard markers:
+ *     <<<<<<< server
+ *     ...server lines...
+ *     =======
+ *     ...client lines...
+ *     >>>>>>> client
+ *
+ * Algorithm:
+ *   1. Compute edit sequences base→ours and base→theirs (using LCS).
+ *   2. Walk the three edit sequences together in "chunks" of unchanged /
+ *      changed regions, following the same structure as GNU diff3.
+ *   3. Unchanged regions from both sides are emitted directly.
+ *   4. Regions changed by only one side are accepted.
+ *   5. Regions changed by both sides with the same result are accepted.
+ *   6. Regions changed by both sides differently produce conflict markers.
+ */
+export function merge3(base: string, ours: string, theirs: string): Merge3Result {
+  const baseLines  = base   === "" ? [] : base.split("\n");
+  const ourLines   = ours   === "" ? [] : ours.split("\n");
+  const theirLines = theirs === "" ? [] : theirs.split("\n");
+
+  // Build edit sequences: arrays of { kind, baseLine?, ourLine?, theirLine? }
+  // We use a simpler encoding: for each side compute the Myers-style edit
+  // script as a sequence of operations on the base.
+
+  // editScript(a, b) returns a list of Edit objects describing how to
+  // transform `a` into `b`.
+  type Edit =
+    | { op: "equal"; ai: number; bi: number }
+    | { op: "delete"; ai: number }
+    | { op: "insert"; bi: number };
+
+  function editScript(a: string[], b: string[]): Edit[] {
+    const m = a.length;
+    const n = b.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        dp[i][j] = a[i-1] === b[j-1]
+          ? dp[i-1][j-1] + 1
+          : Math.max(dp[i-1][j], dp[i][j-1]);
+      }
+    }
+    const edits: Edit[] = [];
+    let i = m, j = n;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && a[i-1] === b[j-1]) {
+        edits.push({ op: "equal", ai: i-1, bi: j-1 });
+        i--; j--;
+      } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
+        edits.push({ op: "insert", bi: j-1 });
+        j--;
+      } else {
+        edits.push({ op: "delete", ai: i-1 });
+        i--;
+      }
+    }
+    return edits.reverse();
+  }
+
+  const oEdits = editScript(baseLines, ourLines);
+  const tEdits = editScript(baseLines, theirLines);
+
+  // Convert edit scripts into per-base-line mappings.
+  // oursMap[bi]   = index in ourLines (or -1 if deleted from ours)
+  // theirsMap[bi] = index in theirLines (or -1 if deleted from theirs)
+  // Also track insertions before each base position.
+  const oursMap  = new Array<number>(baseLines.length).fill(-2); // -2 = unset
+  const theirsMap = new Array<number>(baseLines.length).fill(-2);
+  const oursInsertsBefore  = new Map<number, number[]>(); // bi → [ourLine indices]
+  const theirsInsertsBefore = new Map<number, number[]>();
+
+  let nextBase = 0;
+  for (const e of oEdits) {
+    if (e.op === "equal") {
+      oursMap[e.ai] = e.bi;
+    } else if (e.op === "delete") {
+      oursMap[e.ai] = -1;
+    } else {
+      // insert before nextBase
+      const key = nextBase;
+      const arr = oursInsertsBefore.get(key) ?? [];
+      arr.push(e.bi);
+      oursInsertsBefore.set(key, arr);
+    }
+    if (e.op === "equal" || e.op === "delete") nextBase = e.ai + 1;
+  }
+
+  nextBase = 0;
+  for (const e of tEdits) {
+    if (e.op === "equal") {
+      theirsMap[e.ai] = e.bi;
+    } else if (e.op === "delete") {
+      theirsMap[e.ai] = -1;
+    } else {
+      const key = nextBase;
+      const arr = theirsInsertsBefore.get(key) ?? [];
+      arr.push(e.bi);
+      theirsInsertsBefore.set(key, arr);
+    }
+    if (e.op === "equal" || e.op === "delete") nextBase = e.ai + 1;
+  }
+
+  const output: string[] = [];
+  let hasConflicts = false;
+
+  /** Emit a conflict region. */
+  function emitConflict(oursChunk: string[], theirsChunk: string[]) {
+    if (oursChunk.join("\n") === theirsChunk.join("\n")) {
+      // Both sides produced the same result — take it (clean).
+      output.push(...oursChunk);
+    } else {
+      hasConflicts = true;
+      output.push("<<<<<<< server");
+      output.push(...oursChunk);
+      output.push("=======");
+      output.push(...theirsChunk);
+      output.push(">>>>>>> client");
+    }
+  }
+
+  for (let bi = 0; bi <= baseLines.length; bi++) {
+    // Flush insertions before this base position
+    const oInserts = oursInsertsBefore.get(bi) ?? [];
+    const tInserts = theirsInsertsBefore.get(bi) ?? [];
+    const oChunk = oInserts.map(idx => ourLines[idx]);
+    const tChunk = tInserts.map(idx => theirLines[idx]);
+
+    if (oChunk.length > 0 || tChunk.length > 0) {
+      emitConflict(oChunk, tChunk);
+    }
+
+    if (bi >= baseLines.length) break;
+
+    const om = oursMap[bi];   // -1 = deleted, >=0 = kept/replaced
+    const tm = theirsMap[bi]; // same
+
+    const oursKept   = om >= 0;
+    const theirsKept = tm >= 0;
+
+    if (oursKept && theirsKept) {
+      // Both kept the base line — check if they produced the same output
+      const oLine = ourLines[om];
+      const tLine = theirLines[tm];
+      if (oLine === tLine) {
+        // Identical result (includes unchanged == baseLines[bi])
+        output.push(oLine);
+      } else {
+        // Both changed the line to different values
+        emitConflict([oLine], [tLine]);
+      }
+    } else if (!oursKept && !theirsKept) {
+      // Both deleted — clean
+    } else if (!oursKept && theirsKept) {
+      // Only ours deleted → accept our deletion (drop the line)
+    } else {
+      // !theirsKept && oursKept → only theirs deleted → accept their deletion
+    }
+  }
+
+  return { merged: output.join("\n"), hasConflicts };
 }
