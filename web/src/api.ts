@@ -86,3 +86,38 @@ export async function createVault(name: string): Promise<Vault> {
 export async function getVault(id: string): Promise<Vault> {
   return apiFetch<Vault>(`/api/vaults/${id}`);
 }
+
+// ── Vault Content ─────────────────────────────────────────────────────────────
+
+export interface ManifestEntry {
+  path: string;
+  r2Key: string;
+  size: number;
+  contentType: string;
+  updatedAt: string;
+}
+
+export interface VaultManifest {
+  vaultId: string;
+  updatedAt: string;
+  entries: Record<string, ManifestEntry>;
+}
+
+export async function getManifest(vaultId: string): Promise<VaultManifest> {
+  return apiFetch<VaultManifest>(`/api/vaults/${vaultId}/manifest`);
+}
+
+/** Fetch the raw text content of a vault file. */
+export async function getFileText(vaultId: string, path: string): Promise<string> {
+  const res = await fetch(
+    `/api/vaults/${vaultId}/files/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
+    { credentials: "include" }
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+/** Return the URL for fetching a vault file (for use in <img> etc.). */
+export function fileUrl(vaultId: string, path: string): string {
+  return `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
+}

@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import AuthPage from "./pages/AuthPage";
 import VaultListPage from "./pages/VaultListPage";
+import VaultBrowserPage from "./pages/VaultBrowserPage";
 
 export default function App() {
   const { user, loading, error, signIn, signUp, signOut } = useAuth();
@@ -39,8 +40,8 @@ export default function App() {
         path="/"
         element={<VaultListPage user={user} onSignOut={signOut} />}
       />
-      {/* Vault routes — populated in Slice 02+ */}
-      <Route path="/vault/:id/*" element={<div style={{ padding: "2rem" }}>Vault browser coming in Slice 02</div>} />
+      {/* Vault browser — Slice 02 */}
+      <Route path="/vault/:id/*" element={<VaultBrowserPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

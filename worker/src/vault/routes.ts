@@ -1,8 +1,27 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
+import { isVaultInternal } from "./path";
+import { contentKey } from "./manifest";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
+
+// ── Helper: resolve vault and verify ownership ─────────────────────────────
+
+async function resolveVault(
+  db: D1Database,
+  vaultId: string,
+  userId: string
+): Promise<{ id: string; name: string; createdAt: string } | null> {
+  return db
+    .prepare(
+      `SELECT id, name, created_at AS createdAt FROM vaults WHERE id = ? AND owner_id = ?`
+    )
+    .bind(vaultId, userId)
+    .first<{ id: string; name: string; createdAt: string }>();
+}
+
+// ── Vault CRUD ─────────────────────────────────────────────────────────────
 
 /** POST /api/vaults — create a new empty Web Vault */
 vaultRoutes.post("/", requireSession, async (c) => {
@@ -50,14 +69,76 @@ vaultRoutes.get("/:id", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await c.env.DB.prepare(
-    `SELECT id, name, created_at AS createdAt FROM vaults WHERE id = ? AND owner_id = ?`
-  )
-    .bind(id, session.userId)
-    .first<{ id: string; name: string; createdAt: string }>();
-
+  const vault = await resolveVault(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
   return c.json(vault);
+});
+
+// ── Manifest ───────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/vaults/:id/manifest
+ * Returns the latest-content manifest for the vault.
+ */
+vaultRoutes.get("/:id/manifest", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const manifest = await stub.getManifest(id);
+
+  return c.json(manifest);
+});
+
+// ── File content ───────────────────────────────────────────────────────────
+
+/**
+ * GET /api/vaults/:id/files/*
+ * Stream a vault content file from R2.
+ * Path is everything after `/files/`, e.g. `notes/hello.md`.
+ *
+ * Returns the file with appropriate Content-Type, or 404 if not in manifest.
+ * Vault Internals are blocked even if somehow stored in R2.
+ */
+vaultRoutes.get("/:id/files/*", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  // Extract path after /files/
+  const url = new URL(c.req.url);
+  const prefix = `/api/vaults/${id}/files/`;
+  const filePath = decodeURIComponent(url.pathname.slice(prefix.length));
+
+  if (!filePath) return c.json({ error: "Path required" }, 400);
+
+  // Block vault internals
+  if (isVaultInternal(filePath)) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
+  // Verify vault ownership
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  // Fetch from R2
+  const r2Key = contentKey(id, filePath);
+  const obj = await c.env.VAULT_BUCKET.get(r2Key);
+  if (!obj) return c.json({ error: "Not found" }, 404);
+
+  const contentType =
+    obj.httpMetadata?.contentType ?? "application/octet-stream";
+
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "private, max-age=30",
+      "Content-Length": String(obj.size),
+    },
+  });
 });
 
 export { vaultRoutes };
