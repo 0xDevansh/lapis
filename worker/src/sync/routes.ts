@@ -1,5 +1,5 @@
 /**
- * Plugin sync API — Slices 09 & 11.
+ * Plugin sync API — Slices 09, 11 & 12.
  *
  * These routes are authenticated with a device sync token (`requireDevice`).
  * They provide the server side of the two-way sync protocol used by the
@@ -9,12 +9,13 @@
  * Vault Internals and OS junk are blocked on inbound writes.
  *
  * Routes:
- *   GET  /api/sync/:vaultId/manifest            — pull full manifest (for diff/scan)
+ *   GET  /api/sync/:vaultId/manifest            — pull full manifest (for diff/scan & reconnect recovery)
  *   GET  /api/sync/:vaultId/files/*             — pull a single file's content
  *   PUT  /api/sync/:vaultId/files/*             — push whole-object (binary or new text)
  *   POST /api/sync/:vaultId/files/{path}/patch  — push text patch (unified diff)
  *   PATCH  /api/sync/:vaultId/files/*           — rename/move
  *   DELETE /api/sync/:vaultId/files/*           — delete
+ *   POST /api/sync/:vaultId/batch               — replay ordered journal ops (Slice 12)
  *
  * Slice 11 additions:
  *   PUT  — stale whole-object uploads create a Conflict Note instead of 409.
@@ -22,6 +23,12 @@
  *          Clients may include `clientContent` (and optionally `baseContent`) in the
  *          POST body to enable proper merge3. Without `clientContent`, a conflict note
  *          is created directly.
+ *
+ * Slice 12 additions:
+ *   POST /api/sync/:vaultId/batch — applies an ordered array of PendingOps from the
+ *   plugin's local journal. Each op is applied sequentially using the same merge/conflict
+ *   logic as individual endpoints. Returns per-op results so the plugin can update its
+ *   journal state. Provides atomic ordering guarantees within the DO's single-threaded model.
  */
 
 import { Hono } from "hono";
@@ -30,6 +37,7 @@ import { requireDevice } from "../middleware/syncAuth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "../vault/path";
 import { contentKey } from "../vault/manifest";
 import { indexFile, removeFromIndex, renameInIndex } from "../search/indexer";
+import type { BatchSyncRequest, BatchSyncResponse, BatchOpResult } from "./journal";
 
 const syncRoutes = new Hono<{ Bindings: Env }>();
 
@@ -396,6 +404,217 @@ syncRoutes.delete("/:vaultId/files/*", requireDevice, async (c) => {
     const err = e as { status?: number; message?: string };
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
   }
+});
+
+// ── POST /api/sync/:vaultId/batch ─────────────────────────────────────────
+// Replay an ordered list of pending journal operations from a Local Vault.
+//
+// Body: { ops: PendingOp[] }  (see sync/journal.ts for PendingOp types)
+//
+// Each op is applied sequentially using the same merge/conflict logic as the
+// individual endpoints. The response contains one BatchOpResult per op.
+// The plugin uses this to update its local journal after reconnect.
+//
+// Idempotency: the DO's single-threaded model serialises all ops within the
+// batch. Cross-request ordering is the caller's responsibility.
+
+syncRoutes.post("/:vaultId/batch", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+
+  if (device.vaultId !== vaultId) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  let body: BatchSyncRequest;
+  try {
+    body = await c.req.json<BatchSyncRequest>();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!Array.isArray(body.ops)) {
+    return c.json({ error: "ops must be an array" }, 400);
+  }
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(vaultId);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const results: BatchOpResult[] = [];
+
+  for (const op of body.ops) {
+    const path = op.op === "rename" ? op.oldPath : op.path;
+
+    try {
+      if (op.op === "put") {
+        // Decode base64 content
+        let bodyBytes: ArrayBuffer;
+        try {
+          const bin = atob(op.contentBase64);
+          bodyBytes = new Uint8Array(bin.length).map((_, i) => bin.charCodeAt(i)).buffer;
+        } catch {
+          results.push({ op: "put", path, status: "error", error: "Invalid base64 content" });
+          continue;
+        }
+
+        if (!isValidVaultPath(path)) {
+          results.push({ op: "put", path, status: "error", error: "Invalid path" });
+          continue;
+        }
+        if (isVaultInternal(path)) {
+          results.push({ op: "put", path, status: "error", error: "Vault internals not accepted" });
+          continue;
+        }
+        if (isOsJunk(path)) {
+          results.push({ op: "put", path, status: "error", error: "OS junk not accepted" });
+          continue;
+        }
+
+        try {
+          const entry = await stub.syncPutFile(vaultId, path, bodyBytes, op.contentType, op.baseRevision);
+          // Index text files
+          if (op.contentType.startsWith("text/") || op.contentType === "application/json") {
+            try {
+              const text = new TextDecoder().decode(bodyBytes);
+              const manifest = await stub.getManifest(vaultId);
+              const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+              indexFile(c.env.DB, { vaultId, path, content: text, vaultPaths }).catch(() => {});
+            } catch { /* ignore */ }
+          }
+          results.push({ op: "put", path, status: "accepted", entry: entry as unknown as Record<string, unknown> });
+        } catch (e: unknown) {
+          const err = e as { status?: number; serverRevision?: number };
+          if (err.status === 409 && err.serverRevision !== undefined) {
+            // Stale → conflict note
+            const { conflictPath, entry } = await stub.syncConflictWholeObject(
+              vaultId, path, bodyBytes, op.contentType,
+              err.serverRevision, op.baseRevision, device.deviceName
+            );
+            results.push({ op: "put", path, status: "conflict", conflictPath, entry: entry as unknown as Record<string, unknown> });
+          } else {
+            const msg = (e as { message?: string }).message ?? "Failed";
+            results.push({ op: "put", path, status: "error", error: msg });
+          }
+        }
+
+      } else if (op.op === "patch") {
+        if (!isValidVaultPath(path)) {
+          results.push({ op: "patch", path, status: "error", error: "Invalid path" });
+          continue;
+        }
+        if (isVaultInternal(path)) {
+          results.push({ op: "patch", path, status: "error", error: "Vault internals not accepted" });
+          continue;
+        }
+
+        try {
+          const entry = await stub.syncApplyPatch(vaultId, path, op.patch, op.baseRevision);
+          // Index after patch
+          try {
+            const r2Key = contentKey(vaultId, path);
+            const obj = await c.env.VAULT_BUCKET.get(r2Key);
+            if (obj) {
+              const text = await obj.text();
+              const manifest = await stub.getManifest(vaultId);
+              const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+              indexFile(c.env.DB, { vaultId, path, content: text, vaultPaths }).catch(() => {});
+            }
+          } catch { /* ignore */ }
+          results.push({ op: "patch", path, status: "accepted", entry: entry as unknown as Record<string, unknown> });
+        } catch (e: unknown) {
+          const err = e as { status?: number; serverRevision?: number };
+          if (err.status === 409 && err.serverRevision !== undefined) {
+            // Stale patch → attempt merge3 if clientContent provided
+            const mergeResult = await stub.syncMergePatch(
+              vaultId, path, op.patch,
+              err.serverRevision, op.baseRevision,
+              device.deviceName,
+              op.clientContent,
+              op.baseContent
+            );
+            if (mergeResult.kind === "merged") {
+              // Index the merged result
+              try {
+                const r2Key = contentKey(vaultId, path);
+                const obj = await c.env.VAULT_BUCKET.get(r2Key);
+                if (obj) {
+                  const text = await obj.text();
+                  const manifest = await stub.getManifest(vaultId);
+                  const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+                  indexFile(c.env.DB, { vaultId, path, content: text, vaultPaths }).catch(() => {});
+                }
+              } catch { /* ignore */ }
+              results.push({ op: "patch", path, status: "merged", entry: mergeResult.entry as unknown as Record<string, unknown> });
+            } else {
+              // Index the conflict note
+              try {
+                const manifest = await stub.getManifest(vaultId);
+                const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+                const obj = await c.env.VAULT_BUCKET.get(mergeResult.entry.r2Key);
+                if (obj) {
+                  const text = await obj.text();
+                  indexFile(c.env.DB, { vaultId, path: mergeResult.conflictPath, content: text, vaultPaths }).catch(() => {});
+                }
+              } catch { /* ignore */ }
+              results.push({ op: "patch", path, status: "conflict", conflictPath: mergeResult.conflictPath, entry: mergeResult.entry as unknown as Record<string, unknown> });
+            }
+          } else {
+            const msg = (e as { message?: string }).message ?? "Failed";
+            results.push({ op: "patch", path, status: "error", error: msg });
+          }
+        }
+
+      } else if (op.op === "rename") {
+        if (!isValidVaultPath(op.oldPath) || !isValidVaultPath(op.newPath)) {
+          results.push({ op: "rename", path: op.oldPath, status: "error", error: "Invalid path" });
+          continue;
+        }
+
+        try {
+          const entry = await stub.syncRenameFile(vaultId, op.oldPath, op.newPath);
+          // Update search index
+          let newContent: string | undefined;
+          if (entry.contentType.startsWith("text/") || entry.contentType === "application/json") {
+            try {
+              const r2Key = contentKey(vaultId, op.newPath);
+              const obj = await c.env.VAULT_BUCKET.get(r2Key);
+              if (obj) newContent = await obj.text();
+            } catch { /* ignore */ }
+          }
+          const manifest = await stub.getManifest(vaultId);
+          const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+          renameInIndex(c.env.DB, vaultId, op.oldPath, op.newPath, newContent, vaultPaths).catch(() => {});
+          results.push({ op: "rename", path: op.oldPath, status: "accepted", entry: entry as unknown as Record<string, unknown> });
+        } catch (e: unknown) {
+          const msg = (e as { message?: string }).message ?? "Failed";
+          results.push({ op: "rename", path: op.oldPath, status: "error", error: msg });
+        }
+
+      } else if (op.op === "delete") {
+        if (!isValidVaultPath(path)) {
+          results.push({ op: "delete", path, status: "error", error: "Invalid path" });
+          continue;
+        }
+
+        try {
+          await stub.syncDeleteFile(vaultId, path);
+          removeFromIndex(c.env.DB, vaultId, path).catch(() => {});
+          results.push({ op: "delete", path, status: "accepted" });
+        } catch (e: unknown) {
+          const msg = (e as { message?: string }).message ?? "Failed";
+          results.push({ op: "delete", path, status: "error", error: msg });
+        }
+
+      } else {
+        results.push({ op: (op as { op: string }).op as BatchOpResult["op"], path, status: "error", error: "Unknown op type" });
+      }
+    } catch (e: unknown) {
+      const msg = (e as { message?: string }).message ?? "Unexpected error";
+      results.push({ op: op.op as BatchOpResult["op"], path, status: "error", error: msg });
+    }
+  }
+
+  const response: BatchSyncResponse = { results };
+  return c.json(response, 200);
 });
 
 export { syncRoutes };
