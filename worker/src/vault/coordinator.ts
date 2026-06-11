@@ -7,6 +7,7 @@ import {
   hasCaseDuplicate,
   manifestKey,
   contentKey,
+  isAncestorPath,
 } from "./manifest";
 import { isValidVaultPath, isVaultInternal } from "./path";
 
@@ -149,6 +150,77 @@ export class VaultCoordinator extends DurableObject<Env> {
     await this.writeManifest(manifest);
 
     return entry;
+  }
+
+  /**
+   * Rename (or move) a file — copy R2 object to new key, update manifest,
+   * delete old R2 object. Atomic within the DO.
+   *
+   * Throws 400 if either path is invalid, 404 if source not found,
+   * 409 if destination has a case duplicate.
+   */
+  async renameFile(
+    vaultId: string,
+    oldPath: string,
+    newPath: string
+  ): Promise<ManifestEntry> {
+    if (!isValidVaultPath(oldPath) || !isValidVaultPath(newPath)) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
+    if (isVaultInternal(newPath)) {
+      throw Object.assign(new Error("Cannot move to vault internals"), { status: 400 });
+    }
+    if (oldPath === newPath) {
+      throw Object.assign(new Error("Source and destination are the same"), { status: 400 });
+    }
+    if (isAncestorPath(oldPath, newPath)) {
+      throw Object.assign(new Error("Cannot move a folder into itself"), { status: 400 });
+    }
+
+    const manifest = await this.readManifest(vaultId);
+    const oldEntry = manifest.entries[oldPath.toLowerCase()];
+    if (!oldEntry) {
+      throw Object.assign(new Error("Source not found"), { status: 404 });
+    }
+
+    // Check case-duplicate at destination (excluding the existing source entry)
+    if (hasCaseDuplicate(manifest, newPath, oldPath)) {
+      throw Object.assign(
+        new Error("Case conflict at destination"),
+        { status: 409 }
+      );
+    }
+
+    // Copy R2 object
+    const srcKey = contentKey(vaultId, oldPath);
+    const destKey = contentKey(vaultId, newPath);
+    const obj = await this.env.VAULT_BUCKET.get(srcKey);
+    if (!obj) {
+      // R2 and manifest are out of sync — clean up and report 404
+      delete manifest.entries[oldPath.toLowerCase()];
+      await this.writeManifest(manifest);
+      throw Object.assign(new Error("Source not found in storage"), { status: 404 });
+    }
+
+    await this.env.VAULT_BUCKET.put(destKey, await obj.arrayBuffer(), {
+      httpMetadata: { contentType: oldEntry.contentType },
+    });
+
+    // Update manifest
+    const newEntry: ManifestEntry = {
+      ...oldEntry,
+      path: newPath,
+      r2Key: destKey,
+      updatedAt: new Date().toISOString(),
+    };
+    manifest.entries[newPath.toLowerCase()] = newEntry;
+    delete manifest.entries[oldPath.toLowerCase()];
+    await this.writeManifest(manifest);
+
+    // Delete old R2 object
+    await this.env.VAULT_BUCKET.delete(srcKey);
+
+    return newEntry;
   }
 
   /**

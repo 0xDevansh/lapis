@@ -69,3 +69,13 @@ export function manifestKey(vaultId: string): string {
 export function contentKey(vaultId: string, path: string): string {
   return `${vaultId}/${path}`;
 }
+
+/**
+ * Return true if `path` would be an ancestor of `descendant`.
+ * Used to prevent a folder rename that would overwrite its own children.
+ */
+export function isAncestorPath(ancestor: string, descendant: string): boolean {
+  return (
+    descendant.toLowerCase().startsWith(ancestor.toLowerCase() + "/")
+  );
+}

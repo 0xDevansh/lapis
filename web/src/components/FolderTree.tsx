@@ -64,6 +64,8 @@ interface FolderTreeProps {
   nodes: TreeNode[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onRename?: (path: string) => void;
+  onDelete?: (path: string) => void;
   depth?: number;
 }
 
@@ -71,6 +73,8 @@ export function FolderTree({
   nodes,
   selectedPath,
   onSelect,
+  onRename,
+  onDelete,
   depth = 0,
 }: FolderTreeProps) {
   return (
@@ -82,6 +86,8 @@ export function FolderTree({
             folder={node}
             selectedPath={selectedPath}
             onSelect={onSelect}
+            onRename={onRename}
+            onDelete={onDelete}
             depth={depth}
           />
         ) : (
@@ -90,6 +96,8 @@ export function FolderTree({
             file={node}
             selected={selectedPath === node.path}
             onSelect={() => onSelect(node.path)}
+            onRename={onRename}
+            onDelete={onDelete}
           />
         )
       )}
@@ -101,11 +109,15 @@ function FolderItem({
   folder,
   selectedPath,
   onSelect,
+  onRename,
+  onDelete,
   depth,
 }: {
   folder: TreeFolder;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onRename?: (path: string) => void;
+  onDelete?: (path: string) => void;
   depth: number;
 }) {
   const [open, setOpen] = useState(depth < 2); // auto-expand top two levels
@@ -125,6 +137,8 @@ function FolderItem({
           nodes={folder.children}
           selectedPath={selectedPath}
           onSelect={onSelect}
+          onRename={onRename}
+          onDelete={onDelete}
           depth={depth + 1}
         />
       )}
@@ -136,24 +150,66 @@ function FileItem({
   file,
   selected,
   onSelect,
+  onRename,
+  onDelete,
 }: {
   file: TreeFile;
   selected: boolean;
   onSelect: () => void;
+  onRename?: (path: string) => void;
+  onDelete?: (path: string) => void;
 }) {
+  const [hovered, setHovered] = useState(false);
+
   return (
-    <li style={styles.item}>
-      <button
+    <li
+      style={styles.item}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div
         style={{
-          ...styles.fileButton,
-          ...(selected ? styles.fileButtonSelected : {}),
+          ...styles.fileRow,
+          ...(selected ? styles.fileRowSelected : {}),
         }}
-        onClick={onSelect}
-        title={file.path}
       >
-        <span style={styles.fileIcon}>{fileIcon(file.name)}</span>
-        <span style={styles.fileName}>{file.name}</span>
-      </button>
+        <button
+          style={styles.fileButton}
+          onClick={onSelect}
+          title={file.path}
+        >
+          <span style={styles.fileIcon}>{fileIcon(file.name)}</span>
+          <span style={styles.fileName}>{file.name}</span>
+        </button>
+        {(hovered || selected) && (onRename || onDelete) && (
+          <div style={styles.fileItemActions}>
+            {onRename && (
+              <button
+                style={styles.fileActionBtn}
+                title="Rename"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRename(file.path);
+                }}
+              >
+                ✎
+              </button>
+            )}
+            {onDelete && (
+              <button
+                style={{ ...styles.fileActionBtn, color: "#c0392b" }}
+                title="Delete"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(file.path);
+                }}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </li>
   );
 }
@@ -204,11 +260,21 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
+  fileRow: {
+    display: "flex",
+    alignItems: "center",
+    borderRadius: 4,
+    overflow: "hidden",
+  },
+  fileRowSelected: {
+    background: "#ede8f8",
+  },
   fileButton: {
     display: "flex",
     alignItems: "center",
     gap: "0.3rem",
-    width: "100%",
+    flex: 1,
+    minWidth: 0,
     background: "none",
     border: "none",
     padding: "0.25rem 0.5rem",
@@ -216,11 +282,21 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "left",
     fontSize: "0.875rem",
     color: "#1a1a1a",
-    borderRadius: 4,
   },
-  fileButtonSelected: {
-    background: "#ede8f8",
-    color: "#7c5cbf",
+  fileItemActions: {
+    display: "flex",
+    flexShrink: 0,
+    paddingRight: "0.25rem",
+  },
+  fileActionBtn: {
+    background: "none",
+    border: "none",
+    cursor: "pointer",
+    padding: "0.15rem 0.3rem",
+    fontSize: "0.8rem",
+    color: "#6b6b6b",
+    borderRadius: 3,
+    lineHeight: 1,
   },
   fileIcon: {
     fontSize: "0.875rem",

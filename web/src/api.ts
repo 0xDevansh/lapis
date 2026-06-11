@@ -121,3 +121,71 @@ export async function getFileText(vaultId: string, path: string): Promise<string
 export function fileUrl(vaultId: string, path: string): string {
   return `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
+
+/** Create or replace a text file (Markdown, plain text). */
+export async function putTextFile(
+  vaultId: string,
+  path: string,
+  content: string
+): Promise<ManifestEntry> {
+  return apiFetch<ManifestEntry>(
+    `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    }
+  );
+}
+
+/** Upload a binary file (uses raw body, not JSON wrapper). */
+export async function uploadFile(
+  vaultId: string,
+  path: string,
+  file: File
+): Promise<ManifestEntry> {
+  const res = await fetch(
+    `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
+    {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    }
+  );
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch { /* ignore */ }
+    throw new Error(message);
+  }
+  return res.json() as Promise<ManifestEntry>;
+}
+
+/** Rename or move a file. */
+export async function renameFile(
+  vaultId: string,
+  oldPath: string,
+  newPath: string
+): Promise<ManifestEntry> {
+  return apiFetch<ManifestEntry>(
+    `/api/vaults/${vaultId}/files/${oldPath.split("/").map(encodeURIComponent).join("/")}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ newPath }),
+    }
+  );
+}
+
+/** Delete a file. */
+export async function deleteFile(
+  vaultId: string,
+  path: string
+): Promise<void> {
+  await apiFetch<unknown>(
+    `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
+    { method: "DELETE" }
+  );
+}

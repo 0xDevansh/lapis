@@ -80,3 +80,41 @@ export function validateVaultPath(path: string): void {
     throw Object.assign(new Error("Invalid path"), { status: 400 });
   }
 }
+
+/**
+ * OS junk / cache file names that should be silently ignored when
+ * accepting files through sync or import paths.
+ */
+const OS_JUNK_NAMES = new Set([
+  ".ds_store",
+  "thumbs.db",
+  "desktop.ini",
+  ".localized",
+  ".spotlight-v100",
+  ".trashes",
+  ".fseventsd",
+  ".documentrevisions-v100",
+  ".temporaryitems",
+]);
+
+const OS_JUNK_EXTENSIONS = new Set([".crdownload", ".part", ".tmp", ".swp", ".swo"]);
+
+/**
+ * Return true if the file at `path` should be silently dropped rather than
+ * stored as Vault Content. Checked on sync/import paths, not user-initiated writes.
+ */
+export function isOsJunk(path: string): boolean {
+  const lower = path.toLowerCase();
+  const name = lower.split("/").pop() ?? lower;
+
+  if (OS_JUNK_NAMES.has(name)) return true;
+  if (name.startsWith("._")) return true; // macOS resource fork shadows
+
+  const dotIdx = name.lastIndexOf(".");
+  if (dotIdx !== -1) {
+    const ext = name.slice(dotIdx);
+    if (OS_JUNK_EXTENSIONS.has(ext)) return true;
+  }
+
+  return false;
+}

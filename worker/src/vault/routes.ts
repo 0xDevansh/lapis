@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
-import { isVaultInternal } from "./path";
+import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
 import { contentKey } from "./manifest";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
@@ -140,5 +140,147 @@ vaultRoutes.get("/:id/files/*", requireSession, async (c) => {
     },
   });
 });
+
+// ── File mutations ─────────────────────────────────────────────────────────
+
+/**
+ * PUT /api/vaults/:id/files/*
+ * Create or replace a Vault Content file.
+ *
+ * For text files (Markdown, plain text): body is JSON `{ content: string }`.
+ * For binary/attachment uploads: body is raw bytes; caller must set Content-Type.
+ *
+ * OS junk paths are rejected with 400.
+ */
+vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const url = new URL(c.req.url);
+  const prefix = `/api/vaults/${id}/files/`;
+  const filePath = decodeURIComponent(url.pathname.slice(prefix.length));
+
+  if (!filePath) return c.json({ error: "Path required" }, 400);
+  if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
+  if (isVaultInternal(filePath)) return c.json({ error: "Cannot write to vault internals" }, 400);
+  if (isOsJunk(filePath)) return c.json({ error: "OS junk files are not accepted" }, 400);
+
+  const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
+
+  let body: ArrayBuffer;
+  if (contentType.includes("application/json")) {
+    const json = await c.req.json<{ content?: string }>();
+    const text = json.content ?? "";
+    body = new TextEncoder().encode(text).buffer as ArrayBuffer;
+  } else {
+    body = await c.req.arrayBuffer();
+  }
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+
+  // Determine the actual content type to store
+  const storageContentType = contentType.includes("application/json")
+    ? detectMimeFromPath(filePath)
+    : contentType.split(";")[0].trim();
+
+  try {
+    const entry = await stub.putFile(id, filePath, body, storageContentType);
+    return c.json(entry, 200);
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 409 | 500);
+  }
+});
+
+/**
+ * PATCH /api/vaults/:id/files/*
+ * Rename or move a file.
+ * Body: `{ newPath: string }`
+ */
+vaultRoutes.patch("/:id/files/*", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const url = new URL(c.req.url);
+  const prefix = `/api/vaults/${id}/files/`;
+  const oldPath = decodeURIComponent(url.pathname.slice(prefix.length));
+
+  if (!oldPath) return c.json({ error: "Path required" }, 400);
+
+  const body = await c.req.json<{ newPath?: string }>();
+  const newPath = (body.newPath ?? "").trim();
+  if (!newPath) return c.json({ error: "newPath is required" }, 400);
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+
+  try {
+    const entry = await stub.renameFile(id, oldPath, newPath);
+    return c.json(entry, 200);
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 404 | 409 | 500);
+  }
+});
+
+/**
+ * DELETE /api/vaults/:id/files/*
+ * Remove a file from R2 and the manifest.
+ */
+vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const url = new URL(c.req.url);
+  const prefix = `/api/vaults/${id}/files/`;
+  const filePath = decodeURIComponent(url.pathname.slice(prefix.length));
+
+  if (!filePath) return c.json({ error: "Path required" }, 400);
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+
+  try {
+    await stub.deleteFile(id, filePath);
+    return c.json({ ok: true });
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
+  }
+});
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function detectMimeFromPath(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    md: "text/markdown",
+    txt: "text/plain",
+    html: "text/html",
+    css: "text/css",
+    js: "text/javascript",
+    ts: "text/typescript",
+    json: "application/json",
+    xml: "application/xml",
+    svg: "image/svg+xml",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    pdf: "application/pdf",
+  };
+  return map[ext] ?? "application/octet-stream";
+}
 
 export { vaultRoutes };
