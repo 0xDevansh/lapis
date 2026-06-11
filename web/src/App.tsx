@@ -3,6 +3,7 @@ import { useAuth } from "./hooks/useAuth";
 import AuthPage from "./pages/AuthPage";
 import VaultListPage from "./pages/VaultListPage";
 import VaultBrowserPage from "./pages/VaultBrowserPage";
+import DevicesPage from "./pages/DevicesPage";
 
 export default function App() {
   const { user, loading, error, signIn, signUp, signOut } = useAuth();
@@ -42,6 +43,8 @@ export default function App() {
       />
       {/* Vault browser — Slice 02 */}
       <Route path="/vault/:id/*" element={<VaultBrowserPage />} />
+      {/* Device management — Slice 07 */}
+      <Route path="/vault/:id/devices" element={<DevicesPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

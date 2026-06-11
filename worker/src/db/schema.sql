@@ -51,3 +51,36 @@ CREATE TABLE IF NOT EXISTS note_tags (
 
 CREATE INDEX IF NOT EXISTS idx_note_tags_tag  ON note_tags (vault_id, tag);
 CREATE INDEX IF NOT EXISTS idx_note_tags_path ON note_tags (vault_id, note_path);
+
+-- ── Device-code plugin connection (Slice 07) ──────────────────────────────────
+
+-- Pending device-code flows (expire after 10 minutes).
+CREATE TABLE IF NOT EXISTS device_codes (
+  device_code     TEXT PRIMARY KEY,   -- opaque secret sent to plugin
+  user_code       TEXT NOT NULL,      -- short human-readable code shown in UI
+  vault_id        TEXT NOT NULL,
+  owner_id        TEXT NOT NULL,
+  device_name     TEXT NOT NULL,      -- label provided by the plugin
+  status          TEXT NOT NULL DEFAULT 'pending', -- pending | approved | denied
+  expires_at      TEXT NOT NULL,
+  created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_codes_user_code ON device_codes (vault_id, user_code);
+CREATE INDEX IF NOT EXISTS idx_device_codes_owner     ON device_codes (owner_id, status);
+
+-- Approved connected devices with revocable sync tokens.
+CREATE TABLE IF NOT EXISTS devices (
+  id                  TEXT PRIMARY KEY,     -- device UUID
+  vault_id            TEXT NOT NULL,
+  owner_id            TEXT NOT NULL,
+  device_name         TEXT NOT NULL,
+  sync_token          TEXT NOT NULL UNIQUE, -- Bearer token used by the plugin
+  receive_internals   INTEGER NOT NULL DEFAULT 0, -- 0 = false, 1 = true
+  revoked             INTEGER NOT NULL DEFAULT 0,
+  created_at          TEXT NOT NULL,
+  last_seen_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_devices_vault  ON devices (vault_id, revoked);
+CREATE INDEX IF NOT EXISTS idx_devices_token  ON devices (sync_token);

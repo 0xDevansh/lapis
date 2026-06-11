@@ -225,3 +225,96 @@ export interface TagResult {
 export async function getVaultTags(vaultId: string): Promise<TagResult[]> {
   return apiFetch<TagResult[]>(`/api/vaults/${vaultId}/tags`);
 }
+
+// ── Device-code plugin connection (Slice 07) ──────────────────────────────────
+
+export interface DeviceCodeResponse {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+}
+
+export async function requestDeviceCode(
+  vaultId: string,
+  deviceName: string
+): Promise<DeviceCodeResponse> {
+  return apiFetch<DeviceCodeResponse>("/api/device-auth/request", {
+    method: "POST",
+    body: JSON.stringify({ vaultId, deviceName }),
+  });
+}
+
+export interface DeviceTokenResponse {
+  status?: "pending";
+  token?: string;
+  error?: string;
+}
+
+/** Poll for device approval. Returns token when approved. */
+export async function pollDeviceToken(
+  deviceCode: string
+): Promise<DeviceTokenResponse> {
+  const res = await fetch("/api/device-auth/token", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceCode }),
+  });
+  return res.json() as Promise<DeviceTokenResponse>;
+}
+
+export interface PendingDevice {
+  userCode: string;
+  deviceName: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export async function getPendingDevices(vaultId: string): Promise<PendingDevice[]> {
+  return apiFetch<PendingDevice[]>(`/api/vaults/${vaultId}/devices/pending`);
+}
+
+export async function approveDevice(vaultId: string, userCode: string): Promise<void> {
+  await apiFetch<unknown>(`/api/vaults/${vaultId}/devices/approve`, {
+    method: "POST",
+    body: JSON.stringify({ userCode }),
+  });
+}
+
+export async function denyDevice(vaultId: string, userCode: string): Promise<void> {
+  await apiFetch<unknown>(`/api/vaults/${vaultId}/devices/deny`, {
+    method: "POST",
+    body: JSON.stringify({ userCode }),
+  });
+}
+
+export interface Device {
+  id: string;
+  deviceName: string;
+  receiveInternals: boolean;
+  revoked: boolean;
+  createdAt: string;
+  lastSeenAt: string | null;
+}
+
+export async function listDevices(vaultId: string): Promise<Device[]> {
+  return apiFetch<Device[]>(`/api/vaults/${vaultId}/devices`);
+}
+
+export async function revokeDevice(vaultId: string, deviceId: string): Promise<void> {
+  await apiFetch<unknown>(`/api/vaults/${vaultId}/devices/${deviceId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function updateDevice(
+  vaultId: string,
+  deviceId: string,
+  updates: { receiveInternals: boolean }
+): Promise<void> {
+  await apiFetch<unknown>(`/api/vaults/${vaultId}/devices/${deviceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+}

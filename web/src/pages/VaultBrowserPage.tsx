@@ -224,9 +224,16 @@ export default function VaultBrowserPage() {
       {/* Sidebar */}
       <aside style={styles.sidebar}>
         <div style={styles.sidebarHeader}>
-          <Link to="/" style={styles.backLink}>
-            ← Vaults
-          </Link>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <Link to="/" style={styles.backLink}>
+              ← Vaults
+            </Link>
+            {vaultId && (
+              <Link to={`/vault/${vaultId}/devices`} style={styles.devicesLink}>
+                Devices
+              </Link>
+            )}
+          </div>
           <span style={styles.vaultName}>{vault?.name ?? "…"}</span>
         </div>
 
@@ -619,6 +626,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#6b6b6b",
     marginBottom: "0.3rem",
     textDecoration: "none",
+  },
+  devicesLink: {
+    fontSize: "0.75rem",
+    color: "#7c5cbf",
+    textDecoration: "none",
+    marginBottom: "0.3rem",
   },
   vaultName: {
     fontWeight: 700,
