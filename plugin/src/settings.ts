@@ -14,6 +14,7 @@ export function normalizeSettings(data: unknown): LapisSettings {
     deviceId: partial.deviceId ?? "",
     deviceName: partial.deviceName ?? defaultDeviceName(),
     receiveInternals: partial.receiveInternals ?? false,
+    debugLogging: partial.debugLogging ?? false,
     lastConnectedAt: partial.lastConnectedAt ?? null,
   };
 }
@@ -78,6 +79,18 @@ export class LapisSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.receiveInternals)
           .setDisabled(!this.plugin.settings.syncToken)
           .onChange(async (value) => this.plugin.setReceiveInternals(value))
+      );
+
+    new Setting(containerEl)
+      .setName("Debug logging")
+      .setDesc("Log watcher and sync diagnostics to the Obsidian developer console.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.debugLogging)
+          .onChange(async (value) => {
+            this.plugin.settings.debugLogging = value;
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)

@@ -99,6 +99,12 @@ export interface ManifestEntry {
   revision: number;
 }
 
+export interface ConflictResponse {
+  conflict: true;
+  conflictPath: string;
+  entry: ManifestEntry;
+}
+
 export interface VaultManifest {
   vaultId: string;
   updatedAt: string;
@@ -128,14 +134,18 @@ export function fileUrl(vaultId: string, path: string): string {
 export async function putTextFile(
   vaultId: string,
   path: string,
-  content: string
-): Promise<ManifestEntry> {
-  return apiFetch<ManifestEntry>(
+  content: string,
+  options?: { baseRevision?: number; baseContent?: string }
+): Promise<ManifestEntry | ConflictResponse> {
+  return apiFetch<ManifestEntry | ConflictResponse>(
     `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
     {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(options?.baseRevision !== undefined ? { "X-Base-Revision": String(options.baseRevision) } : {}),
+      },
+      body: JSON.stringify({ content, baseContent: options?.baseContent }),
     }
   );
 }

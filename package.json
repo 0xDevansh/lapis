@@ -9,6 +9,8 @@
     "migrate": "pnpm --filter worker run migrate",
     "migrate:remote": "pnpm --filter worker run migrate:remote",
     "plugin:build": "pnpm --filter plugin run build",
+    "plugin:copy": "bash scripts/copy-plugin.sh",
+    "plugin:install": "pnpm plugin:build && pnpm plugin:copy",
     "plugin:dev": "pnpm --filter plugin run dev",
     "test": "pnpm -r run test"
   },

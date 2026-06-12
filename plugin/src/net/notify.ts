@@ -41,7 +41,7 @@ export class NotifyClient {
       }
     };
 
-    socket.onerror = () => this.reconnect();
+    socket.onerror = () => socket.close();
     socket.onclose = () => this.reconnect();
   }
 

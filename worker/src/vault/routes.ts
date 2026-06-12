@@ -171,11 +171,19 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
   if (isOsJunk(filePath)) return c.json({ error: "OS junk files are not accepted" }, 400);
 
   const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
+  const baseRevisionHeader = c.req.header("X-Base-Revision");
+  const baseRevision = baseRevisionHeader === undefined ? undefined : Number(baseRevisionHeader);
+  if (baseRevisionHeader !== undefined && !Number.isInteger(baseRevision)) {
+    return c.json({ error: "Invalid base revision" }, 400);
+  }
 
   let body: ArrayBuffer;
+  let baseContent: string | undefined;
+  let text: string | undefined;
   if (contentType.includes("application/json")) {
-    const json = await c.req.json<{ content?: string }>();
-    const text = json.content ?? "";
+    const json = await c.req.json<{ content?: string; baseContent?: string }>();
+    text = json.content ?? "";
+    baseContent = json.baseContent;
     body = new TextEncoder().encode(text).buffer as ArrayBuffer;
   } else {
     body = await c.req.arrayBuffer();
@@ -190,15 +198,40 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
     : contentType.split(";")[0].trim();
 
   try {
-    const entry = await stub.putFile(id, filePath, body, storageContentType);
+    let entry;
+    try {
+      entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision);
+    } catch (e: unknown) {
+      const err = e as { status?: number; serverRevision?: number };
+      if (err.status !== 409 || baseRevision === undefined || err.serverRevision === undefined) {
+        throw e;
+      }
+
+      if (text !== undefined && baseContent !== undefined) {
+        const result = await stub.syncMergePatch(id, filePath, "", err.serverRevision, baseRevision, `web:${session.sessionId}`, text, baseContent);
+        if (result.kind === "conflict") {
+          return c.json({ conflict: true, conflictPath: result.conflictPath, entry: result.entry }, 202);
+        }
+        entry = result.entry;
+      } else {
+        const result = await stub.syncConflictWholeObject(id, filePath, body, storageContentType, err.serverRevision, baseRevision, `web:${session.sessionId}`);
+        return c.json({ conflict: true, conflictPath: result.conflictPath, entry: result.entry }, 202);
+      }
+    }
 
     // Update search index (fire-and-forget; don't fail the request if indexing fails)
-    const textContent = storageContentType.startsWith("text/") || storageContentType === "application/json"
-      ? new TextDecoder().decode(body)
+    let textContent = storageContentType.startsWith("text/") || storageContentType === "application/json"
+      ? text ?? new TextDecoder().decode(body)
       : undefined;
+    if (entry.path !== filePath || entry.revision !== (baseRevision ?? -1) + 1) {
+      const obj = await c.env.VAULT_BUCKET.get(entry.r2Key);
+      if (obj && (entry.contentType.startsWith("text/") || entry.contentType === "application/json")) {
+        textContent = await obj.text();
+      }
+    }
     const manifest = await stub.getManifest(id);
     const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
-    indexFile(c.env.DB, { vaultId: id, path: filePath, content: textContent, vaultPaths }).catch(() => {});
+    indexFile(c.env.DB, { vaultId: id, path: entry.path, content: textContent, vaultPaths }).catch(() => {});
 
     return c.json(entry, 200);
   } catch (e: unknown) {

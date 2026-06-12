@@ -161,7 +161,7 @@ interface PendingDevice {
  * GET /api/vaults/:id/devices/pending
  * Returns device-code flows awaiting approval for this vault.
  */
-deviceRoutes.get("/:id/devices/pending", requireSession, async (c) => {
+deviceRoutes.get("/vaults/:id/devices/pending", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
@@ -188,7 +188,7 @@ deviceRoutes.get("/:id/devices/pending", requireSession, async (c) => {
  * Body: { userCode: string }
  * Approves a pending device-code flow.
  */
-deviceRoutes.post("/:id/devices/approve", requireSession, async (c) => {
+deviceRoutes.post("/vaults/:id/devices/approve", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
@@ -223,7 +223,7 @@ deviceRoutes.post("/:id/devices/approve", requireSession, async (c) => {
  * Body: { userCode: string }
  * Denies a pending device-code flow.
  */
-deviceRoutes.post("/:id/devices/deny", requireSession, async (c) => {
+deviceRoutes.post("/vaults/:id/devices/deny", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
@@ -257,7 +257,7 @@ export interface Device {
  * GET /api/vaults/:id/devices
  * Returns all connected (non-revoked) devices for the vault.
  */
-deviceRoutes.get("/:id/devices", requireSession, async (c) => {
+deviceRoutes.get("/vaults/:id/devices", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
@@ -289,7 +289,7 @@ deviceRoutes.get("/:id/devices", requireSession, async (c) => {
  * DELETE /api/vaults/:id/devices/:deviceId
  * Revoke a device. Revoked devices can no longer sync.
  */
-deviceRoutes.delete("/:id/devices/:deviceId", requireSession, async (c) => {
+deviceRoutes.delete("/vaults/:id/devices/:deviceId", requireSession, async (c) => {
   const session = c.get("session");
   const { id, deviceId } = c.req.param();
 
@@ -308,7 +308,7 @@ deviceRoutes.delete("/:id/devices/:deviceId", requireSession, async (c) => {
  * Body: { receiveInternals: boolean }
  * Toggle whether this device should receive Vault Internals updates.
  */
-deviceRoutes.patch("/:id/devices/:deviceId", requireSession, async (c) => {
+deviceRoutes.patch("/vaults/:id/devices/:deviceId", requireSession, async (c) => {
   const session = c.get("session");
   const { id, deviceId } = c.req.param();
 

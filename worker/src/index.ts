@@ -37,6 +37,15 @@ app.route("/api/sync", syncRoutes);
 app.route("/api", notifyRoutes);
 
 // ── SPA fallback ─────────────────────────────────────────────────────────────
-app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]));
+app.get("*", async (c) => {
+  const assetResponse = await c.env.ASSETS.fetch(c.req.raw as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
+  if (assetResponse.status !== 404) {
+    return assetResponse;
+  }
+
+  const url = new URL(c.req.url);
+  url.pathname = "/index.html";
+  return c.env.ASSETS.fetch(new Request(url, c.req.raw) as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
+});
 
 export default app;

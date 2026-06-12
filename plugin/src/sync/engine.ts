@@ -14,6 +14,18 @@ interface LocalFile {
   hash: string;
 }
 
+export interface SyncDiagnostics {
+  connected: boolean;
+  vaultId: string;
+  journalPresent: boolean;
+  localFileCount: number;
+  serverFileCount: number | null;
+  journalFileCount: number;
+  pendingOpCount: number;
+  changedPaths: string[];
+  deletedPaths: string[];
+}
+
 export interface SyncEngineOptions {
   app: App;
   settings: LapisSettings;
@@ -88,6 +100,64 @@ export class SyncEngine {
     await this.pullChanged();
   }
 
+  async pushLocalChanges(): Promise<{ pushed: number; deleted: number }> {
+    if (!this.options.settings.syncToken) {
+      return { pushed: 0, deleted: 0 };
+    }
+
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const localFiles = await this.scanLocalFiles();
+    const localByPath = new Map(localFiles.map((file) => [lowerPath(file.path), file]));
+    let pushed = 0;
+    let deleted = 0;
+
+    for (const file of localFiles) {
+      if (journal.fileHashes[lowerPath(file.path)] !== file.hash) {
+        await this.pushPut(file.path);
+        pushed += 1;
+      }
+    }
+
+    for (const key of Object.keys(journal.fileRevisions)) {
+      if (!localByPath.has(key)) {
+        await this.pushDelete(key);
+        deleted += 1;
+      }
+    }
+
+    return { pushed, deleted };
+  }
+
+  async diagnostics(): Promise<SyncDiagnostics> {
+    const journal = this.options.getJournal();
+    const localFiles = await this.scanLocalFiles();
+    const localByPath = new Map(localFiles.map((file) => [lowerPath(file.path), file]));
+    const changedPaths = localFiles
+      .filter((file) => journal?.fileHashes[lowerPath(file.path)] !== file.hash)
+      .map((file) => file.path);
+    const deletedPaths = journal
+      ? Object.keys(journal.fileRevisions).filter((path) => !localByPath.has(path))
+      : [];
+
+    let serverFileCount: number | null = null;
+    if (this.options.settings.syncToken) {
+      const manifest = await this.client.getManifest(this.vaultId, this.token);
+      serverFileCount = Object.keys(manifest.entries).length;
+    }
+
+    return {
+      connected: Boolean(this.options.settings.syncToken),
+      vaultId: this.vaultId,
+      journalPresent: Boolean(journal),
+      localFileCount: localFiles.length,
+      serverFileCount,
+      journalFileCount: journal ? Object.keys(journal.fileRevisions).length : 0,
+      pendingOpCount: journal?.pendingOps.length ?? 0,
+      changedPaths,
+      deletedPaths,
+    };
+  }
+
   async pushPut(path: string): Promise<void> {
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
@@ -99,8 +169,14 @@ export class SyncEngine {
 
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
     const content = await this.vault.readBinary(abstractFile);
+    const hash = await sha256Hex(content);
+    const key = lowerPath(path);
+    if (journal.fileHashes[key] === hash) {
+      return;
+    }
+
     const contentType = contentTypeFromPath(path);
-    const baseRevision = journal.fileRevisions[lowerPath(path)] ?? -1;
+    const baseRevision = journal.fileRevisions[key] ?? -1;
 
     if (isTextContentType(contentType) && baseRevision >= 0) {
       const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
@@ -111,14 +187,14 @@ export class SyncEngine {
       if ("conflict" in result) {
         await this.pullEntry(result.entry, journal);
       } else {
-        setEntry(journal, result, await sha256Hex(content));
+        setEntry(journal, result, hash);
       }
     } else {
       const result = await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
       if ("conflict" in result) {
         await this.pullEntry(result.entry, journal);
       } else {
-        setEntry(journal, result, await sha256Hex(content));
+        setEntry(journal, result, hash);
       }
     }
 

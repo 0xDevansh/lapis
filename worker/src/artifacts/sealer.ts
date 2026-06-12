@@ -78,10 +78,12 @@ export async function ensureRepoAndToken(
     const tokenSecret = created.token.split("?expires=")[0];
     return { remote: created.remote, tokenSecret };
   } catch (err: unknown) {
-    // If repo already exists (ALREADY_EXISTS code), mint a write token instead
+    // If repo already exists, mint a write token instead. The Artifacts binding
+    // does not consistently expose a structured error code in local dev.
+    const message = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
     const isAlreadyExists =
       err instanceof Error &&
-      (err as Error & { code?: string }).code === "ALREADY_EXISTS";
+      ((err as Error & { code?: string }).code === "ALREADY_EXISTS" || message.includes("repo already exists") || message.includes("already exists"));
 
     if (!isAlreadyExists) throw err;
 

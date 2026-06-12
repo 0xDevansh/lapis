@@ -8,6 +8,8 @@ import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
 import { countConflicts, LapisStatusBar } from "./ui/status";
 
+const LOCAL_CHANGE_DEBOUNCE_MS = 5_000;
+
 export default class LapisPlugin extends Plugin {
   settings!: LapisSettings;
   journal: SyncJournal | null = null;
@@ -48,8 +50,15 @@ export default class LapisPlugin extends Plugin {
       callback: () => this.openConflictsFolder(),
     });
 
+    this.addCommand({
+      id: "show-sync-diagnostics",
+      name: "Show sync diagnostics",
+      callback: () => void this.showSyncDiagnostics(),
+    });
+
     this.addSettingTab(new LapisSettingTab(this.app, this));
     this.registerWatcher();
+    this.registerEditorChangeFallback();
     this.startNotify();
     this.registerInterval(window.setInterval(() => void this.pullChanged(), 5 * 60 * 1000));
     this.registerInterval(window.setInterval(() => this.reportOpenFile(), 2000));
@@ -145,6 +154,11 @@ export default class LapisPlugin extends Plugin {
   }
 
   async syncNow() {
+    if (!this.settings.syncToken) {
+      new Notice("Lapis: connect before syncing");
+      return;
+    }
+
     this.updateStatus("syncing");
     const previousSuppress = this.suppressWatcher;
     this.suppressWatcher = true;
@@ -158,7 +172,13 @@ export default class LapisPlugin extends Plugin {
     try {
       if (this.journal) {
         await engine.replayPending();
+        const { pushed, deleted } = await engine.pushLocalChanges();
         await engine.pullChanged();
+        if (pushed > 0 || deleted > 0) {
+          new Notice(`Lapis: pushed ${pushed} change${pushed === 1 ? "" : "s"}${deleted > 0 ? ` and ${deleted} delete${deleted === 1 ? "" : "s"}` : ""}`);
+        } else {
+          new Notice("Lapis: sync complete");
+        }
       } else {
         await engine.firstSync();
       }
@@ -188,6 +208,33 @@ export default class LapisPlugin extends Plugin {
     }
   }
 
+  private async showSyncDiagnostics() {
+    const engine = new SyncEngine({
+      app: this.app,
+      settings: this.settings,
+      client: new LapisClient(this.settings.serverUrl),
+      getJournal: () => this.journal,
+      setJournal: (journal) => this.saveJournal(journal),
+    });
+    try {
+      const diagnostics = await engine.diagnostics();
+      console.info("[lapis] sync diagnostics", diagnostics);
+      if (diagnostics.changedPaths.length > 0) {
+        console.info("[lapis] changed paths", diagnostics.changedPaths);
+      }
+      if (diagnostics.deletedPaths.length > 0) {
+        console.info("[lapis] deleted paths", diagnostics.deletedPaths);
+      }
+      new Notice(
+        `Lapis diagnostics: local ${diagnostics.localFileCount}, server ${diagnostics.serverFileCount ?? "?"}, changed ${diagnostics.changedPaths.length}, pending ${diagnostics.pendingOpCount}`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Diagnostics failed";
+      console.error("[lapis] sync diagnostics failed", error);
+      new Notice(`Lapis: ${message}`);
+    }
+  }
+
   private updateStatus(state: "idle" | "connecting" | "syncing" | "error" = "idle") {
     this.statusBar?.update(this.settings, state, this.conflictCount());
   }
@@ -206,9 +253,9 @@ export default class LapisPlugin extends Plugin {
       serverUrl: this.settings.serverUrl,
       vaultId: this.settings.vaultId,
       token: this.settings.syncToken,
-      onOpen: async (reconnected) => {
+      onOpen: (reconnected) => {
         this.updateStatus();
-        if (reconnected) await this.syncNow();
+        if (reconnected) this.debug("notify reconnected");
         this.reportOpenFile();
       },
       onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount()),
@@ -264,7 +311,7 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("create", (file) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
-          void this.runSync((engine) => engine.pushPut(file.path), false, (engine) => engine.queuePut(file.path));
+          this.scheduleLocalFlush(file.path, "watcher create");
         }
       })
     );
@@ -272,15 +319,7 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("modify", (file) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
-          const previous = this.modifyTimers.get(file.path);
-          if (previous) {
-            window.clearTimeout(previous);
-          }
-          const timer = window.setTimeout(() => {
-            this.modifyTimers.delete(file.path);
-            void this.runSync((engine) => engine.pushPut(file.path), false, (engine) => engine.queuePut(file.path));
-          }, 500);
-          this.modifyTimers.set(file.path, timer);
+          this.scheduleLocalFlush(file.path, "watcher modify");
         }
       })
     );
@@ -288,6 +327,7 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
+          this.debug("watcher rename", oldPath, "->", file.path);
           void this.runSync((engine) => engine.pushRename(oldPath, file.path), false, (engine) => engine.queueRename(oldPath, file.path));
         }
       })
@@ -296,10 +336,35 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("delete", (file) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
+          this.debug("watcher delete", file.path);
           void this.runSync((engine) => engine.pushDelete(file.path), false, (engine) => engine.queueDelete(file.path));
         }
       })
     );
+  }
+
+  private registerEditorChangeFallback() {
+    this.registerEvent(
+      this.app.workspace.on("editor-change", () => {
+        if (this.suppressWatcher) return;
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return;
+        this.scheduleLocalFlush(file.path, "editor change");
+      })
+    );
+  }
+
+  private scheduleLocalFlush(path: string, source: string) {
+    const previous = this.modifyTimers.get(path);
+    if (previous) {
+      window.clearTimeout(previous);
+    }
+    const timer = window.setTimeout(() => {
+      this.modifyTimers.delete(path);
+      this.debug(`${source} flush`, path);
+      void this.runSync((engine) => engine.pushPut(path), false, (engine) => engine.queuePut(path));
+    }, LOCAL_CHANGE_DEBOUNCE_MS);
+    this.modifyTimers.set(path, timer);
   }
 
   private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false, onFailure?: (engine: SyncEngine) => Promise<void>) {
@@ -334,9 +399,16 @@ export default class LapisPlugin extends Plugin {
       }
       this.updateStatus("error");
       const message = error instanceof Error ? error.message : "Sync failed";
+      console.error("[lapis] sync failed", error);
       new Notice(`Lapis: ${message}`);
     } finally {
       this.suppressWatcher = previousSuppress;
+    }
+  }
+
+  private debug(...args: unknown[]) {
+    if (this.settings.debugLogging) {
+      console.info("[lapis]", ...args);
     }
   }
 

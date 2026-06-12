@@ -5,6 +5,7 @@ export interface LapisSettings {
   deviceId: string;
   deviceName: string;
   receiveInternals: boolean;
+  debugLogging: boolean;
   lastConnectedAt: string | null;
 }
 
@@ -119,6 +120,7 @@ export const DEFAULT_SETTINGS: LapisSettings = {
   deviceId: "",
   deviceName: "",
   receiveInternals: false,
+  debugLogging: false,
   lastConnectedAt: null,
 };
 

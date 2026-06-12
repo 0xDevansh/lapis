@@ -101,6 +101,25 @@ Then open `http://localhost:5173` and sign up.
 
 The Obsidian plugin lives in [`plugin/`](plugin/). See [`plugin/README.md`](plugin/README.md) for installation and quick-start instructions.
 
+### Dev Install
+
+Build the plugin and copy it into a development vault:
+
+```sh
+export VAULT_PATH="/path/to/dev-vault"
+pnpm plugin:install
+```
+
+Then reload Obsidian, enable **Lapis Sync**, set `http://localhost:8787` as the server URL, paste the Web Vault ID, and run **Lapis: Connect** from the command palette.
+
+During active plugin development, run:
+
+```sh
+pnpm plugin:dev
+```
+
+After each rebuild, run `pnpm plugin:copy` and reload the plugin in Obsidian.
+
 ## Project structure
 
 ```

@@ -13,22 +13,11 @@ Lapis Sync connects an Obsidian Local Vault to a self-hosted Lapis Web Vault, us
 1. Build the plugin from the repo root:
 
 ```sh
-pnpm plugin:build
+export VAULT_PATH="/path/to/vault"
+pnpm plugin:install
 ```
 
-2. Create the plugin directory in your Obsidian vault:
-
-```sh
-mkdir -p /path/to/vault/.obsidian/plugins/lapis-sync
-```
-
-3. Copy the release files:
-
-```sh
-cp plugin/main.js plugin/manifest.json plugin/styles.css /path/to/vault/.obsidian/plugins/lapis-sync/
-```
-
-4. Open Obsidian, enable community plugins, then enable **Lapis Sync**.
+2. Open Obsidian, enable community plugins, then enable **Lapis Sync**.
 
 ## Quick Start
 
@@ -44,4 +33,11 @@ cp plugin/main.js plugin/manifest.json plugin/styles.css /path/to/vault/.obsidia
 pnpm plugin:dev
 ```
 
-The plugin writes `main.js` at the plugin package root for manual Obsidian installation.
+The plugin writes `main.js` at the plugin package root for manual Obsidian installation. For a dev vault, copy the release files after each rebuild:
+
+```sh
+export VAULT_PATH="/path/to/dev-vault"
+pnpm plugin:copy
+```
+
+Reload Obsidian or disable/enable **Lapis Sync** to pick up the new `main.js`.

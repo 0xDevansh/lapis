@@ -15,10 +15,10 @@ import SnapshotsPanel from "../components/SnapshotsPanel";
 type FileViewState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "text"; content: string; path: string; contentType: string }
-  | { kind: "image"; path: string; contentType: string }
-  | { kind: "binary"; path: string; contentType: string; size: number }
-  | { kind: "editing"; content: string; path: string; saving: boolean }
+  | { kind: "text"; content: string; path: string; contentType: string; revision: number }
+  | { kind: "image"; path: string; contentType: string; revision: number }
+  | { kind: "binary"; path: string; contentType: string; size: number; revision: number }
+  | { kind: "editing"; content: string; path: string; saving: boolean; baseContent: string; baseRevision: number; contentType: string }
   | { kind: "error"; message: string };
 
 type Modal =
@@ -49,47 +49,31 @@ export default function VaultBrowserPage() {
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const uploadRef = useRef<HTMLInputElement>(null);
   const { theme, setTheme } = useTheme();
-
-  // ── Live notifications (Slice 10) ───────────────────────────────────────────
-
   const [dismissedWarning, setDismissedWarning] = useState(false);
-  // Stable ref to refreshManifest — updated after it's defined below
-  const refreshManifestRef = useRef<() => Promise<void>>(async () => {});
-
-  const { connected, presence, sameFileWarning } = useVaultNotify(
-    vaultId,
-    selectedPath,
-    {
-      onChange: useCallback(() => {
-        void refreshManifestRef.current();
-      }, []),
-      onReconnect: useCallback(() => {
-        void refreshManifestRef.current();
-      }, []),
-    }
-  );
-
-  // Reset dismissed state whenever a new warning arrives for a new path
-  useEffect(() => {
-    if (sameFileWarning) setDismissedWarning(false);
-  }, [sameFileWarning?.path]);
+  const selectedPathRef = useRef<string | null>(null);
+  const fileViewRef = useRef<FileViewState>({ kind: "idle" });
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
-  const refreshManifest = useCallback(async () => {
-    if (!vaultId) return;
+  const refreshManifest = useCallback(async (): Promise<api.VaultManifest | null> => {
+    if (!vaultId) return null;
     try {
       const m = await api.getManifest(vaultId);
       setManifest(m);
+      return m;
     } catch (e) {
       setManifestError((e as Error).message);
+      return null;
     }
   }, [vaultId]);
 
-  // Keep ref in sync with the latest refreshManifest
   useEffect(() => {
-    refreshManifestRef.current = refreshManifest;
-  }, [refreshManifest]);
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
+
+  useEffect(() => {
+    fileViewRef.current = fileView;
+  }, [fileView]);
 
   useEffect(() => {
     if (!vaultId) return;
@@ -99,19 +83,20 @@ export default function VaultBrowserPage() {
 
   // ── File opening ────────────────────────────────────────────────────────────
 
-  const openFile = useCallback(
-    async (path: string) => {
+  const loadFile = useCallback(
+    async (path: string, manifestOverride?: api.VaultManifest | null) => {
       if (!vaultId) return;
       setSelectedPath(path);
 
-      const entry = manifest?.entries[path.toLowerCase()];
+      const manifestForLookup = manifestOverride ?? manifest;
+      const entry = manifestForLookup?.entries[path.toLowerCase()];
       if (!entry) {
         setFileView({ kind: "error", message: "File not in manifest" });
         return;
       }
 
       if (isImageType(entry.contentType)) {
-        setFileView({ kind: "image", path, contentType: entry.contentType });
+        setFileView({ kind: "image", path, contentType: entry.contentType, revision: entry.revision });
         return;
       }
 
@@ -119,7 +104,7 @@ export default function VaultBrowserPage() {
         setFileView({ kind: "loading" });
         try {
           const content = await api.getFileText(vaultId, path);
-          setFileView({ kind: "text", content, path, contentType: entry.contentType });
+          setFileView({ kind: "text", content, path, contentType: entry.contentType, revision: entry.revision });
         } catch (e) {
           setFileView({ kind: "error", message: (e as Error).message });
         }
@@ -131,10 +116,57 @@ export default function VaultBrowserPage() {
         path,
         contentType: entry.contentType,
         size: entry.size,
+        revision: entry.revision,
       });
     },
     [vaultId, manifest]
   );
+
+  const openFile = loadFile;
+
+  const handleRemoteChange = useCallback(
+    async (msg: import("../hooks/useVaultNotify").ChangeNotification) => {
+      const nextManifest = await refreshManifest();
+      const currentPath = selectedPathRef.current;
+      if (!currentPath) return;
+
+      const currentKey = currentPath.toLowerCase();
+      if (msg.kind === "delete" && msg.path.toLowerCase() === currentKey) {
+        setSelectedPath(null);
+        setFileView({ kind: "idle" });
+        return;
+      }
+
+      if (msg.kind === "rename" && msg.path.toLowerCase() === currentKey) {
+        if (msg.newPath && fileViewRef.current.kind !== "editing") {
+          await loadFile(msg.newPath, nextManifest);
+        }
+        return;
+      }
+
+      if (msg.kind === "put" && msg.path.toLowerCase() === currentKey && fileViewRef.current.kind !== "editing") {
+        await loadFile(currentPath, nextManifest);
+      } else if (nextManifest && !nextManifest.entries[currentKey] && fileViewRef.current.kind !== "editing") {
+        setSelectedPath(null);
+        setFileView({ kind: "idle" });
+      }
+    },
+    [loadFile, refreshManifest]
+  );
+
+  const { connected, presence, sameFileWarning } = useVaultNotify(
+    vaultId,
+    selectedPath,
+    {
+      onChange: (msg) => void handleRemoteChange(msg),
+      onReconnect: () => void refreshManifest(),
+    }
+  );
+
+  // Reset dismissed state whenever a new warning arrives for a new path
+  useEffect(() => {
+    if (sameFileWarning) setDismissedWarning(false);
+  }, [sameFileWarning?.path]);
 
   // ── Create new note ─────────────────────────────────────────────────────────
 
@@ -163,13 +195,21 @@ export default function VaultBrowserPage() {
   async function handleSaveEdit(path: string, content: string) {
     if (!vaultId) return;
     if (fileView.kind !== "editing") return;
-    setFileView({ kind: "editing", path, content, saving: true });
+    setFileView({ ...fileView, path, content, saving: true });
     try {
-      await api.putTextFile(vaultId, path, content);
-      await refreshManifest();
-      setFileView({ kind: "text", content, path, contentType: "text/markdown" });
+      const result = await api.putTextFile(vaultId, path, content, {
+        baseRevision: fileView.baseRevision,
+        baseContent: fileView.baseContent,
+      });
+      const nextManifest = await refreshManifest();
+      if ("conflict" in result) {
+        alert(`A newer version exists. Lapis created a Conflict Note at ${result.conflictPath}.`);
+        await loadFile(result.conflictPath, nextManifest);
+        return;
+      }
+      setFileView({ kind: "text", content, path, contentType: result.contentType, revision: result.revision });
     } catch (e) {
-      setFileView({ kind: "editing", path, content, saving: false });
+      setFileView({ ...fileView, path, content, saving: false });
       alert((e as Error).message);
     }
   }
@@ -352,11 +392,30 @@ export default function VaultBrowserPage() {
           vaultId={vaultId ?? ""}
           vaultPaths={manifest ? Object.values(manifest.entries).map((e) => e.path) : []}
           onEdit={(path, content) =>
-            setFileView({ kind: "editing", path, content, saving: false })
+            setFileView((prev) => {
+              if (prev.kind === "editing" && prev.path === path) {
+                return { ...prev, content };
+              }
+              return {
+                kind: "editing",
+                path,
+                content,
+                saving: false,
+                baseContent: prev.kind === "text" && prev.path === path ? prev.content : content,
+                baseRevision: prev.kind === "text" && prev.path === path ? prev.revision : 0,
+                contentType: prev.kind === "text" && prev.path === path ? prev.contentType : "text/markdown",
+              };
+            })
           }
           onSave={handleSaveEdit}
           onCancelEdit={(path, content) =>
-            setFileView({ kind: "text", path, content, contentType: "text/markdown" })
+            setFileView((prev) => ({
+              kind: "text",
+              path,
+              content: prev.kind === "editing" && prev.path === path ? prev.baseContent : content,
+              contentType: prev.kind === "editing" && prev.path === path ? prev.contentType : "text/markdown",
+              revision: prev.kind === "editing" && prev.path === path ? prev.baseRevision : 0,
+            }))
           }
           onRename={openRenameModal}
           onDelete={openDeleteModal}
@@ -577,7 +636,7 @@ function FileView({ view, vaultId, vaultPaths, onEdit, onSave, onCancelEdit, onR
           </div>
         </div>
         <img
-          src={api.fileUrl(vaultId, view.path)}
+          src={`${api.fileUrl(vaultId, view.path)}?rev=${view.revision}`}
           alt={view.path}
           style={styles.image}
         />
@@ -603,7 +662,7 @@ function FileView({ view, vaultId, vaultPaths, onEdit, onSave, onCancelEdit, onR
           {view.contentType} · {formatBytes(view.size)}
         </p>
         <a
-          href={api.fileUrl(vaultId, view.path)}
+          href={`${api.fileUrl(vaultId, view.path)}?rev=${view.revision}`}
           download={view.path.split("/").pop()}
           style={styles.downloadLink}
         >
