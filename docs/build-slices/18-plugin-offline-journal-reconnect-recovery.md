@@ -36,14 +36,24 @@ When the device loses connectivity, the plugin queues all file operations in an 
 
 ## Acceptance criteria
 
-- [ ] Saving notes while offline appends `PendingOp`s to the journal and persists them to `data.json`.
-- [ ] After coming back online, all pending ops are replayed in order via the batch endpoint.
-- [ ] Notes saved offline appear in the Web Vault after reconnect.
-- [ ] Clean server merges during replay are accepted silently; unsafe merges create Conflict Notes.
-- [ ] After replay, a manifest pull catches any remote changes made while offline.
-- [ ] A corrupt or missing journal triggers a full reconcile on the next startup rather than crashing.
-- [ ] Rapid saves to the same file while offline produce a single `put` or `patch` op, not one per save.
-- [ ] Status bar shows `offline (N pending)` while offline and returns to `connected` after replay completes.
+- [x] Saving notes while offline appends `PendingOp`s to the journal and persists them to `data.json`.
+- [x] After coming back online, all pending ops are replayed in order via the batch endpoint.
+- [x] Notes saved offline appear in the Web Vault after reconnect.
+- [x] Clean server merges during replay are accepted silently; unsafe merges create Conflict Notes.
+- [x] After replay, a manifest pull catches any remote changes made while offline.
+- [x] A corrupt or missing journal triggers a full reconcile on the next startup rather than crashing.
+- [x] Rapid saves to the same file while offline produce a single `put` or `patch` op, not one per save.
+- [x] Status bar shows `offline (N pending)` while offline and returns to `connected` after replay completes.
+
+## Implementation notes
+
+- Added canonical `PendingOp`, `BatchOpResult`, and `BatchSyncResponse` types to the plugin.
+- Added journal append/coalesce helpers. Consecutive offline puts for the same path preserve the first base revision and keep the latest content.
+- Added `LapisClient.batchSync()` and `SyncEngine.replayPending()`.
+- Watcher push failures are converted into pending put/rename/delete ops and persisted to `data.json`.
+- `Lapis: Sync now` replays pending ops before pulling manifest changes.
+- Status bar now shows `offline (N pending)` after an operation is journaled.
+- Verified with `pnpm --filter plugin run build`.
 
 ## Blocked by
 

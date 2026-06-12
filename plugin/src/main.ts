@@ -118,6 +118,7 @@ export default class LapisPlugin extends Plugin {
     });
     try {
       if (this.journal) {
+        await engine.replayPending();
         await engine.pullChanged();
       } else {
         await engine.firstSync();
@@ -144,7 +145,7 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("create", (file) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
-          void this.runSync((engine) => engine.pushPut(file.path));
+          void this.runSync((engine) => engine.pushPut(file.path), false, (engine) => engine.queuePut(file.path));
         }
       })
     );
@@ -158,7 +159,7 @@ export default class LapisPlugin extends Plugin {
           }
           const timer = window.setTimeout(() => {
             this.modifyTimers.delete(file.path);
-            void this.runSync((engine) => engine.pushPut(file.path));
+            void this.runSync((engine) => engine.pushPut(file.path), false, (engine) => engine.queuePut(file.path));
           }, 500);
           this.modifyTimers.set(file.path, timer);
         }
@@ -168,7 +169,7 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
-          void this.runSync((engine) => engine.pushRename(oldPath, file.path));
+          void this.runSync((engine) => engine.pushRename(oldPath, file.path), false, (engine) => engine.queueRename(oldPath, file.path));
         }
       })
     );
@@ -176,13 +177,13 @@ export default class LapisPlugin extends Plugin {
       this.app.vault.on("delete", (file) => {
         if (this.suppressWatcher) return;
         if (file instanceof TFile) {
-          void this.runSync((engine) => engine.pushDelete(file.path));
+          void this.runSync((engine) => engine.pushDelete(file.path), false, (engine) => engine.queueDelete(file.path));
         }
       })
     );
   }
 
-  private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false) {
+  private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false, onFailure?: (engine: SyncEngine) => Promise<void>) {
     if (!this.settings.syncToken) {
       return;
     }
@@ -200,6 +201,18 @@ export default class LapisPlugin extends Plugin {
       await action(engine);
       this.statusBar.update(this.settings);
     } catch (error) {
+      if (onFailure) {
+        const engine = new SyncEngine({
+          app: this.app,
+          settings: this.settings,
+          client: new LapisClient(this.settings.serverUrl),
+          getJournal: () => this.journal,
+          setJournal: (journal) => this.saveJournal(journal),
+        });
+        await onFailure(engine);
+        this.statusBar.offline(this.journal?.pendingOps.length ?? 0);
+        return;
+      }
       this.statusBar.update(this.settings, "error");
       const message = error instanceof Error ? error.message : "Sync failed";
       new Notice(`Lapis: ${message}`);

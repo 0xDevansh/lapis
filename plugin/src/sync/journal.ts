@@ -1,4 +1,4 @@
-import type { ManifestEntry, SyncJournal, VaultManifest } from "../types";
+import type { ManifestEntry, PendingOp, SyncJournal, VaultManifest } from "../types";
 import { lowerPath } from "./paths";
 
 export function emptyJournal(vaultId: string): SyncJournal {
@@ -33,6 +33,21 @@ export function removeEntry(journal: SyncJournal, path: string) {
   const key = lowerPath(path);
   delete journal.fileRevisions[key];
   delete journal.fileHashes[key];
+  journal.lastSyncAt = new Date().toISOString();
+}
+
+export function appendPendingOp(journal: SyncJournal, op: PendingOp) {
+  if (op.op === "put") {
+    const key = lowerPath(op.path);
+    const existingIndex = journal.pendingOps.findIndex((pending) => pending.op === "put" && lowerPath(pending.path) === key);
+    if (existingIndex >= 0) {
+      const existing = journal.pendingOps[existingIndex];
+      journal.pendingOps[existingIndex] = existing.op === "put" ? { ...op, baseRevision: existing.baseRevision } : op;
+      journal.lastSyncAt = new Date().toISOString();
+      return;
+    }
+  }
+  journal.pendingOps.push(op);
   journal.lastSyncAt = new Date().toISOString();
 }
 

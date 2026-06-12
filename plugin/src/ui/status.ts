@@ -19,4 +19,8 @@ export class LapisStatusBar {
 
     this.element.setText(settings.syncToken ? "Lapis: connected" : "Lapis: not connected");
   }
+
+  offline(pendingCount: number) {
+    this.element.setText(`Lapis: offline (${pendingCount} pending)`);
+  }
 }

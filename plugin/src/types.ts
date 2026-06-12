@@ -28,7 +28,50 @@ export interface SyncJournal {
   lastSyncAt: string;
   fileRevisions: Record<string, number>;
   fileHashes: Record<string, string>;
-  pendingOps: unknown[];
+  pendingOps: PendingOp[];
+}
+
+export type PendingOp = PendingPutOp | PendingPatchOp | PendingRenameOp | PendingDeleteOp;
+
+export interface PendingPutOp {
+  op: "put";
+  path: string;
+  contentBase64: string;
+  contentType: string;
+  baseRevision?: number;
+}
+
+export interface PendingPatchOp {
+  op: "patch";
+  path: string;
+  patch: string;
+  baseRevision: number;
+  clientContent: string;
+  baseContent?: string;
+}
+
+export interface PendingRenameOp {
+  op: "rename";
+  oldPath: string;
+  newPath: string;
+}
+
+export interface PendingDeleteOp {
+  op: "delete";
+  path: string;
+}
+
+export interface BatchOpResult {
+  op: PendingOp;
+  path: string;
+  status: "accepted" | "merged" | "conflict" | "error";
+  conflictPath?: string;
+  error?: string;
+  entry?: ManifestEntry;
+}
+
+export interface BatchSyncResponse {
+  results: BatchOpResult[];
 }
 
 export interface PluginData {

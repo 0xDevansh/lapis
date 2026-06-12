@@ -7,6 +7,7 @@ import type {
   LapisResponse,
   ManifestEntry,
   ConflictResponse,
+  BatchSyncResponse,
   PatchResponse,
   SeedCompleteResult,
   VaultManifest,
@@ -222,6 +223,20 @@ export class LapisClient {
     if (response.status !== 200) {
       throw new Error(response.text || `Delete failed (${response.status})`);
     }
+  }
+
+  async batchSync(vaultId: string, ops: unknown[], token: string): Promise<BatchSyncResponse> {
+    const response = await this.request<BatchSyncResponse>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/batch`,
+      body: JSON.stringify({ ops }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Batch sync failed (${response.status})`);
+    }
+    return response.data;
   }
 
   private url(path: string): string {

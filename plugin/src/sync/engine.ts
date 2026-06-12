@@ -3,8 +3,8 @@ import type { App, Vault } from "obsidian";
 import { LapisClient } from "../net/client";
 import type { LapisSettings, ManifestEntry, SyncJournal, VaultManifest } from "../types";
 import { createPatch } from "./diff";
-import { sha256Hex } from "./hash";
-import { emptyJournal, removeEntry, setEntry } from "./journal";
+import { bytesToBase64, sha256Hex } from "./hash";
+import { appendPendingOp, emptyJournal, removeEntry, setEntry } from "./journal";
 import { lowerPath, shouldSyncPath } from "./paths";
 
 interface LocalFile {
@@ -63,6 +63,31 @@ export class SyncEngine {
     await this.options.setJournal(journal);
   }
 
+  async replayPending(): Promise<void> {
+    const journal = this.options.getJournal();
+    if (!journal || journal.pendingOps.length === 0) {
+      return;
+    }
+
+    const pendingOps = [...journal.pendingOps];
+    const response = await this.client.batchSync(this.vaultId, pendingOps, this.token);
+    for (const result of response.results) {
+      if (result.entry) {
+        if (result.status === "conflict") {
+          await this.pullEntry(result.entry, journal);
+        } else {
+          setEntry(journal, result.entry);
+        }
+      }
+      if (result.status === "accepted" && result.op.op === "delete") {
+        removeEntry(journal, result.op.path);
+      }
+    }
+    journal.pendingOps = [];
+    await this.options.setJournal(journal);
+    await this.pullChanged();
+  }
+
   async pushPut(path: string): Promise<void> {
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
@@ -119,6 +144,44 @@ export class SyncEngine {
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
     await this.client.deleteFile(this.vaultId, path, this.token);
     removeEntry(journal, path);
+    await this.options.setJournal(journal);
+  }
+
+  async queuePut(path: string): Promise<void> {
+    if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
+      return;
+    }
+    const abstractFile = this.vault.getAbstractFileByPath(path);
+    if (!(abstractFile instanceof TFile)) {
+      return;
+    }
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const content = await this.vault.readBinary(abstractFile);
+    appendPendingOp(journal, {
+      op: "put",
+      path,
+      contentBase64: bytesToBase64(content),
+      contentType: contentTypeFromPath(path),
+      baseRevision: journal.fileRevisions[lowerPath(path)],
+    });
+    await this.options.setJournal(journal);
+  }
+
+  async queueRename(oldPath: string, newPath: string): Promise<void> {
+    if (!shouldSyncPath(oldPath, this.options.settings.receiveInternals) || !shouldSyncPath(newPath, this.options.settings.receiveInternals)) {
+      return;
+    }
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    appendPendingOp(journal, { op: "rename", oldPath, newPath });
+    await this.options.setJournal(journal);
+  }
+
+  async queueDelete(path: string): Promise<void> {
+    if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
+      return;
+    }
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    appendPendingOp(journal, { op: "delete", path });
     await this.options.setJournal(journal);
   }
 
