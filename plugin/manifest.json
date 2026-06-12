@@ -1,0 +1,9 @@
+{
+  "id": "lapis-sync",
+  "name": "Lapis Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Sync an Obsidian Local Vault with a Lapis Web Vault.",
+  "author": "Lapis",
+  "isDesktopOnly": true
+}

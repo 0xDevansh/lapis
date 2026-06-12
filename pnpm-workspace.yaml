@@ -1,6 +1,7 @@
 packages:
   - "worker"
   - "web"
+  - "plugin"
 allowBuilds:
   esbuild: true
   sharp: true
