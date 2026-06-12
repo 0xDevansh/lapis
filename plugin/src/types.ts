@@ -84,6 +84,11 @@ export interface ConflictResponse {
   entry: ManifestEntry;
 }
 
+export interface PatchResponse {
+  merged?: boolean;
+  entry: ManifestEntry;
+}
+
 export interface LapisResponse<T> {
   status: number;
   data: T | null;

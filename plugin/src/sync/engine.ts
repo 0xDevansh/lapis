@@ -2,8 +2,9 @@ import { Notice, TFile } from "obsidian";
 import type { App, Vault } from "obsidian";
 import { LapisClient } from "../net/client";
 import type { LapisSettings, ManifestEntry, SyncJournal, VaultManifest } from "../types";
+import { createPatch } from "./diff";
 import { sha256Hex } from "./hash";
-import { emptyJournal, setEntry } from "./journal";
+import { emptyJournal, removeEntry, setEntry } from "./journal";
 import { lowerPath, shouldSyncPath } from "./paths";
 
 interface LocalFile {
@@ -45,6 +46,80 @@ export class SyncEngine {
     }
 
     await this.reconcile(localFiles, manifest);
+  }
+
+  async pullChanged(): Promise<void> {
+    if (!this.options.settings.syncToken) {
+      return;
+    }
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const manifest = await this.client.getManifest(this.vaultId, this.token);
+    for (const entry of Object.values(manifest.entries)) {
+      const key = lowerPath(entry.path);
+      if ((journal.fileRevisions[key] ?? -1) < entry.revision) {
+        await this.pullEntry(entry, journal);
+      }
+    }
+    await this.options.setJournal(journal);
+  }
+
+  async pushPut(path: string): Promise<void> {
+    if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
+      return;
+    }
+    const abstractFile = this.vault.getAbstractFileByPath(path);
+    if (!(abstractFile instanceof TFile)) {
+      return;
+    }
+
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const content = await this.vault.readBinary(abstractFile);
+    const contentType = contentTypeFromPath(path);
+    const baseRevision = journal.fileRevisions[lowerPath(path)] ?? -1;
+
+    if (isTextContentType(contentType) && baseRevision >= 0) {
+      const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
+      const serverText = new TextDecoder().decode(serverBytes);
+      const clientText = new TextDecoder().decode(content);
+      const patch = createPatch(path, serverText, clientText);
+      const result = await this.client.applyPatch(this.vaultId, path, patch, baseRevision, clientText, this.token);
+      if ("conflict" in result) {
+        await this.pullEntry(result.entry, journal);
+      } else {
+        setEntry(journal, result, await sha256Hex(content));
+      }
+    } else {
+      const result = await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
+      if ("conflict" in result) {
+        await this.pullEntry(result.entry, journal);
+      } else {
+        setEntry(journal, result, await sha256Hex(content));
+      }
+    }
+
+    await this.options.setJournal(journal);
+  }
+
+  async pushRename(oldPath: string, newPath: string): Promise<void> {
+    if (!shouldSyncPath(oldPath, this.options.settings.receiveInternals) || !shouldSyncPath(newPath, this.options.settings.receiveInternals)) {
+      return;
+    }
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const entry = await this.client.renameFile(this.vaultId, oldPath, newPath, this.token);
+    const oldHash = journal.fileHashes[lowerPath(oldPath)];
+    removeEntry(journal, oldPath);
+    setEntry(journal, entry, oldHash);
+    await this.options.setJournal(journal);
+  }
+
+  async pushDelete(path: string): Promise<void> {
+    if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
+      return;
+    }
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    await this.client.deleteFile(this.vaultId, path, this.token);
+    removeEntry(journal, path);
+    await this.options.setJournal(journal);
   }
 
   private async seedLocal(localFiles: LocalFile[]) {

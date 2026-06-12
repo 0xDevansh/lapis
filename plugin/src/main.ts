@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 import { LapisClient } from "./net/client";
 import { LapisSettingTab, normalizeSettings } from "./settings";
 import type { LapisSettings, PluginData, SyncJournal } from "./types";
@@ -11,6 +11,8 @@ export default class LapisPlugin extends Plugin {
   settings!: LapisSettings;
   journal: SyncJournal | null = null;
   private statusBar!: LapisStatusBar;
+  private modifyTimers = new Map<string, number>();
+  private suppressWatcher = false;
 
   async onload() {
     await this.loadSettings();
@@ -37,6 +39,8 @@ export default class LapisPlugin extends Plugin {
     });
 
     this.addSettingTab(new LapisSettingTab(this.app, this));
+    this.registerWatcher();
+    this.registerInterval(window.setInterval(() => void this.pullChanged(), 5 * 60 * 1000));
   }
 
   async loadSettings() {
@@ -102,6 +106,9 @@ export default class LapisPlugin extends Plugin {
   }
 
   async syncNow() {
+    this.statusBar.update(this.settings, "syncing");
+    const previousSuppress = this.suppressWatcher;
+    this.suppressWatcher = true;
     const engine = new SyncEngine({
       app: this.app,
       settings: this.settings,
@@ -109,7 +116,96 @@ export default class LapisPlugin extends Plugin {
       getJournal: () => this.journal,
       setJournal: (journal) => this.saveJournal(journal),
     });
-    await engine.firstSync();
+    try {
+      if (this.journal) {
+        await engine.pullChanged();
+      } else {
+        await engine.firstSync();
+      }
+      this.statusBar.update(this.settings);
+    } catch (error) {
+      this.statusBar.update(this.settings, "error");
+      const message = error instanceof Error ? error.message : "Sync failed";
+      new Notice(`Lapis: ${message}`);
+    } finally {
+      this.suppressWatcher = previousSuppress;
+    }
+  }
+
+  private async pullChanged() {
+    if (!this.settings.syncToken || !this.journal) {
+      return;
+    }
+    await this.runSync((engine) => engine.pullChanged(), true);
+  }
+
+  private registerWatcher() {
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (this.suppressWatcher) return;
+        if (file instanceof TFile) {
+          void this.runSync((engine) => engine.pushPut(file.path));
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (this.suppressWatcher) return;
+        if (file instanceof TFile) {
+          const previous = this.modifyTimers.get(file.path);
+          if (previous) {
+            window.clearTimeout(previous);
+          }
+          const timer = window.setTimeout(() => {
+            this.modifyTimers.delete(file.path);
+            void this.runSync((engine) => engine.pushPut(file.path));
+          }, 500);
+          this.modifyTimers.set(file.path, timer);
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        if (this.suppressWatcher) return;
+        if (file instanceof TFile) {
+          void this.runSync((engine) => engine.pushRename(oldPath, file.path));
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (this.suppressWatcher) return;
+        if (file instanceof TFile) {
+          void this.runSync((engine) => engine.pushDelete(file.path));
+        }
+      })
+    );
+  }
+
+  private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false) {
+    if (!this.settings.syncToken) {
+      return;
+    }
+    this.statusBar.update(this.settings, "syncing");
+    const previousSuppress = this.suppressWatcher;
+    this.suppressWatcher = previousSuppress || suppressWatcher;
+    try {
+      const engine = new SyncEngine({
+        app: this.app,
+        settings: this.settings,
+        client: new LapisClient(this.settings.serverUrl),
+        getJournal: () => this.journal,
+        setJournal: (journal) => this.saveJournal(journal),
+      });
+      await action(engine);
+      this.statusBar.update(this.settings);
+    } catch (error) {
+      this.statusBar.update(this.settings, "error");
+      const message = error instanceof Error ? error.message : "Sync failed";
+      new Notice(`Lapis: ${message}`);
+    } finally {
+      this.suppressWatcher = previousSuppress;
+    }
   }
 
   private async savePluginData() {

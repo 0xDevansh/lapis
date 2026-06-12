@@ -7,6 +7,7 @@ import type {
   LapisResponse,
   ManifestEntry,
   ConflictResponse,
+  PatchResponse,
   SeedCompleteResult,
   VaultManifest,
 } from "../types";
@@ -169,6 +170,58 @@ export class LapisClient {
       return response.data;
     }
     throw new Error(response.text || `File upload failed (${response.status})`);
+  }
+
+  async applyPatch(
+    vaultId: string,
+    path: string,
+    patch: string,
+    baseRevision: number,
+    clientContent: string,
+    token: string
+  ): Promise<ManifestEntry | ConflictResponse> {
+    const response = await this.request<ManifestEntry | PatchResponse | ConflictResponse>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}/patch`,
+      body: JSON.stringify({ patch, baseRevision, clientContent }),
+      contentType: "application/json",
+      token,
+    });
+    if ((response.status === 200 || response.status === 202) && response.data) {
+      if ("entry" in response.data) {
+        if ("conflict" in response.data) {
+          return response.data;
+        }
+        return response.data.entry;
+      }
+      return response.data;
+    }
+    throw new Error(response.text || `Patch failed (${response.status})`);
+  }
+
+  async renameFile(vaultId: string, oldPath: string, newPath: string, token: string): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry>({
+      method: "PATCH",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(oldPath)}`,
+      body: JSON.stringify({ newPath }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Rename failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async deleteFile(vaultId: string, path: string, token: string): Promise<void> {
+    const response = await this.request<{ ok: boolean }>({
+      method: "DELETE",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
+      token,
+    });
+    if (response.status !== 200) {
+      throw new Error(response.text || `Delete failed (${response.status})`);
+    }
   }
 
   private url(path: string): string {

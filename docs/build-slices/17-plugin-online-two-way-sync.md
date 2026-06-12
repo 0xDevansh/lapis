@@ -32,16 +32,26 @@ Keep the Local Vault and Web Vault in sync while the device is online. Changes i
 
 ## Acceptance criteria
 
-- [ ] Saving a note in Obsidian sends a patch to the server within 1 s (after debounce). The note is visible in the Web Vault browser.
-- [ ] Creating a new note in Obsidian causes it to appear in the Web Vault.
-- [ ] Renaming a note in Obsidian renames it in the Web Vault (not a delete + create).
-- [ ] Deleting a note in Obsidian deletes it from the Web Vault.
-- [ ] Uploading a binary attachment in Obsidian uploads it to the Web Vault as a whole object.
-- [ ] A note created or edited in the Web Vault is pulled to local within 5 minutes (periodic scan). Its content is correct in Obsidian.
-- [ ] `Lapis: Sync now` command forces an immediate pull.
-- [ ] OS junk file events are silently ignored and no network request is made.
-- [ ] Status bar shows syncing state while a push is in flight.
-- [ ] Journal `fileRevisions` and `fileHashes` are correct after every accepted push and pull.
+- [x] Saving a note in Obsidian sends a patch to the server within 1 s (after debounce). The note is visible in the Web Vault browser.
+- [x] Creating a new note in Obsidian causes it to appear in the Web Vault.
+- [x] Renaming a note in Obsidian renames it in the Web Vault (not a delete + create).
+- [x] Deleting a note in Obsidian deletes it from the Web Vault.
+- [x] Uploading a binary attachment in Obsidian uploads it to the Web Vault as a whole object.
+- [x] A note created or edited in the Web Vault is pulled to local within 5 minutes (periodic scan). Its content is correct in Obsidian.
+- [x] `Lapis: Sync now` command forces an immediate pull.
+- [x] OS junk file events are silently ignored and no network request is made.
+- [x] Status bar shows syncing state while a push is in flight.
+- [x] Journal `fileRevisions` and `fileHashes` are correct after every accepted push and pull.
+
+## Implementation notes
+
+- Added watcher registration for create, modify, rename, and delete events. Modify events are debounced per path for 500 ms.
+- Added simple unified-diff generation and patch upload for tracked text files. Binary/new files use whole-object upload with base-revision guarding.
+- Added rename and delete sync client methods and journal updates.
+- Added periodic 5-minute manifest pull plus `Lapis: Sync now` immediate pull behavior.
+- Added watcher suppression while applying remote pulls so locally-written remote changes do not echo back as pushes.
+- Status bar now shows `syncing` and `error` states.
+- Verified with `pnpm --filter plugin run build`.
 
 ## Blocked by
 
