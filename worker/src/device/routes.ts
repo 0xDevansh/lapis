@@ -5,7 +5,7 @@
  *   1. Plugin: POST /api/device-auth/request  { vaultId, deviceName }
  *      ← { deviceCode, userCode, verificationUri, expiresIn }
  *   2. Plugin: polls POST /api/device-auth/token  { deviceCode }
- *      ← 202 { status: 'pending' } | 200 { token } | 400 { error: 'denied'|'expired' }
+ *      ← 202 { status: 'pending' } | 200 { token, deviceId } | 400 { error: 'denied'|'expired' }
  *   3. Vault Owner: GET /api/vaults/:id/devices/pending  → pending user codes
  *   4. Vault Owner: POST /api/vaults/:id/devices/approve  { userCode }
  *      ← Device created, poll resolves with token
@@ -73,7 +73,7 @@ deviceRoutes.post("/device-auth/request", async (c) => {
  *
  * Returns:
  *   - 202 { status: "pending" }  — not yet approved
- *   - 200 { token: string }      — approved; plugin should store this
+ *   - 200 { token: string, deviceId: string } — approved; plugin should store this
  *   - 400 { error: "denied" }    — denied by owner
  *   - 400 { error: "expired" }   — flow expired
  *   - 400 { error: "not_found" } — unknown device code
@@ -119,15 +119,15 @@ deviceRoutes.post("/device-auth/token", async (c) => {
   // status === "approved" — create device record and return token
   if (row.status === "approved") {
     // Check if device was already created (idempotent poll)
-    type DeviceRow = { sync_token: string };
+    type DeviceRow = { id: string; sync_token: string };
     const existing = await c.env.DB.prepare(
-      `SELECT sync_token FROM devices WHERE vault_id = ? AND device_name = ? AND revoked = 0`
+      `SELECT id, sync_token FROM devices WHERE vault_id = ? AND device_name = ? AND revoked = 0`
     ).bind(row.vault_id, row.device_name).first<DeviceRow>();
 
     if (existing) {
       await c.env.DB.prepare(`DELETE FROM device_codes WHERE device_code = ?`)
         .bind(deviceCode).run();
-      return c.json({ token: existing.sync_token });
+      return c.json({ token: existing.sync_token, deviceId: existing.id });
     }
 
     const deviceId = crypto.randomUUID();
@@ -142,7 +142,7 @@ deviceRoutes.post("/device-auth/token", async (c) => {
     await c.env.DB.prepare(`DELETE FROM device_codes WHERE device_code = ?`)
       .bind(deviceCode).run();
 
-    return c.json({ token: syncToken });
+    return c.json({ token: syncToken, deviceId });
   }
 
   return c.json({ error: "not_found" }, 400);

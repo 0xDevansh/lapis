@@ -5,7 +5,7 @@ import type { LapisSettings, ManifestEntry, SyncJournal, VaultManifest } from ".
 import { createPatch } from "./diff";
 import { bytesToBase64, sha256Hex } from "./hash";
 import { appendPendingOp, emptyJournal, removeEntry, setEntry } from "./journal";
-import { lowerPath, shouldSyncPath } from "./paths";
+import { isVaultInternal, lowerPath, shouldSyncPath } from "./paths";
 
 interface LocalFile {
   path: string;
@@ -342,6 +342,16 @@ export class SyncEngine {
   }
 
   private async writeLocal(path: string, content: ArrayBuffer, contentType: string) {
+    if (isVaultInternal(path)) {
+      await this.ensureAdapterParent(path);
+      if (isTextContentType(contentType)) {
+        await this.vault.adapter.write(path, new TextDecoder().decode(content));
+      } else {
+        await this.vault.adapter.writeBinary(path, content);
+      }
+      return;
+    }
+
     const existing = this.vault.getAbstractFileByPath(path);
     if (isTextContentType(contentType)) {
       const text = new TextDecoder().decode(content);
@@ -370,6 +380,18 @@ export class SyncEngine {
       current = current ? `${current}/${part}` : part;
       if (!this.vault.getAbstractFileByPath(current)) {
         await this.vault.createFolder(current);
+      }
+    }
+  }
+
+  private async ensureAdapterParent(path: string) {
+    const parts = path.split("/");
+    parts.pop();
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.vault.adapter.exists(current))) {
+        await this.vault.adapter.mkdir(current);
       }
     }
   }

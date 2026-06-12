@@ -11,6 +11,7 @@ export function normalizeSettings(data: unknown): LapisSettings {
     serverUrl: partial.serverUrl ?? DEFAULT_SETTINGS.serverUrl,
     vaultId: partial.vaultId ?? "",
     syncToken: partial.syncToken ?? "",
+    deviceId: partial.deviceId ?? "",
     deviceName: partial.deviceName ?? defaultDeviceName(),
     receiveInternals: partial.receiveInternals ?? false,
     lastConnectedAt: partial.lastConnectedAt ?? null,
@@ -71,11 +72,12 @@ export class LapisSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Receive Vault Internals")
-      .setDesc("Reserved for a later slice. Vault Internals remain off in Slice 15.")
+      .setDesc("Also sync Vault Internals such as .obsidian data for this device.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.receiveInternals)
-          .setDisabled(true)
+          .setDisabled(!this.plugin.settings.syncToken)
+          .onChange(async (value) => this.plugin.setReceiveInternals(value))
       );
 
     new Setting(containerEl)

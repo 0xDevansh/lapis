@@ -2,6 +2,7 @@ export interface LapisSettings {
   serverUrl: string;
   vaultId: string;
   syncToken: string;
+  deviceId: string;
   deviceName: string;
   receiveInternals: boolean;
   lastConnectedAt: string | null;
@@ -115,6 +116,7 @@ export const DEFAULT_SETTINGS: LapisSettings = {
   serverUrl: "http://localhost:8787",
   vaultId: "",
   syncToken: "",
+  deviceId: "",
   deviceName: "",
   receiveInternals: false,
   lastConnectedAt: null,
@@ -134,7 +136,7 @@ export interface DeviceAuthChallenge {
 
 export type DeviceTokenResponse =
   | { status: "pending" }
-  | { status: "approved"; token: string }
+  | { status: "approved"; token: string; deviceId: string }
   | { status: "denied" | "expired" | "not_found" };
 
 export interface LapisRequestOptions {

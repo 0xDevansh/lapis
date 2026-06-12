@@ -6,7 +6,7 @@ import type { LapisSettings, PluginData, SyncJournal } from "./types";
 import { SyncEngine } from "./sync/engine";
 import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
-import { LapisStatusBar } from "./ui/status";
+import { countConflicts, LapisStatusBar } from "./ui/status";
 
 export default class LapisPlugin extends Plugin {
   settings!: LapisSettings;
@@ -22,7 +22,7 @@ export default class LapisPlugin extends Plugin {
     await this.loadSettings();
 
     this.statusBar = new LapisStatusBar(this.addStatusBarItem());
-    this.statusBar.update(this.settings);
+    this.updateStatus();
 
     this.addCommand({
       id: "connect",
@@ -40,6 +40,12 @@ export default class LapisPlugin extends Plugin {
       id: "sync-now",
       name: "Sync now",
       callback: () => void this.syncNow(),
+    });
+
+    this.addCommand({
+      id: "open-conflicts-folder",
+      name: "Open conflicts folder",
+      callback: () => this.openConflictsFolder(),
     });
 
     this.addSettingTab(new LapisSettingTab(this.app, this));
@@ -61,12 +67,13 @@ export default class LapisPlugin extends Plugin {
 
   async saveSettings() {
     await this.savePluginData();
-    this.statusBar?.update(this.settings);
+    this.updateStatus();
   }
 
   async saveJournal(journal: SyncJournal) {
     this.journal = journal;
     await this.savePluginData();
+    this.updateStatus();
   }
 
   async connect() {
@@ -79,7 +86,7 @@ export default class LapisPlugin extends Plugin {
       return;
     }
 
-    this.statusBar.update(this.settings, "connecting");
+    this.updateStatus("connecting");
     const client = new LapisClient(this.settings.serverUrl);
 
     try {
@@ -92,17 +99,18 @@ export default class LapisPlugin extends Plugin {
         serverUrl: this.settings.serverUrl,
         challenge,
         fetchToken: (deviceCode) => client.pollDeviceToken(deviceCode),
-        onConnected: async (token) => {
+        onConnected: async ({ token, deviceId }) => {
           this.settings.syncToken = token;
+          this.settings.deviceId = deviceId;
           this.settings.lastConnectedAt = new Date().toISOString();
           await this.saveSettings();
           this.startNotify();
           await this.syncNow();
         },
-        onDone: () => this.statusBar.update(this.settings),
+        onDone: () => this.updateStatus(),
       }).open();
     } catch (error) {
-      this.statusBar.update(this.settings);
+      this.updateStatus();
       const message = error instanceof Error ? error.message : "Connection failed";
       new Notice(`Lapis: ${message}`);
     }
@@ -110,6 +118,7 @@ export default class LapisPlugin extends Plugin {
 
   async disconnect() {
     this.settings.syncToken = "";
+    this.settings.deviceId = "";
     this.settings.lastConnectedAt = null;
     this.journal = null;
     this.notifyClient?.close();
@@ -118,8 +127,25 @@ export default class LapisPlugin extends Plugin {
     new Notice("Lapis: disconnected");
   }
 
+  async setReceiveInternals(receiveInternals: boolean) {
+    const previous = this.settings.receiveInternals;
+    this.settings.receiveInternals = receiveInternals;
+    try {
+      if (this.settings.syncToken) {
+        await new LapisClient(this.settings.serverUrl).updateDevice(this.settings.vaultId, this.settings.syncToken, receiveInternals);
+      }
+      await this.saveSettings();
+      new Notice(`Lapis: Vault Internals ${receiveInternals ? "enabled" : "disabled"}`);
+    } catch (error) {
+      this.settings.receiveInternals = previous;
+      await this.saveSettings();
+      const message = error instanceof Error ? error.message : "Could not update device";
+      new Notice(`Lapis: ${message}`);
+    }
+  }
+
   async syncNow() {
-    this.statusBar.update(this.settings, "syncing");
+    this.updateStatus("syncing");
     const previousSuppress = this.suppressWatcher;
     this.suppressWatcher = true;
     const engine = new SyncEngine({
@@ -136,9 +162,9 @@ export default class LapisPlugin extends Plugin {
       } else {
         await engine.firstSync();
       }
-      this.statusBar.update(this.settings);
+      this.updateStatus();
     } catch (error) {
-      this.statusBar.update(this.settings, "error");
+      this.updateStatus("error");
       const message = error instanceof Error ? error.message : "Sync failed";
       new Notice(`Lapis: ${message}`);
     } finally {
@@ -153,6 +179,25 @@ export default class LapisPlugin extends Plugin {
     await this.runSync((engine) => engine.pullChanged(), true);
   }
 
+  private openConflictsFolder() {
+    const folder = this.app.vault.getAbstractFileByPath(".sync-conflicts");
+    if (folder) {
+      (this.app.workspace as unknown as { revealInFolder(file: unknown): void }).revealInFolder(folder);
+    } else {
+      new Notice("Lapis: no conflict notes");
+    }
+  }
+
+  private updateStatus(state: "idle" | "connecting" | "syncing" | "error" = "idle") {
+    this.statusBar?.update(this.settings, state, this.conflictCount());
+  }
+
+  private conflictCount(): number {
+    const journalPaths = this.journal ? Object.keys(this.journal.fileRevisions) : [];
+    const localPaths = this.app.vault.getFiles().map((file) => file.path);
+    return countConflicts([...journalPaths, ...localPaths]);
+  }
+
   private startNotify() {
     if (!this.settings.syncToken || !this.settings.vaultId || this.notifyClient) {
       return;
@@ -162,11 +207,11 @@ export default class LapisPlugin extends Plugin {
       vaultId: this.settings.vaultId,
       token: this.settings.syncToken,
       onOpen: async (reconnected) => {
-        this.statusBar.update(this.settings);
+        this.updateStatus();
         if (reconnected) await this.syncNow();
         this.reportOpenFile();
       },
-      onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0),
+      onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount()),
       onMessage: (message) => this.handleNotifyMessage(message),
     });
     this.notifyClient.connect();
@@ -261,7 +306,7 @@ export default class LapisPlugin extends Plugin {
     if (!this.settings.syncToken) {
       return;
     }
-    this.statusBar.update(this.settings, "syncing");
+    this.updateStatus("syncing");
     const previousSuppress = this.suppressWatcher;
     this.suppressWatcher = previousSuppress || suppressWatcher;
     try {
@@ -273,7 +318,7 @@ export default class LapisPlugin extends Plugin {
         setJournal: (journal) => this.saveJournal(journal),
       });
       await action(engine);
-      this.statusBar.update(this.settings);
+      this.updateStatus();
     } catch (error) {
       if (onFailure) {
         const engine = new SyncEngine({
@@ -284,10 +329,10 @@ export default class LapisPlugin extends Plugin {
           setJournal: (journal) => this.saveJournal(journal),
         });
         await onFailure(engine);
-        this.statusBar.offline(this.journal?.pendingOps.length ?? 0);
+        this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount());
         return;
       }
-      this.statusBar.update(this.settings, "error");
+      this.updateStatus("error");
       const message = error instanceof Error ? error.message : "Sync failed";
       new Notice(`Lapis: ${message}`);
     } finally {

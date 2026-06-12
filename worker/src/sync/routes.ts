@@ -77,6 +77,20 @@ function detectMime(path: string): string {
 // Returns the current vault manifest (including revision numbers).
 // Device must belong to the requested vaultId.
 
+syncRoutes.patch("/:vaultId/device", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+
+  const body = await c.req.json<{ receiveInternals?: boolean }>();
+  const receiveInternals = body.receiveInternals === true ? 1 : 0;
+  await c.env.DB.prepare(
+    `UPDATE devices SET receive_internals = ? WHERE id = ? AND vault_id = ?`
+  ).bind(receiveInternals, device.id, vaultId).run();
+
+  return c.json({ ok: true, deviceId: device.id, receiveInternals: receiveInternals === 1 });
+});
+
 syncRoutes.get("/:vaultId/manifest", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();

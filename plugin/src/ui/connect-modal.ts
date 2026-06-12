@@ -6,8 +6,8 @@ import type { DeviceAuthChallenge } from "../types";
 interface ConnectModalOptions {
   serverUrl: string;
   challenge: DeviceAuthChallenge;
-  fetchToken: (deviceCode: string) => Promise<{ status: "pending" } | { status: "approved"; token: string } | { status: "denied" | "expired" | "not_found" }>;
-  onConnected: (token: string) => Promise<void>;
+  fetchToken: (deviceCode: string) => Promise<{ status: "pending" } | { status: "approved"; token: string; deviceId: string } | { status: "denied" | "expired" | "not_found" }>;
+  onConnected: (connection: { token: string; deviceId: string }) => Promise<void>;
   onDone?: () => void;
 }
 
@@ -41,9 +41,9 @@ export class ConnectModal extends Modal {
       fetchToken: this.options.fetchToken,
       signal: this.controller.signal,
     })
-      .then(async (token) => {
+      .then(async (connection) => {
         status.setText("Connected.");
-        await this.options.onConnected(token);
+        await this.options.onConnected(connection);
         new Notice("Lapis: connected");
         this.close();
       })

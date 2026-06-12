@@ -29,14 +29,14 @@ Surface Conflict Notes clearly to the Vault Owner, make the Vault Internals opt-
 
 ## Acceptance criteria
 
-- [ ] Status bar shows conflict count in amber when `.sync-conflicts/` contains files; count is 0 when the folder is empty.
-- [ ] `Lapis: Open conflicts folder` command opens the `.sync-conflicts/` folder in the Obsidian file explorer.
-- [ ] Deleting a Conflict Note in Obsidian removes it from the server and decrements the status bar count.
-- [ ] Enabling `receiveInternals` and syncing causes `.obsidian/` content from the Web Vault to be written locally.
-- [ ] Disabling `receiveInternals` stops any `.obsidian/` files from being written, even if the server sends them.
-- [ ] The server's device record `receive_internals` field matches the plugin's toggle state.
-- [ ] `pnpm build` in `plugin/` produces `main.js` with no TypeScript errors and no bundler warnings.
-- [ ] `plugin/README.md` clearly discloses the external Lapis server and provides installation steps.
+- [x] Status bar shows conflict count in amber when `.sync-conflicts/` contains files; count is 0 when the folder is empty.
+- [x] `Lapis: Open conflicts folder` command opens the `.sync-conflicts/` folder in the Obsidian file explorer.
+- [x] Deleting a Conflict Note in Obsidian removes it from the server and decrements the status bar count.
+- [x] Enabling `receiveInternals` and syncing causes `.obsidian/` content from the Web Vault to be written locally.
+- [x] Disabling `receiveInternals` stops any `.obsidian/` files from being written, even if the server sends them.
+- [x] The server's device record `receive_internals` field matches the plugin's toggle state.
+- [x] `pnpm build` in `plugin/` produces `main.js` with no TypeScript errors and no bundler warnings.
+- [x] `plugin/README.md` clearly discloses the external Lapis server and provides installation steps.
 
 ## Blocked by
 
@@ -46,3 +46,14 @@ Surface Conflict Notes clearly to the Vault Owner, make the Vault Internals opt-
 ## Test seam
 
 Conflict count logic in `src/ui/status.ts` is a pure function `countConflicts(journalPaths: string[]): number` — tested directly. `receiveInternals` toggling in `src/sync/engine.ts` — verify that Vault Internal paths are written via `adapter.write` (not `vault.modify`) and that toggling off skips the write entirely.
+
+## Implementation notes
+
+- Added conflict counting to the status bar with an amber status class and a pure `countConflicts()` helper.
+- Added the `Lapis: Open conflicts folder` command.
+- Conflict Notes are already synced as ordinary Vault Content, so local delete events flow through the existing delete sync path.
+- Added plugin storage for `deviceId` returned by device-token polling.
+- Added a device-auth response patch and a device-token-authenticated sync route for updating this device's `receiveInternals` flag.
+- Enabled the settings toggle and wired it to the server-side device record.
+- Added Vault Internal writes through `vault.adapter.write` / `writeBinary` so hidden paths can be materialized when enabled.
+- Added plugin installation documentation and updated the root README.

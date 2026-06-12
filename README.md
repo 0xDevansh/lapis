@@ -60,10 +60,16 @@ wrangler secret put BETTER_AUTH_URL      # your deployed worker URL, e.g. https:
 
 ### 4. Run migrations
 
-After first deploy (or locally with `wrangler dev`), run:
+For local D1:
 
 ```sh
-curl -X POST https://<your-worker>/api/admin/migrate
+pnpm migrate
+```
+
+For remote D1:
+
+```sh
+pnpm migrate:remote
 ```
 
 ### 5. Build and deploy
@@ -89,13 +95,18 @@ cd web
 pnpm dev
 ```
 
-Then open `http://localhost:5173`, run the migration once, and sign up.
+Then open `http://localhost:5173` and sign up.
+
+## Obsidian Plugin
+
+The Obsidian plugin lives in [`plugin/`](plugin/). See [`plugin/README.md`](plugin/README.md) for installation and quick-start instructions.
 
 ## Project structure
 
 ```
 worker/   Cloudflare Worker — Hono API, Durable Objects, sync, search
 web/      React SPA — vault browser, Markdown renderer, presence UI
+plugin/   Obsidian plugin — device-code connection and Local Vault sync
 docs/     Build slices, ADRs, PRD, self-hosting guide
 ```
 

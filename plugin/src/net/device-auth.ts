@@ -9,13 +9,13 @@ export interface PollDeviceTokenOptions {
   signal?: AbortSignal;
 }
 
-export async function pollDeviceToken(options: PollDeviceTokenOptions): Promise<string> {
+export async function pollDeviceToken(options: PollDeviceTokenOptions): Promise<{ token: string; deviceId: string }> {
   const intervalMs = options.intervalMs ?? 3000;
 
   while (!options.signal?.aborted) {
     const result = await options.fetchToken(options.deviceCode);
     if (result.status === "approved") {
-      return result.token;
+      return { token: result.token, deviceId: result.deviceId };
     }
     if (result.status === "denied") {
       throw new Error("Connection denied");

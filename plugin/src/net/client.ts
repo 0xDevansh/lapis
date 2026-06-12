@@ -60,7 +60,7 @@ export class LapisClient {
   }
 
   async pollDeviceToken(deviceCode: string): Promise<DeviceTokenResponse> {
-    const response = await this.request<{ token?: string; status?: string; error?: string }>({
+    const response = await this.request<{ token?: string; deviceId?: string; status?: string; error?: string }>({
       method: "POST",
       path: "/api/device-auth/token",
       body: JSON.stringify({ deviceCode }),
@@ -71,7 +71,7 @@ export class LapisClient {
       return { status: "pending" };
     }
     if (response.status === 200 && response.data?.token) {
-      return { status: "approved", token: response.data.token };
+      return { status: "approved", token: response.data.token, deviceId: response.data.deviceId ?? "" };
     }
 
     const error = response.data?.error;
@@ -237,6 +237,19 @@ export class LapisClient {
       throw new Error(response.text || `Batch sync failed (${response.status})`);
     }
     return response.data;
+  }
+
+  async updateDevice(vaultId: string, token: string, receiveInternals: boolean): Promise<void> {
+    const response = await this.request<{ ok: boolean }>({
+      method: "PATCH",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/device`,
+      body: JSON.stringify({ receiveInternals }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200) {
+      throw new Error(response.text || `Device update failed (${response.status})`);
+    }
   }
 
   private url(path: string): string {

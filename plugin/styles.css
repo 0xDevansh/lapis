@@ -13,3 +13,7 @@
 .lapis-connecting-spinner {
   color: var(--text-muted);
 }
+
+.lapis-status-conflicts {
+  color: var(--text-warning);
+}
