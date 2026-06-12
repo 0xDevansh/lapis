@@ -292,9 +292,9 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
 
 /**
  * GET /api/vaults/:id/snapshots
- * Returns a list of available restore points.
- * Without Artifacts (Slice 04 is skipped), returns an empty array.
- * This endpoint exists so the web UI can show a timeline stub.
+ * Returns the sealed commit timeline from Artifacts.
+ * Requires Artifacts access (Slice 04). Returns an empty array if the vault
+ * has not been sealed yet (e.g. no writes since deployment).
  */
 vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
   const session = c.get("session");
@@ -303,9 +303,11 @@ vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
   const vault = await resolveVault(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
-  // Artifacts sealed history not available (Slice 04 skipped).
-  // Return an empty timeline until Artifacts are enabled.
-  return c.json({ snapshots: [], note: "Sealed history requires Artifacts (not yet enabled)" });
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const snapshots = await stub.getLog(50);
+
+  return c.json({ snapshots });
 });
 
 /**

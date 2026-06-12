@@ -8,6 +8,7 @@ import BacklinksPanel from "../components/BacklinksPanel";
 import PresenceBar from "../components/PresenceBar";
 import { useTheme, type Theme } from "../hooks/useTheme";
 import { useVaultNotify } from "../hooks/useVaultNotify";
+import SnapshotsPanel from "../components/SnapshotsPanel";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -319,6 +320,10 @@ export default function VaultBrowserPage() {
 
         {vaultId && (
           <SearchPanel vaultId={vaultId} onSelect={openFile} />
+        )}
+
+        {vaultId && (
+          <SnapshotsPanel vaultId={vaultId} />
         )}
 
         <div style={styles.treeScroll}>

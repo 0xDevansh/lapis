@@ -324,12 +324,13 @@ export async function updateDevice(
 // ── Restore & Export (Slice 13) ───────────────────────────────────────────────
 
 export interface Snapshot {
-  id: string;
-  message?: string;
-  createdAt: string;
+  hash: string;
+  message: string;
+  ts: string;
+  author: string;
 }
 
-/** Returns available restore snapshots. Empty until Artifacts are enabled. */
+/** Returns the sealed commit timeline from Artifacts. Empty if vault not yet sealed. */
 export async function listSnapshots(vaultId: string): Promise<Snapshot[]> {
   const res = await apiFetch<{ snapshots: Snapshot[] }>(`/api/vaults/${vaultId}/snapshots`);
   return res.snapshots;

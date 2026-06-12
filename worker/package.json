@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "better-auth": "^1.2.8",
-    "hono": "^4.7.11"
+    "hono": "^4.7.11",
+    "isomorphic-git": "^1.38.4"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.4",

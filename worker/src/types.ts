@@ -16,6 +16,9 @@ export interface Env {
   DB: D1Database;
   KV: KVNamespace;
 
+  // Artifacts — sealed Git history
+  ARTIFACTS: Artifacts;
+
   // Static assets (web SPA)
   ASSETS: Fetcher;
 

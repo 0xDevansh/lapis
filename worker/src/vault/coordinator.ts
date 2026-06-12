@@ -12,12 +12,14 @@ import {
 import { isValidVaultPath, isVaultInternal } from "./path";
 import { applyPatch, merge3 } from "./patch";
 import { conflictNotePath, renderConflictNote } from "./conflict";
+import { sealVault, getVaultLog, type SealedCommit } from "../artifacts/sealer";
 
 export interface VaultMeta {
   id: string;
   ownerId: string;
   name: string;
   createdAt: string;
+  artifactsRemote?: string | null;
 }
 
 type VaultMetaRow = Record<string, SqlStorageValue> & {
@@ -25,6 +27,7 @@ type VaultMetaRow = Record<string, SqlStorageValue> & {
   ownerId: SqlStorageValue;
   name: SqlStorageValue;
   createdAt: SqlStorageValue;
+  artifactsRemote: SqlStorageValue;
 };
 
 /**
@@ -94,10 +97,11 @@ export class VaultCoordinator extends DurableObject<Env> {
     this.sql = ctx.storage.sql;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS vault_meta (
-        id          TEXT PRIMARY KEY,
-        owner_id    TEXT NOT NULL,
-        name        TEXT NOT NULL,
-        created_at  TEXT NOT NULL
+        id                TEXT PRIMARY KEY,
+        owner_id          TEXT NOT NULL,
+        name              TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        artifacts_remote  TEXT
       );
     `);
   }
@@ -117,7 +121,8 @@ export class VaultCoordinator extends DurableObject<Env> {
   /** Return stored metadata, or null if not yet initialized. */
   async getMeta(): Promise<VaultMeta | null> {
     const cursor = this.sql.exec<VaultMetaRow>(
-      `SELECT id, owner_id AS ownerId, name, created_at AS createdAt
+      `SELECT id, owner_id AS ownerId, name, created_at AS createdAt,
+              artifacts_remote AS artifactsRemote
        FROM vault_meta LIMIT 1`
     );
     const rows = cursor.toArray();
@@ -128,7 +133,16 @@ export class VaultCoordinator extends DurableObject<Env> {
       ownerId: String(row.ownerId),
       name: String(row.name),
       createdAt: String(row.createdAt),
+      artifactsRemote: row.artifactsRemote != null ? String(row.artifactsRemote) : null,
     };
+  }
+
+  /** Update the cached Artifacts remote URL for this vault. */
+  private setArtifactsRemote(remote: string): void {
+    this.sql.exec(
+      `UPDATE vault_meta SET artifacts_remote = ? WHERE id = (SELECT id FROM vault_meta LIMIT 1)`,
+      remote
+    );
   }
 
   // ── Manifest operations ────────────────────────────────────────────────────
@@ -206,6 +220,9 @@ export class VaultCoordinator extends DurableObject<Env> {
 
     // Notify all connected clients
     this.broadcast({ type: "change", path, kind: "put", revision: entry.revision, ts: entry.updatedAt });
+
+    // Schedule debounced Artifacts seal
+    this.scheduleSeal();
 
     return entry;
   }
@@ -289,6 +306,9 @@ export class VaultCoordinator extends DurableObject<Env> {
       ts: newEntry.updatedAt,
     });
 
+    // Schedule debounced Artifacts seal
+    this.scheduleSeal();
+
     return newEntry;
   }
 
@@ -312,6 +332,9 @@ export class VaultCoordinator extends DurableObject<Env> {
 
     // Notify connected clients
     this.broadcast({ type: "change", path, kind: "delete", ts: new Date().toISOString() });
+
+    // Schedule debounced Artifacts seal
+    this.scheduleSeal();
   }
 
   // ── Sync protocol methods (Slice 09) ──────────────────────────────────────
@@ -626,6 +649,80 @@ export class VaultCoordinator extends DurableObject<Env> {
     const encoded = new TextEncoder().encode(noteBody);
     const noteEntry = await this.putFile(vaultId, notePath, encoded.buffer as ArrayBuffer, "text/markdown");
     return { kind: "conflict", conflictPath: notePath, entry: noteEntry };
+  }
+
+  // ── Artifacts sealing (Slice 04) ─────────────────────────────────────────
+
+  /**
+   * Debounce constant: schedule a seal alarm this many ms in the future.
+   * Any subsequent write within the window resets the timer (setAlarm is idempotent
+   * when the new time is ≤ the existing alarm).
+   */
+  private static readonly SEAL_DEBOUNCE_MS = 5_000; // 5 seconds
+
+  /**
+   * Schedule an Artifacts seal in SEAL_DEBOUNCE_MS from now.
+   * Called after every accepted file mutation. Uses the DO alarm API — only
+   * one alarm can be pending at a time; calling setAlarm while one is already
+   * scheduled extends or resets the deadline.
+   */
+  private scheduleSeal(): void {
+    const deadline = Date.now() + VaultCoordinator.SEAL_DEBOUNCE_MS;
+    this.ctx.storage.setAlarm(deadline).catch(() => {
+      // setAlarm errors are non-fatal — sealing will be missed for this batch
+      // but the next write will re-schedule.
+      console.error("[lapis] Failed to schedule seal alarm");
+    });
+  }
+
+  /**
+   * DO alarm handler — fires after the seal debounce period.
+   * Reads the current manifest + R2 content, then pushes a commit to Artifacts.
+   * Failures are logged via Workers Observability but do not affect R2.
+   */
+  async alarm(): Promise<void> {
+    const meta = await this.getMeta();
+    if (!meta) return; // vault not yet initialized
+
+    const manifest = await this.readManifest(meta.id);
+    const existingRemote = meta.artifactsRemote ?? null;
+
+    try {
+      const result = await sealVault(
+        this.env.ARTIFACTS,
+        meta.id,
+        manifest,
+        existingRemote,
+        async (path) => {
+          const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
+          if (!obj) return null;
+          return obj.arrayBuffer();
+        }
+      );
+
+      // Persist remote URL so subsequent seals can skip repo creation
+      if (!existingRemote || existingRemote !== result.remote) {
+        this.setArtifactsRemote(result.remote);
+      }
+
+      console.log(
+        `[lapis] Sealed vault ${meta.id}: commit ${result.commitHash} ` +
+        `(${result.fileCount} files)`
+      );
+    } catch (err) {
+      // Log via Workers Observability — does not corrupt R2 state
+      console.error(`[lapis] Seal failed for vault ${meta.id}:`, err);
+    }
+  }
+
+  /**
+   * Return the sealed commit log for this vault from Artifacts.
+   * Used by GET /api/vaults/:id/snapshots.
+   */
+  async getLog(limit = 50): Promise<SealedCommit[]> {
+    const meta = await this.getMeta();
+    if (!meta) return [];
+    return getVaultLog(this.env.ARTIFACTS, meta.id, meta.artifactsRemote ?? null, limit);
   }
 
   // ── WebSocket / Presence methods (Slice 10) ───────────────────────────────
