@@ -361,3 +361,52 @@ export async function restoreFile(
 export function exportUrl(vaultId: string): string {
   return `/api/vaults/${vaultId}/export`;
 }
+
+// ── Seed (Slice 08) ───────────────────────────────────────────────────────────
+
+export interface SeedCompleteResult {
+  ok: boolean;
+  commitHash: string;
+  fileCount: number;
+  remote: string;
+}
+
+/**
+ * Upload a single file during a vault seed operation.
+ * Uses device Bearer auth (the plugin calls this, not the web UI).
+ * Exposed here for documentation completeness and testing.
+ */
+export async function seedFile(
+  vaultId: string,
+  filePath: string,
+  content: ArrayBuffer,
+  contentType: string,
+  syncToken: string
+): Promise<Response> {
+  return fetch(`/api/sync/${vaultId}/seed/files/${encodeURIComponent(filePath)}`, {
+    method: "PUT",
+    headers: {
+      "Authorization": `Bearer ${syncToken}`,
+      "Content-Type": contentType,
+    },
+    body: content,
+  });
+}
+
+/**
+ * Call after all seed files are uploaded to trigger an immediate Artifacts seal.
+ */
+export async function completeSeed(
+  vaultId: string,
+  syncToken: string
+): Promise<SeedCompleteResult> {
+  const res = await fetch(`/api/sync/${vaultId}/seed/complete`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${syncToken}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<SeedCompleteResult>;
+}

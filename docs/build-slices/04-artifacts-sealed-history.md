@@ -6,12 +6,12 @@ Seal accepted live revisions into Artifacts as Git commits after a short debounc
 
 ## Acceptance criteria
 
-- [ ] Each Web Vault maps to an Artifacts repository.
-- [ ] Server-created commits seal accepted live revisions after a 2-10 second debounce.
-- [ ] Normal web clients and plugins never receive direct Artifacts repo tokens.
-- [ ] The Web Vault exposes a timeline of sealed commits with timestamp and source labels where available.
-- [ ] R2 remains the latest browsing read model while Artifacts is the sealed version-history store.
-- [ ] Failures during sealing are visible to operators and retryable without corrupting R2 latest state.
+- [x] Each Web Vault maps to an Artifacts repository.
+- [x] Server-created commits seal accepted live revisions after a 2-10 second debounce.
+- [x] Normal web clients and plugins never receive direct Artifacts repo tokens.
+- [x] The Web Vault exposes a timeline of sealed commits with timestamp and source labels where available.
+- [x] R2 remains the latest browsing read model while Artifacts is the sealed version-history store.
+- [x] Failures during sealing are visible to operators and retryable without corrupting R2 latest state.
 
 ## Blocked by
 

@@ -137,8 +137,8 @@ export class VaultCoordinator extends DurableObject<Env> {
     };
   }
 
-  /** Update the cached Artifacts remote URL for this vault. */
-  private setArtifactsRemote(remote: string): void {
+  /** Update the cached Artifacts remote URL for this vault. Called from seed/complete route. */
+  setArtifactsRemote(remote: string): void {
     this.sql.exec(
       `UPDATE vault_meta SET artifacts_remote = ? WHERE id = (SELECT id FROM vault_meta LIMIT 1)`,
       remote

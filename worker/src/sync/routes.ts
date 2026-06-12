@@ -38,6 +38,7 @@ import { isValidVaultPath, isVaultInternal, isOsJunk } from "../vault/path";
 import { contentKey } from "../vault/manifest";
 import { indexFile, removeFromIndex, renameInIndex } from "../search/indexer";
 import type { BatchSyncRequest, BatchSyncResponse, BatchOpResult } from "./journal";
+import { sealVault } from "../artifacts/sealer";
 
 const syncRoutes = new Hono<{ Bindings: Env }>();
 
@@ -615,6 +616,148 @@ syncRoutes.post("/:vaultId/batch", requireDevice, async (c) => {
 
   const response: BatchSyncResponse = { results };
   return c.json(response, 200);
+});
+
+// ── POST /api/sync/:vaultId/seed ──────────────────────────────────────────
+//
+// Slice 08: Bulk upload from a plugin seeding an existing Local Vault into a
+// new Web Vault. The plugin calls this endpoint once per file, in batches.
+//
+// Each request uploads a single file. The plugin sends all Vault Content files
+// first, then Vault Internals (only if the device has `receive_internals` set).
+// OS junk is silently ignored (204 No Content).
+//
+// The plugin tracks progress client-side by counting uploaded files against
+// the total discovered in the local vault.
+//
+// After all files are uploaded, the plugin calls
+//   POST /api/sync/:vaultId/seed/complete
+// which triggers an immediate Artifacts seal (bypassing the debounce timer)
+// and verifies that search/backlinks/tags are populated.
+//
+// Resumability: the plugin can restart a seed operation. Each file PUT is
+// idempotent because syncPutFile overwrites the existing R2 object.
+// The plugin identifies already-uploaded files by comparing its local hash
+// against the manifest revision returned by GET /api/sync/:vaultId/manifest.
+
+// ── PUT /api/sync/:vaultId/seed/files/* ─────────────────────────────────
+// Upload a single file as part of a vault seed operation.
+// Identical semantics to PUT /api/sync/:vaultId/files/* but without base
+// revision checking (seed always overwrites).
+//
+// If the path is OS junk → 204 (silently ignored).
+// If the path is a Vault Internal AND device has receive_internals → accepted.
+// If the path is a Vault Internal AND device does NOT have receive_internals → 204.
+
+syncRoutes.put("/:vaultId/seed/files/*", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+
+  if (device.vaultId !== vaultId) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  const url = new URL(c.req.url);
+  const prefix = `/api/sync/${vaultId}/seed/files/`;
+  const filePath = decodeURIComponent(url.pathname.slice(prefix.length));
+
+  if (!filePath) return c.json({ error: "Path required" }, 400);
+
+  // OS junk — silently skip
+  if (isOsJunk(filePath)) return new Response(null, { status: 204 });
+
+  // Vault Internals — only accept if device opted in
+  if (isVaultInternal(filePath)) {
+    if (!device.receiveInternals) {
+      return new Response(null, { status: 204 }); // silently skip
+    }
+    // Vault Internals are written directly to R2 without manifest (not browsable)
+    const body = await c.req.arrayBuffer();
+    const contentType = (c.req.header("Content-Type") ?? "application/octet-stream")
+      .split(";")[0].trim();
+    await c.env.VAULT_BUCKET.put(contentKey(vaultId, filePath), body, {
+      httpMetadata: { contentType },
+    });
+    return new Response(null, { status: 204 });
+  }
+
+  if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
+
+  const body = await c.req.arrayBuffer();
+  const contentType = (c.req.header("Content-Type") ?? detectMime(filePath))
+    .split(";")[0].trim();
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(vaultId);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+
+  // Seed writes always win (no base revision check)
+  const entry = await stub.syncPutFile(vaultId, filePath, body, contentType, undefined);
+
+  // Index text files
+  if (contentType.startsWith("text/") || contentType === "application/json") {
+    try {
+      const text = new TextDecoder().decode(body);
+      const manifest = await stub.getManifest(vaultId);
+      const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+      indexFile(c.env.DB, { vaultId, path: filePath, content: text, vaultPaths }).catch(() => {});
+    } catch { /* ignore */ }
+  }
+
+  return c.json(entry, 200);
+});
+
+// ── POST /api/sync/:vaultId/seed/complete ─────────────────────────────────
+// Called by the plugin after all files have been uploaded.
+// Triggers an immediate Artifacts seal (bypassing the 5-second debounce).
+// Returns the commit hash and file count.
+
+syncRoutes.post("/:vaultId/seed/complete", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+
+  if (device.vaultId !== vaultId) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(vaultId);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+
+  const meta = await stub.getMeta();
+  if (!meta) return c.json({ error: "Vault not found" }, 404);
+
+  const manifest = await stub.getManifest(vaultId);
+  const existingRemote = meta.artifactsRemote ?? null;
+
+  try {
+    const result = await sealVault(
+      c.env.ARTIFACTS,
+      vaultId,
+      manifest,
+      existingRemote,
+      async (path) => {
+        const obj = await c.env.VAULT_BUCKET.get(contentKey(vaultId, path));
+        if (!obj) return null;
+        return obj.arrayBuffer();
+      },
+      `seed by ${device.deviceName}`
+    );
+
+    // Persist the Artifacts remote URL in the DO if this was the first seal
+    if (!existingRemote) {
+      await stub.setArtifactsRemote(result.remote);
+    }
+
+    return c.json({
+      ok: true,
+      commitHash: result.commitHash,
+      fileCount: result.fileCount,
+      remote: result.remote,
+    });
+  } catch (err: unknown) {
+    const msg = (err as { message?: string }).message ?? "Seal failed";
+    console.error(`[lapis] Seed seal failed for vault ${vaultId}:`, err);
+    return c.json({ error: msg }, 500);
+  }
 });
 
 export { syncRoutes };

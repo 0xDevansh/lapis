@@ -14,7 +14,7 @@ Lapis is an open-source, self-deployable Cloudflare application. You deploy it i
 | **D1** | Relational + FTS database (auth, search index, backlinks, tags, devices) | First 5 million rows/month free |
 | **KV** | Session storage for better-auth | Free tier adequate for personal use |
 
-> **Note on Artifacts (sealed history):** Lapis is designed to use Cloudflare Artifacts for append-only Git history (build slices 04, 08). Artifacts is currently in private beta. The current build ships stubs for Artifacts-dependent endpoints (e.g. `/api/vaults/:id/snapshots` returns an empty list). Vault content browsing, sync, search, and all other features work fully without Artifacts access.
+> **Note on Artifacts (sealed history):** Lapis uses Cloudflare Artifacts for append-only Git history. All Artifacts features are fully implemented: sealed commit timeline, debounced snapshotting after writes, and initial vault sealing from the Obsidian plugin. The `ARTIFACTS` binding must be configured in `wrangler.jsonc` before deploying.
 
 ---
 
@@ -156,25 +156,46 @@ Example — add to `wrangler.jsonc` under `"vars"`:
 
 ---
 
-## Artifacts (sealed history) — beta notice
+## Artifacts (sealed history)
 
-Cloudflare Artifacts is a Git-backed append-only storage product currently in private beta. Lapis uses Artifacts for the sealed commit timeline (build slices 04 and 08):
+Cloudflare Artifacts is the Git-backed append-only storage product Lapis uses for sealed vault history (build slices 04 and 08).
 
-- Vault content is already versioned via R2 and Durable Object revision counters.
-- Artifacts sealing would produce a permanent, browsable Git history of every revision.
-- The snapshot restore UI and per-file restore from history require Artifacts.
+**How sealing works:**
 
-**Without Artifacts access:**
+- After every accepted file mutation (web edit, sync write, rename, delete), the VaultCoordinator schedules a 5-second debounce alarm.
+- When the alarm fires, it reads the current vault content from R2 and pushes a new commit to the vault's Artifacts repo using isomorphic-git.
+- The repo is named `vault-<vaultId>` in the `lapis` namespace.
+- When an Obsidian plugin seeds an initial vault, calling `POST /api/sync/:vaultId/seed/complete` triggers an immediate seal (bypasses debounce).
 
-- All vault content operations (browse, edit, upload, rename, delete) work normally.
-- The sync API (device-code plugin, patch sync, merge, conflict notes) works normally.
-- Search, backlinks, and tags work normally.
-- The export endpoint (`GET /api/vaults/:id/export`) returns a ZIP of current vault content.
-- `/api/vaults/:id/snapshots` returns an empty list with an explanatory note.
+**Token handling:**
 
-When Artifacts becomes generally available, Lapis will add sealing behind a feature flag. No migration of existing vault content is required; the sealing process reads from R2.
+- Artifacts tokens are created server-side and never returned to clients.
+- Write tokens have a 10-minute TTL; read tokens for history browsing have a 5-minute TTL.
+- The repo remote URL is cached in the VaultCoordinator's SQLite on first seal.
 
-**If you already have Artifacts beta access**, contact the Lapis maintainers or open an issue — the integration scaffolding exists and can be completed.
+**Viewing history:**
+
+- `GET /api/vaults/:id/snapshots` returns the sealed commit timeline (newest first).
+- The web UI shows a collapsible "Sealed History" panel in the vault sidebar.
+
+**Adding the Artifacts binding to your deployment:**
+
+Ensure `wrangler.jsonc` includes:
+
+```jsonc
+"artifacts": [
+  {
+    "binding": "ARTIFACTS",
+    "namespace": "lapis"
+  }
+]
+```
+
+Create the namespace in advance via Wrangler if needed:
+
+```bash
+npx wrangler artifacts namespace create lapis
+```
 
 ---
 
