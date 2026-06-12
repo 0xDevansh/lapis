@@ -259,11 +259,23 @@ export default function VaultBrowserPage() {
             <Link to="/" style={styles.backLink}>
               ← Vaults
             </Link>
-            {vaultId && (
-              <Link to={`/vault/${vaultId}/devices`} style={styles.devicesLink}>
-                Devices
-              </Link>
-            )}
+            <div style={{ display: "flex", gap: "0.6rem", alignItems: "baseline" }}>
+              {vaultId && (
+                <Link to={`/vault/${vaultId}/devices`} style={styles.devicesLink}>
+                  Devices
+                </Link>
+              )}
+              {vaultId && (
+                <a
+                  href={api.exportUrl(vaultId)}
+                  download
+                  style={styles.devicesLink}
+                  title="Download vault as zip"
+                >
+                  Export
+                </a>
+              )}
+            </div>
           </div>
           <span style={styles.vaultName}>{vault?.name ?? "…"}</span>
         </div>

@@ -4,6 +4,7 @@ import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
 import { contentKey } from "./manifest";
 import { indexFile, removeFromIndex, renameInIndex } from "../search/indexer";
+import { buildZip, type ZipEntry } from "./zip";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
 
@@ -285,6 +286,144 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
     const err = e as { status?: number; message?: string };
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
   }
+});
+
+// ── Restore & Export (Slice 13) ────────────────────────────────────────────
+
+/**
+ * GET /api/vaults/:id/snapshots
+ * Returns a list of available restore points.
+ * Without Artifacts (Slice 04 is skipped), returns an empty array.
+ * This endpoint exists so the web UI can show a timeline stub.
+ */
+vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  // Artifacts sealed history not available (Slice 04 skipped).
+  // Return an empty timeline until Artifacts are enabled.
+  return c.json({ snapshots: [], note: "Sealed history requires Artifacts (not yet enabled)" });
+});
+
+/**
+ * POST /api/vaults/:id/files/:path/restore
+ * Restore a single file to a specified content, creating a new revision.
+ * This is an "append-only restore" — it writes new content as the latest
+ * revision rather than moving history backward (per ADR 0003).
+ *
+ * Body: { content: string }  (text files only; binary restore via PUT)
+ *
+ * Callers supply the content they want to restore to (e.g. copied from a
+ * Conflict Note or an older manual backup). The result is indexed and
+ * broadcast like any other write.
+ */
+vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const url = new URL(c.req.url);
+  // Strip /restore suffix to get the file path
+  const prefix = `/api/vaults/${id}/files/`;
+  let rawPath = decodeURIComponent(url.pathname.slice(prefix.length));
+  if (rawPath.endsWith("/restore")) {
+    rawPath = rawPath.slice(0, -"/restore".length);
+  }
+
+  const filePath = rawPath;
+  if (!filePath) return c.json({ error: "Path required" }, 400);
+  if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
+  if (isVaultInternal(filePath)) return c.json({ error: "Cannot restore vault internals" }, 400);
+
+  const body = await c.req.json<{ content?: string }>();
+  if (typeof body.content !== "string") {
+    return c.json({ error: "content (string) is required" }, 400);
+  }
+
+  const contentType = detectMimeFromPath(filePath);
+  const encoded = new TextEncoder().encode(body.content);
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+
+  try {
+    const entry = await stub.putFile(id, filePath, encoded.buffer as ArrayBuffer, contentType);
+
+    // Update search index
+    const manifest = await stub.getManifest(id);
+    const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
+    indexFile(c.env.DB, { vaultId: id, path: filePath, content: body.content, vaultPaths }).catch(() => {});
+
+    return c.json({ restored: true, entry }, 200);
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 409 | 500);
+  }
+});
+
+/**
+ * GET /api/vaults/:id/export
+ * Download the latest Vault Content as a zip file.
+ *
+ * All files in the manifest (excluding Vault Internals) are fetched from R2
+ * and packed into an uncompressed ZIP. The ZIP is streamed in-memory and
+ * returned with Content-Disposition: attachment.
+ *
+ * Large vaults: all R2 fetches run concurrently for performance.
+ * Vault Internals (.obsidian/ etc.) are excluded from the export.
+ */
+vaultRoutes.get("/:id/export", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const manifest = await stub.getManifest(id);
+
+  const entries = Object.values(manifest.entries).filter(
+    (e) => !isVaultInternal(e.path)
+  );
+
+  // Fetch all file contents from R2 concurrently
+  const zipEntries: ZipEntry[] = [];
+  const fetched = await Promise.allSettled(
+    entries.map(async (e) => {
+      const obj = await c.env.VAULT_BUCKET.get(e.r2Key);
+      if (!obj) return null;
+      const buf = await obj.arrayBuffer();
+      return { path: e.path, data: new Uint8Array(buf) } satisfies ZipEntry;
+    })
+  );
+
+  for (const result of fetched) {
+    if (result.status === "fulfilled" && result.value) {
+      zipEntries.push(result.value);
+    }
+  }
+
+  // Build the ZIP
+  const zipBytes = buildZip(zipEntries);
+
+  // Sanitize vault name for the filename
+  const safeName = vault.name.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64);
+  const filename = `${safeName}-export.zip`;
+
+  return new Response(zipBytes, {
+    headers: {
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": String(zipBytes.byteLength),
+      "Cache-Control": "no-store",
+    },
+  });
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────────

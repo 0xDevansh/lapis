@@ -320,3 +320,43 @@ export async function updateDevice(
     body: JSON.stringify(updates),
   });
 }
+
+// ── Restore & Export (Slice 13) ───────────────────────────────────────────────
+
+export interface Snapshot {
+  id: string;
+  message?: string;
+  createdAt: string;
+}
+
+/** Returns available restore snapshots. Empty until Artifacts are enabled. */
+export async function listSnapshots(vaultId: string): Promise<Snapshot[]> {
+  const res = await apiFetch<{ snapshots: Snapshot[] }>(`/api/vaults/${vaultId}/snapshots`);
+  return res.snapshots;
+}
+
+/**
+ * Restore a file to the provided content (creates a new revision).
+ * Returns the updated ManifestEntry.
+ */
+export async function restoreFile(
+  vaultId: string,
+  path: string,
+  content: string
+): Promise<{ restored: boolean; entry: ManifestEntry }> {
+  return apiFetch<{ restored: boolean; entry: ManifestEntry }>(
+    `/api/vaults/${vaultId}/files/${encodeURIComponent(path)}/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }
+  );
+}
+
+/**
+ * Returns the URL for downloading the vault's latest content as a zip.
+ * Use as an <a href> or trigger programmatic download.
+ */
+export function exportUrl(vaultId: string): string {
+  return `/api/vaults/${vaultId}/export`;
+}
