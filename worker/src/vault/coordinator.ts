@@ -87,6 +87,11 @@ interface PresenceEntry {
   identity: string;
   openPath: string | null;
 }
+
+type AttachedWebSocket = WebSocket & {
+  serializeAttachment(value: PresenceEntry): void;
+  deserializeAttachment(): PresenceEntry | undefined;
+};
 export class VaultCoordinator extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   /** Ephemeral presence map — keyed by WebSocket object identity. */
@@ -746,10 +751,20 @@ export class VaultCoordinator extends DurableObject<Env> {
   /** Build the current presence snapshot for all connected clients. */
   private presenceSnapshot(): PresenceNotification {
     const sessions: PresenceNotification["sessions"] = [];
-    for (const [, entry] of this.presence) {
-      sessions.push({ identity: entry.identity, openPath: entry.openPath });
+    for (const ws of this.ctx.getWebSockets()) {
+      const entry = this.getPresence(ws);
+      if (entry) sessions.push({ identity: entry.identity, openPath: entry.openPath });
     }
     return { type: "presence", sessions };
+  }
+
+  private getPresence(ws: WebSocket): PresenceEntry | undefined {
+    return this.presence.get(ws) ?? (ws as AttachedWebSocket).deserializeAttachment?.();
+  }
+
+  private setPresence(ws: WebSocket, entry: PresenceEntry): void {
+    this.presence.set(ws, entry);
+    (ws as AttachedWebSocket).serializeAttachment?.(entry);
   }
 
   /** Send a message to a single WebSocket. */
@@ -774,15 +789,17 @@ export class VaultCoordinator extends DurableObject<Env> {
     // {"type": "open", "path": "notes/foo.md"}
     if (parsed.type === "open") {
       const path = typeof parsed.path === "string" ? parsed.path : null;
-      const entry = this.presence.get(ws);
+      const entry = this.getPresence(ws);
       if (entry) {
         entry.openPath = path;
+        this.setPresence(ws, entry);
       }
 
       // Warn if other clients have the same file open
       if (path) {
         const others: string[] = [];
-        for (const [otherWs, otherEntry] of this.presence) {
+        for (const otherWs of this.ctx.getWebSockets()) {
+          const otherEntry = this.getPresence(otherWs);
           if (otherWs !== ws && otherEntry.openPath === path) {
             others.push(otherEntry.identity);
           }
@@ -798,8 +815,11 @@ export class VaultCoordinator extends DurableObject<Env> {
 
     // {"type": "close_file"}
     if (parsed.type === "close_file") {
-      const entry = this.presence.get(ws);
-      if (entry) entry.openPath = null;
+      const entry = this.getPresence(ws);
+      if (entry) {
+        entry.openPath = null;
+        this.setPresence(ws, entry);
+      }
       this.broadcast(this.presenceSnapshot());
     }
   }
@@ -841,7 +861,7 @@ export class VaultCoordinator extends DurableObject<Env> {
       const { 0: client, 1: server } = new WebSocketPair();
 
       this.ctx.acceptWebSocket(server);
-      this.presence.set(server, { identity, openPath: null });
+      this.setPresence(server, { identity, openPath: null });
 
       // Send initial presence snapshot to the new client
       server.send(JSON.stringify(this.presenceSnapshot()));

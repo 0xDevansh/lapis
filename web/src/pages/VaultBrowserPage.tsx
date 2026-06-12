@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import * as api from "../api";
 import { FolderTree, buildTree } from "../components/FolderTree";
 import MarkdownView from "../components/MarkdownView";
@@ -37,10 +37,32 @@ function isImageType(ct: string): boolean {
   return IMAGE_TYPES.some((t) => ct.startsWith(t));
 }
 
+function encodeVaultRoutePath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function decodeVaultRoutePath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
+function hasUnsavedEdit(view: FileViewState): boolean {
+  return view.kind === "editing" && !view.saving && view.content !== view.baseContent;
+}
+
 // ── Page component ────────────────────────────────────────────────────────────
 
 export default function VaultBrowserPage() {
-  const { id: vaultId } = useParams<{ id: string }>();
+  const { id: vaultId, "*": routeSplat } = useParams<{ id: string; "*": string }>();
+  const navigate = useNavigate();
   const [vault, setVault] = useState<api.Vault | null>(null);
   const [manifest, setManifest] = useState<api.VaultManifest | null>(null);
   const [manifestError, setManifestError] = useState<string | null>(null);
@@ -48,6 +70,7 @@ export default function VaultBrowserPage() {
   const [fileView, setFileView] = useState<FileViewState>({ kind: "idle" });
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const uploadRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const { theme, setTheme } = useTheme();
   const [dismissedWarning, setDismissedWarning] = useState(false);
   const selectedPathRef = useRef<string | null>(null);
@@ -76,10 +99,36 @@ export default function VaultBrowserPage() {
   }, [fileView]);
 
   useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedEdit(fileViewRef.current)) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     if (!vaultId) return;
     api.getVault(vaultId).then(setVault).catch(() => {});
     refreshManifest();
   }, [vaultId, refreshManifest]);
+
+  function confirmDiscardEdit(): boolean {
+    if (!hasUnsavedEdit(fileViewRef.current)) return true;
+    return window.confirm("You have unsaved edits. Leave this note and discard them?");
+  }
 
   // ── File opening ────────────────────────────────────────────────────────────
 
@@ -122,7 +171,28 @@ export default function VaultBrowserPage() {
     [vaultId, manifest]
   );
 
-  const openFile = loadFile;
+  const openFile = useCallback(
+    (path: string) => {
+      if (!vaultId || !confirmDiscardEdit()) return;
+      navigate(`/vault/${vaultId}/file/${encodeVaultRoutePath(path)}`);
+      void loadFile(path);
+    },
+    [loadFile, navigate, vaultId]
+  );
+
+  useEffect(() => {
+    if (!manifest) return;
+    if (!routeSplat) {
+      setSelectedPath(null);
+      if (!hasUnsavedEdit(fileViewRef.current)) setFileView({ kind: "idle" });
+      return;
+    }
+
+    if (!routeSplat.startsWith("file/")) return;
+    const path = decodeVaultRoutePath(routeSplat.slice("file/".length));
+    if (selectedPathRef.current === path && fileViewRef.current.kind !== "idle") return;
+    void loadFile(path);
+  }, [loadFile, manifest, routeSplat]);
 
   const handleRemoteChange = useCallback(
     async (msg: import("../hooks/useVaultNotify").ChangeNotification) => {
@@ -132,6 +202,7 @@ export default function VaultBrowserPage() {
 
       const currentKey = currentPath.toLowerCase();
       if (msg.kind === "delete" && msg.path.toLowerCase() === currentKey) {
+        if (vaultId) navigate(`/vault/${vaultId}`, { replace: true });
         setSelectedPath(null);
         setFileView({ kind: "idle" });
         return;
@@ -139,6 +210,7 @@ export default function VaultBrowserPage() {
 
       if (msg.kind === "rename" && msg.path.toLowerCase() === currentKey) {
         if (msg.newPath && fileViewRef.current.kind !== "editing") {
+          if (vaultId) navigate(`/vault/${vaultId}/file/${encodeVaultRoutePath(msg.newPath)}`, { replace: true });
           await loadFile(msg.newPath, nextManifest);
         }
         return;
@@ -147,11 +219,12 @@ export default function VaultBrowserPage() {
       if (msg.kind === "put" && msg.path.toLowerCase() === currentKey && fileViewRef.current.kind !== "editing") {
         await loadFile(currentPath, nextManifest);
       } else if (nextManifest && !nextManifest.entries[currentKey] && fileViewRef.current.kind !== "editing") {
+        if (vaultId) navigate(`/vault/${vaultId}`, { replace: true });
         setSelectedPath(null);
         setFileView({ kind: "idle" });
       }
     },
-    [loadFile, refreshManifest]
+    [loadFile, navigate, refreshManifest, vaultId]
   );
 
   const { connected, presence, sameFileWarning } = useVaultNotify(
@@ -268,6 +341,7 @@ export default function VaultBrowserPage() {
       await refreshManifest();
       setModal({ kind: "none" });
       if (selectedPath === path) {
+        navigate(`/vault/${vaultId}`, { replace: true });
         setSelectedPath(null);
         setFileView({ kind: "idle" });
       }
@@ -297,12 +371,12 @@ export default function VaultBrowserPage() {
       <aside style={styles.sidebar}>
         <div style={styles.sidebarHeader}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-            <Link to="/" style={styles.backLink}>
+            <Link to="/" style={styles.backLink} onClick={(e) => { if (!confirmDiscardEdit()) e.preventDefault(); }}>
               ← Vaults
             </Link>
             <div style={{ display: "flex", gap: "0.6rem", alignItems: "baseline" }}>
               {vaultId && (
-                <Link to={`/vault/${vaultId}/devices`} style={styles.devicesLink}>
+                <Link to={`/vault/${vaultId}/devices`} style={styles.devicesLink} onClick={(e) => { if (!confirmDiscardEdit()) e.preventDefault(); }}>
                   Devices
                 </Link>
               )}
@@ -359,7 +433,7 @@ export default function VaultBrowserPage() {
         </div>
 
         {vaultId && (
-          <SearchPanel vaultId={vaultId} onSelect={openFile} />
+          <SearchPanel vaultId={vaultId} onSelect={openFile} inputRef={searchInputRef} />
         )}
 
         {vaultId && (

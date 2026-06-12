@@ -256,7 +256,7 @@ export default class LapisPlugin extends Plugin {
       onOpen: (reconnected) => {
         this.updateStatus();
         if (reconnected) this.debug("notify reconnected");
-        this.reportOpenFile();
+        this.reportOpenFile(true);
       },
       onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount()),
       onMessage: (message) => this.handleNotifyMessage(message),
@@ -294,10 +294,10 @@ export default class LapisPlugin extends Plugin {
     }
   }
 
-  private reportOpenFile() {
+  private reportOpenFile(force = false) {
     const activeFile = this.app.workspace.getActiveFile();
     const nextPath = activeFile?.path ?? null;
-    if (nextPath === this.currentOpenPath) return;
+    if (!force && nextPath === this.currentOpenPath) return;
     this.currentOpenPath = nextPath;
     if (nextPath) {
       this.notifyClient?.sendOpen(nextPath);

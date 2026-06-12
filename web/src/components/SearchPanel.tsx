@@ -9,11 +9,13 @@ import * as api from "../api";
 interface Props {
   vaultId: string;
   onSelect: (path: string) => void;
+  inputRef?: React.RefObject<HTMLInputElement>;
 }
 
-export default function SearchPanel({ vaultId, onSelect }: Props) {
+export default function SearchPanel({ vaultId, onSelect, inputRef }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<api.SearchResult[] | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -22,6 +24,7 @@ export default function SearchPanel({ vaultId, onSelect }: Props) {
     (q: string) => {
       if (!q.trim()) {
         setResults(null);
+        setActiveIndex(0);
         setError(null);
         return;
       }
@@ -31,6 +34,7 @@ export default function SearchPanel({ vaultId, onSelect }: Props) {
         .searchVault(vaultId, q)
         .then((r) => {
           setResults(r);
+          setActiveIndex(0);
           setLoading(false);
         })
         .catch((e: Error) => {
@@ -48,6 +52,39 @@ export default function SearchPanel({ vaultId, onSelect }: Props) {
     debounceRef.current = setTimeout(() => runSearch(val), 300);
   }
 
+  function closeSearch() {
+    setQuery("");
+    setResults(null);
+    setActiveIndex(0);
+  }
+
+  function selectResult(result: api.SearchResult) {
+    closeSearch();
+    onSelect(result.path);
+    inputRef?.current?.blur();
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!results || results.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex((i) => (i + 1) % results.length);
+      return;
+    }
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((i) => (i - 1 + results.length) % results.length);
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      selectResult(results[activeIndex] ?? results[0]);
+    }
+  }
+
   /** Render snippet with **bold** markers */
   function renderSnippet(raw: string): React.ReactNode {
     const parts = raw.split(/(\*\*[^*]+\*\*)/);
@@ -62,12 +99,15 @@ export default function SearchPanel({ vaultId, onSelect }: Props) {
   return (
     <div style={styles.panel}>
       <input
+        ref={inputRef}
         style={styles.input}
         type="search"
         placeholder="Search notes…"
         value={query}
         onChange={handleChange}
+        onKeyDown={handleKeyDown}
         aria-label="Search vault"
+        aria-activedescendant={results?.[activeIndex] ? `search-result-${activeIndex}` : undefined}
       />
 
       {loading && <p style={styles.muted}>Searching…</p>}
@@ -79,15 +119,13 @@ export default function SearchPanel({ vaultId, onSelect }: Props) {
 
       {results && results.length > 0 && (
         <ul style={styles.list}>
-          {results.map((r) => (
+          {results.map((r, index) => (
             <li key={r.path} style={styles.item}>
               <button
-                style={styles.resultBtn}
-                onClick={() => {
-                  setQuery("");
-                  setResults(null);
-                  onSelect(r.path);
-                }}
+                id={`search-result-${index}`}
+                style={index === activeIndex ? styles.resultBtnActive : styles.resultBtn}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => selectResult(r)}
               >
                 <span style={styles.resultPath}>{r.path}</span>
                 {r.snippet && (
@@ -144,6 +182,17 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     textAlign: "left",
     background: "none",
+    border: "none",
+    borderRadius: 4,
+    padding: "0.3rem 0.4rem",
+    cursor: "pointer",
+    lineHeight: 1.4,
+  },
+  resultBtnActive: {
+    display: "block",
+    width: "100%",
+    textAlign: "left",
+    background: "#ede8f8",
     border: "none",
     borderRadius: 4,
     padding: "0.3rem 0.4rem",

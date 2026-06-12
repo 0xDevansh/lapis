@@ -54,19 +54,42 @@ searchRoutes.get("/:id/search", requireSession, async (c) => {
   const safeQuery = sanitizeFtsQuery(q);
   if (!safeQuery) return c.json<SearchResult[]>([]);
 
+  const filenameExact = q.toLowerCase();
+  const filenamePrefix = `${filenameExact}%`;
+  const filenameContains = `%${filenameExact}%`;
+
   const { results } = await c.env.DB.prepare(
     `SELECT
        path,
        snippet(vault_fts, 3, '**', '**', '…', 32) AS snippet
      FROM vault_fts
      WHERE vault_id = ? AND vault_fts MATCH ?
-     ORDER BY bm25(vault_fts, 0, 0, 1, 10)
-     LIMIT 20`
+      ORDER BY
+        CASE
+          WHEN lower(filename) = ? THEN 0
+          WHEN lower(filename) LIKE ? THEN 1
+          WHEN lower(filename) LIKE ? THEN 2
+          ELSE 3
+        END,
+        bm25(vault_fts, 0, 0, 1, 10)
+      LIMIT 20`
   )
-    .bind(id, safeQuery)
+    .bind(id, safeQuery, filenameExact, filenamePrefix, filenameContains)
     .all<{ path: string; snippet: string }>();
 
-  return c.json<SearchResult[]>(results ?? []);
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const manifest = await stub.getManifest(id);
+  const canonicalPaths = new Map(
+    Object.values(manifest.entries).map((entry) => [entry.path.toLowerCase(), entry.path])
+  );
+
+  return c.json<SearchResult[]>(
+    (results ?? []).map((result) => ({
+      ...result,
+      path: canonicalPaths.get(result.path.toLowerCase()) ?? result.path,
+    }))
+  );
 });
 
 // ── Backlinks ─────────────────────────────────────────────────────────────────
@@ -99,7 +122,18 @@ searchRoutes.get("/:id/backlinks", requireSession, async (c) => {
     .bind(id, path.toLowerCase())
     .all<{ sourcePath: string }>();
 
-  return c.json<BacklinkResult[]>(results ?? []);
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const manifest = await stub.getManifest(id);
+  const canonicalPaths = new Map(
+    Object.values(manifest.entries).map((entry) => [entry.path.toLowerCase(), entry.path])
+  );
+
+  return c.json<BacklinkResult[]>(
+    (results ?? []).map((result) => ({
+      sourcePath: canonicalPaths.get(result.sourcePath.toLowerCase()) ?? result.sourcePath,
+    }))
+  );
 });
 
 // ── Tags ──────────────────────────────────────────────────────────────────────

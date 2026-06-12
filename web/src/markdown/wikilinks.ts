@@ -79,7 +79,7 @@ export function tokenize(match: RegExpExecArray): WikilinkToken {
  */
 export function resolveWikilink(
   target: string,
-  pathsLower: Set<string>
+  paths: Set<string> | Map<string, string>
 ): string | null {
   // Normalize: treat the target as potentially relative or absolute
   let normalised = target.trim();
@@ -88,12 +88,17 @@ export function resolveWikilink(
   const lowerTarget = normalised.toLowerCase();
 
   // 1. Exact match
-  if (pathsLower.has(lowerTarget)) return lowerTarget;
+  if (paths instanceof Map) {
+    const exact = paths.get(lowerTarget);
+    if (exact) return exact;
+  } else if (paths.has(lowerTarget)) {
+    return lowerTarget;
+  }
 
   // 2. Basename match
   const basename = lowerTarget.split("/").pop()!;
-  for (const p of pathsLower) {
-    if (p.split("/").pop() === basename) return p;
+  for (const [lowerPath, canonicalPath] of paths instanceof Map ? paths : Array.from(paths, (p) => [p, p] as const)) {
+    if (lowerPath.split("/").pop() === basename) return canonicalPath;
   }
 
   return null;

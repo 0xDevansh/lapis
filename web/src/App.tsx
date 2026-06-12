@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import AuthPage from "./pages/AuthPage";
 import VaultListPage from "./pages/VaultListPage";
@@ -41,11 +41,18 @@ export default function App() {
         path="/"
         element={<VaultListPage user={user} onSignOut={signOut} />}
       />
-      {/* Vault browser — Slice 02 */}
-      <Route path="/vault/:id/*" element={<VaultBrowserPage />} />
       {/* Device management — Slice 07 */}
       <Route path="/vault/:id/devices" element={<DevicesPage />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      {/* Vault browser — Slice 02 */}
+      <Route path="/vault/:id/*" element={<VaultBrowserPage />} />
+      <Route
+        path="*"
+        element={
+          <div style={{ padding: "2rem", color: "#6b6b6b" }}>
+            Page not found.
+          </div>
+        }
+      />
     </Routes>
   );
 }

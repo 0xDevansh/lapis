@@ -38,14 +38,25 @@ app.route("/api", notifyRoutes);
 
 // ── SPA fallback ─────────────────────────────────────────────────────────────
 app.get("*", async (c) => {
+  const url = new URL(c.req.url);
+  if (url.pathname.startsWith("/api/")) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
+  const lastSegment = url.pathname.split("/").pop() ?? "";
+  const looksLikeAsset = lastSegment.includes(".");
+  if (!looksLikeAsset) {
+    const indexUrl = new URL("/index.html", c.req.url);
+    return c.env.ASSETS.fetch(new Request(indexUrl, c.req.raw) as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
+  }
+
   const assetResponse = await c.env.ASSETS.fetch(c.req.raw as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
   if (assetResponse.status !== 404) {
     return assetResponse;
   }
 
-  const url = new URL(c.req.url);
-  url.pathname = "/index.html";
-  return c.env.ASSETS.fetch(new Request(url, c.req.raw) as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
+  const indexUrl = new URL("/index.html", c.req.url);
+  return c.env.ASSETS.fetch(new Request(indexUrl, c.req.raw) as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
 });
 
 export default app;

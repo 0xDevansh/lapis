@@ -17,7 +17,7 @@ import { resolveWikilink } from "./wikilinks";
  */
 function wikilinkExtension(options: {
   vaultId: string;
-  pathsLower: Set<string>;
+  pathByLower: Map<string, string>;
   onCreateNote?: (path: string) => void;
 }): MarkedExtension {
   return {
@@ -59,7 +59,7 @@ function wikilinkExtension(options: {
             if (fragment) displayText += ` > ${fragment}`;
           }
 
-          const resolvedPath = resolveWikilink(target, options.pathsLower);
+          const resolvedPath = resolveWikilink(target, options.pathByLower);
 
           // ── Embed (![[...]]) ─────────────────────────────────────────────
           if (isEmbed) {
@@ -73,7 +73,7 @@ function wikilinkExtension(options: {
               return `<img src="${src}" alt="${escapeHtml(displayText)}" class="vault-embed-image" loading="lazy" />`;
             }
             // Non-image embed — show as a link
-            const href = `/vault/${options.vaultId}/${resolvedPath}`;
+            const href = `/vault/${options.vaultId}/file/${encodeVaultPath(resolvedPath)}`;
             return `<a href="${escapeHtml(href)}" class="wikilink">${escapeHtml(displayText)}</a>`;
           }
 
@@ -86,7 +86,7 @@ function wikilinkExtension(options: {
             return `<a class="wikilink wikilink-broken" title="Note not found — click to create" data-create-path="${dataPath}">${escapeHtml(displayText)}</a>`;
           }
 
-          const href = `/vault/${options.vaultId}/${resolvedPath}${fragment ? "#" + encodeURIComponent(fragment) : ""}`;
+          const href = `/vault/${options.vaultId}/file/${encodeVaultPath(resolvedPath)}${fragment ? "#" + encodeURIComponent(fragment) : ""}`;
           return `<a href="${escapeHtml(href)}" class="wikilink">${escapeHtml(displayText)}</a>`;
         },
       },
@@ -149,10 +149,10 @@ export interface RenderOptions {
  * Wikilinks and callouts are processed.
  */
 export function renderMarkdown(source: string, options: RenderOptions): string {
-  const pathsLower = new Set(options.vaultPaths.map((p) => p.toLowerCase()));
+  const pathByLower = new Map(options.vaultPaths.map((p) => [p.toLowerCase(), p]));
 
   // Register wikilink extension (stateless per call)
-  marked.use(wikilinkExtension({ vaultId: options.vaultId, pathsLower }));
+  marked.use(wikilinkExtension({ vaultId: options.vaultId, pathByLower }));
   marked.use({ breaks: false, gfm: true });
 
   const raw = marked.parse(source, { async: false }) as string;
@@ -183,4 +183,8 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function encodeVaultPath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }

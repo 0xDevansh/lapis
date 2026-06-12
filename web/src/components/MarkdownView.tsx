@@ -63,7 +63,17 @@ export default function MarkdownView({
       // Internal vault links
       if (href.startsWith(`/vault/${vaultId}/`)) {
         e.preventDefault();
-        const path = decodeURIComponent(href.slice(`/vault/${vaultId}/`.length));
+        const rawPath = href.slice(`/vault/${vaultId}/`.length).replace(/^file\//, "").split("#", 1)[0];
+        const path = rawPath
+          .split("/")
+          .map((segment) => {
+            try {
+              return decodeURIComponent(segment);
+            } catch {
+              return segment;
+            }
+          })
+          .join("/");
         if (onNavigate) onNavigate(path);
         else navigate(href);
       }
