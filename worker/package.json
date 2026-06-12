@@ -6,13 +6,18 @@
     "dev": "wrangler dev",
     "build": "wrangler deploy --dry-run --outdir=dist",
     "deploy": "wrangler deploy",
+    "migrate": "wrangler d1 migrations apply lapis-db --local",
+    "migrate:remote": "wrangler d1 migrations apply lapis-db",
     "test": "vitest run",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
+    "@better-auth/kysely-adapter": "^1.6.16",
     "better-auth": "^1.2.8",
     "hono": "^4.7.11",
-    "isomorphic-git": "^1.38.4"
+    "isomorphic-git": "^1.38.4",
+    "kysely": "^0.29.2",
+    "kysely-d1": "^0.4.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.4",

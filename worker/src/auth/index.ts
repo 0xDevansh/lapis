@@ -1,4 +1,7 @@
 import { betterAuth } from "better-auth";
+import { kyselyAdapter } from "@better-auth/kysely-adapter";
+import { Kysely } from "kysely";
+import { D1Dialect } from "kysely-d1";
 import type { Env } from "../types";
 
 /**
@@ -6,11 +9,11 @@ import type { Env } from "../types";
  * Called once per request (Workers are stateless across invocations).
  */
 export function createAuth(env: Env) {
+  const db = new Kysely({ dialect: new D1Dialect({ database: env.DB }) });
   return betterAuth({
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    database: { provider: "sqlite", db: env.DB as any },
+    database: kyselyAdapter(db, { type: "sqlite" }),
     emailAndPassword: {
       enabled: true,
     },

@@ -4,8 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "pnpm -r --parallel run dev",
-    "build": "pnpm --filter web run build && pnpm --filter worker run build",
+    "build": "pnpm --filter web run build && pnpm --filter worker run build && pnpm --filter plugin run build",
     "deploy": "pnpm --filter worker run deploy",
+    "migrate": "pnpm --filter worker run migrate",
+    "migrate:remote": "pnpm --filter worker run migrate:remote",
+    "plugin:build": "pnpm --filter plugin run build",
+    "plugin:dev": "pnpm --filter plugin run dev",
     "test": "pnpm -r run test"
   },
   "devDependencies": {
