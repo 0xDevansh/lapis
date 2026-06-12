@@ -7,6 +7,42 @@ export interface LapisSettings {
   lastConnectedAt: string | null;
 }
 
+export interface ManifestEntry {
+  path: string;
+  size: number;
+  contentType: string;
+  updatedAt: string;
+  revision: number;
+}
+
+export interface VaultManifest {
+  version: 1;
+  vaultId: string;
+  updatedAt: string;
+  entries: Record<string, ManifestEntry>;
+}
+
+export interface SyncJournal {
+  version: 1;
+  vaultId: string;
+  lastSyncAt: string;
+  fileRevisions: Record<string, number>;
+  fileHashes: Record<string, string>;
+  pendingOps: unknown[];
+}
+
+export interface PluginData {
+  settings?: Partial<LapisSettings>;
+  journal?: SyncJournal | null;
+}
+
+export interface SeedCompleteResult {
+  ok: boolean;
+  commitHash?: string;
+  fileCount: number;
+  remote?: string;
+}
+
 export const DEFAULT_SETTINGS: LapisSettings = {
   serverUrl: "http://localhost:8787",
   vaultId: "",
@@ -39,6 +75,13 @@ export interface LapisRequestOptions {
   body?: string | ArrayBuffer;
   contentType?: string;
   token?: string;
+  headers?: Record<string, string>;
+}
+
+export interface ConflictResponse {
+  conflict: true;
+  conflictPath: string;
+  entry: ManifestEntry;
 }
 
 export interface LapisResponse<T> {

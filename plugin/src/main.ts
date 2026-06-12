@@ -1,12 +1,15 @@
 import { Notice, Plugin } from "obsidian";
 import { LapisClient } from "./net/client";
 import { LapisSettingTab, normalizeSettings } from "./settings";
-import type { LapisSettings } from "./types";
+import type { LapisSettings, PluginData, SyncJournal } from "./types";
+import { SyncEngine } from "./sync/engine";
+import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
 import { LapisStatusBar } from "./ui/status";
 
 export default class LapisPlugin extends Plugin {
   settings!: LapisSettings;
+  journal: SyncJournal | null = null;
   private statusBar!: LapisStatusBar;
 
   async onload() {
@@ -27,16 +30,29 @@ export default class LapisPlugin extends Plugin {
       callback: () => void this.disconnect(),
     });
 
+    this.addCommand({
+      id: "sync-now",
+      name: "Sync now",
+      callback: () => void this.syncNow(),
+    });
+
     this.addSettingTab(new LapisSettingTab(this.app, this));
   }
 
   async loadSettings() {
-    this.settings = normalizeSettings(await this.loadData());
+    const data = (await this.loadData()) as PluginData | null;
+    this.settings = normalizeSettings(data?.settings ?? data);
+    this.journal = isValidJournal(data?.journal, this.settings.vaultId) ? data.journal : null;
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.savePluginData();
     this.statusBar?.update(this.settings);
+  }
+
+  async saveJournal(journal: SyncJournal) {
+    this.journal = journal;
+    await this.savePluginData();
   }
 
   async connect() {
@@ -66,6 +82,7 @@ export default class LapisPlugin extends Plugin {
           this.settings.syncToken = token;
           this.settings.lastConnectedAt = new Date().toISOString();
           await this.saveSettings();
+          await this.syncNow();
         },
         onDone: () => this.statusBar.update(this.settings),
       }).open();
@@ -79,7 +96,23 @@ export default class LapisPlugin extends Plugin {
   async disconnect() {
     this.settings.syncToken = "";
     this.settings.lastConnectedAt = null;
+    this.journal = null;
     await this.saveSettings();
     new Notice("Lapis: disconnected");
+  }
+
+  async syncNow() {
+    const engine = new SyncEngine({
+      app: this.app,
+      settings: this.settings,
+      client: new LapisClient(this.settings.serverUrl),
+      getJournal: () => this.journal,
+      setJournal: (journal) => this.saveJournal(journal),
+    });
+    await engine.firstSync();
+  }
+
+  private async savePluginData() {
+    await this.saveData({ settings: this.settings, journal: this.journal } satisfies PluginData);
   }
 }

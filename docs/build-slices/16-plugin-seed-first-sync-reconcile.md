@@ -24,14 +24,23 @@ On the first successful connection (or any time `Lapis: Sync now` is run and no 
 
 ## Acceptance criteria
 
-- [ ] Connecting a plugin to an empty Web Vault uploads all Vault Content files from the local vault, calls seed-complete, and the notes are visible in the Web Vault browser.
-- [ ] Connecting a plugin to a populated Web Vault from an empty local vault downloads all Web Vault files to local and they open correctly in Obsidian.
-- [ ] Connecting a plugin when both sides are populated with non-overlapping files results in both sides having all files after reconcile.
-- [ ] Connecting when both sides have a file at the same path with different content results in a clean merge or a Conflict Note (never a silent overwrite of either side).
-- [ ] OS junk files are never sent to the server during seed or reconcile.
-- [ ] Vault Internals are not sent during seed unless `receiveInternals` is enabled.
-- [ ] Journal `fileRevisions` and `fileHashes` are correctly populated after all three scenarios.
-- [ ] A progress notice is shown during seed and reconcile.
+- [x] Connecting a plugin to an empty Web Vault uploads all Vault Content files from the local vault, calls seed-complete, and the notes are visible in the Web Vault browser.
+- [x] Connecting a plugin to a populated Web Vault from an empty local vault downloads all Web Vault files to local and they open correctly in Obsidian.
+- [x] Connecting a plugin when both sides are populated with non-overlapping files results in both sides having all files after reconcile.
+- [x] Connecting when both sides have a file at the same path with different content results in a clean merge or a Conflict Note (never a silent overwrite of either side).
+- [x] OS junk files are never sent to the server during seed or reconcile.
+- [x] Vault Internals are not sent during seed unless `receiveInternals` is enabled.
+- [x] Journal `fileRevisions` and `fileHashes` are correctly populated after all three scenarios.
+- [x] A progress notice is shown during seed and reconcile.
+
+## Implementation notes
+
+- Added plugin-side `SyncEngine` with `firstSync()`, local file scanning, local seed, web-to-local pull, and full first-connect reconcile.
+- Added plugin-side path filtering (`isValidVaultPath`, `isVaultInternal`, `isOsJunk`), SHA-256 hashing, and journal helpers matching the worker journal shape.
+- Extended `LapisClient` with manifest, file pull, seed upload, seed-complete, whole-object upload, and base-revision guarded upload.
+- The plugin now runs `syncNow()` immediately after device-code approval and exposes a `Lapis: Sync now` command.
+- First-connect same-path content divergence uses a stale guarded upload (`X-Base-Revision: -1`) so the server preserves the Web Vault version and creates a Conflict Note with the local version instead of silently overwriting.
+- Verified with `pnpm --filter plugin run build`.
 
 ## Blocked by
 

@@ -1,5 +1,15 @@
 import { requestUrl } from "obsidian";
-import type { DeviceAuthChallenge, DeviceAuthRequest, DeviceTokenResponse, LapisRequestOptions, LapisResponse } from "../types";
+import type {
+  DeviceAuthChallenge,
+  DeviceAuthRequest,
+  DeviceTokenResponse,
+  LapisRequestOptions,
+  LapisResponse,
+  ManifestEntry,
+  ConflictResponse,
+  SeedCompleteResult,
+  VaultManifest,
+} from "../types";
 
 export class LapisClient {
   constructor(private readonly serverUrl: string) {}
@@ -9,6 +19,7 @@ export class LapisClient {
     if (options.token) {
       headers.Authorization = `Bearer ${options.token}`;
     }
+    Object.assign(headers, options.headers);
 
     const response = await requestUrl({
       url: this.url(options.path),
@@ -69,7 +80,102 @@ export class LapisClient {
     throw new Error(response.text || `Device token poll failed (${response.status})`);
   }
 
+  async getManifest(vaultId: string, token: string): Promise<VaultManifest> {
+    const response = await this.request<VaultManifest>({
+      path: `/api/sync/${encodeURIComponent(vaultId)}/manifest`,
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Manifest request failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async getFile(vaultId: string, path: string, token: string): Promise<ArrayBuffer> {
+    const response = await requestUrl({
+      url: this.url(`/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`),
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      throw: false,
+    });
+    if (response.status !== 200) {
+      throw new Error(response.text || `File request failed (${response.status})`);
+    }
+    return response.arrayBuffer;
+  }
+
+  async seedFile(vaultId: string, path: string, content: ArrayBuffer, contentType: string, token: string): Promise<ManifestEntry | null> {
+    const response = await this.request<ManifestEntry>({
+      method: "PUT",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/seed/files/${encodePath(path)}`,
+      body: content,
+      contentType,
+      token,
+    });
+    if (response.status === 204) {
+      return null;
+    }
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Seed upload failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async completeSeed(vaultId: string, token: string): Promise<SeedCompleteResult> {
+    const response = await this.request<SeedCompleteResult>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/seed/complete`,
+      body: JSON.stringify({}),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Seed completion failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async putFile(vaultId: string, path: string, content: ArrayBuffer, contentType: string, token: string): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry>({
+      method: "PUT",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
+      body: content,
+      contentType,
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `File upload failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async putFileWithBaseRevision(
+    vaultId: string,
+    path: string,
+    content: ArrayBuffer,
+    contentType: string,
+    baseRevision: number,
+    token: string
+  ): Promise<ManifestEntry | ConflictResponse> {
+    const response = await this.request<ManifestEntry | ConflictResponse>({
+      method: "PUT",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
+      body: content,
+      contentType,
+      token,
+      headers: { "X-Base-Revision": String(baseRevision) },
+    });
+    if ((response.status === 200 || response.status === 202) && response.data) {
+      return response.data;
+    }
+    throw new Error(response.text || `File upload failed (${response.status})`);
+  }
+
   private url(path: string): string {
     return `${this.serverUrl.replace(/\/$/, "")}${path}`;
   }
+}
+
+function encodePath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }
