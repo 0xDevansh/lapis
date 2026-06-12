@@ -185,6 +185,42 @@ export class SyncEngine {
     await this.options.setJournal(journal);
   }
 
+  async applyRemotePut(path: string): Promise<void> {
+    const manifest = await this.client.getManifest(this.vaultId, this.token);
+    const entry = manifest.entries[lowerPath(path)];
+    if (!entry) return;
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    await this.pullEntry(entry, journal);
+    await this.options.setJournal(journal);
+  }
+
+  async applyRemoteRename(oldPath: string, newPath: string): Promise<void> {
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const existing = this.vault.getAbstractFileByPath(oldPath);
+    if (existing instanceof TFile && !this.vault.getAbstractFileByPath(newPath)) {
+      await this.ensureParent(newPath);
+      await this.vault.rename(existing, newPath);
+    } else {
+      await this.applyRemotePut(newPath);
+    }
+    const oldHash = journal.fileHashes[lowerPath(oldPath)];
+    removeEntry(journal, oldPath);
+    const manifest = await this.client.getManifest(this.vaultId, this.token);
+    const entry = manifest.entries[lowerPath(newPath)];
+    if (entry) setEntry(journal, entry, oldHash);
+    await this.options.setJournal(journal);
+  }
+
+  async applyRemoteDelete(path: string): Promise<void> {
+    const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    const existing = this.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      await this.vault.delete(existing);
+    }
+    removeEntry(journal, path);
+    await this.options.setJournal(journal);
+  }
+
   private async seedLocal(localFiles: LocalFile[]) {
     const journal = emptyJournal(this.vaultId);
     let count = 0;

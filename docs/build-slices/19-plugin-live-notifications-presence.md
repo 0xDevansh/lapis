@@ -32,13 +32,13 @@ The existing `GET /api/sync/:vaultId/notify` route authenticates via `Authorizat
 
 ## Acceptance criteria
 
-- [ ] Within ~1 s of a note being saved in the Web Vault, the change is pulled to local and visible in Obsidian.
-- [ ] A rename performed in the Web Vault renames the local file (not delete + create).
-- [ ] A delete in the Web Vault removes the local file.
-- [ ] Echo suppression: saving a note locally, having it sync to the server, and receiving the change notification back does not trigger a redundant local write.
-- [ ] Closing and reopening the network (or killing the WebSocket) triggers a reconnect; any changes made during the gap are picked up via manifest diff.
-- [ ] Plugin unload closes the WebSocket cleanly.
-- [ ] A same-file warning is displayed when another session opens the same file.
+- [x] Within ~1 s of a note being saved in the Web Vault, the change is pulled to local and visible in Obsidian.
+- [x] A rename performed in the Web Vault renames the local file (not delete + create).
+- [x] A delete in the Web Vault removes the local file.
+- [x] Echo suppression: saving a note locally, having it sync to the server, and receiving the change notification back does not trigger a redundant local write.
+- [x] Closing and reopening the network (or killing the WebSocket) triggers a reconnect; any changes made during the gap are picked up via manifest diff.
+- [x] Plugin unload closes the WebSocket cleanly.
+- [x] A same-file warning is displayed when another session opens the same file.
 
 ## Blocked by
 
@@ -48,6 +48,15 @@ The existing `GET /api/sync/:vaultId/notify` route authenticates via `Authorizat
 ## Server patch required
 
 Extend `requireDevice` (or the notify route) to accept `?token=<syncToken>` as an alternative to the `Authorization: Bearer` header, for WebSocket upgrade requests where custom headers are not available.
+
+## Implementation notes
+
+- Added a plugin WebSocket wrapper with reconnect backoff from 1s to 30s and query-token authentication.
+- Added a small server auth patch so device sync tokens can be read from `?token=` for WebSocket upgrade requests.
+- Plugin now opens the notify socket after connection and on load when a token exists.
+- Change notifications apply remote put/rename/delete operations through the existing sync engine with watcher suppression.
+- Reconnect runs the normal sync path first, replaying pending journal operations and then diffing the manifest for missed changes.
+- Active Obsidian file is reported to the server for presence and same-file warnings; same-file warnings are surfaced as Obsidian notices.
 
 ## Test seam
 

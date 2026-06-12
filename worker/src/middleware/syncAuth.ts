@@ -35,7 +35,7 @@ export const requireDevice: MiddlewareHandler<{ Bindings: Env }> = async (
   next
 ) => {
   const auth = c.req.header("Authorization") ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : c.req.query("token")?.trim() ?? "";
 
   if (!token) {
     return c.json({ error: "Unauthorized" }, 401);

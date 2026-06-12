@@ -1,5 +1,6 @@
 import { Notice, Plugin, TFile } from "obsidian";
 import { LapisClient } from "./net/client";
+import { NotifyClient, type NotifyMessage } from "./net/notify";
 import { LapisSettingTab, normalizeSettings } from "./settings";
 import type { LapisSettings, PluginData, SyncJournal } from "./types";
 import { SyncEngine } from "./sync/engine";
@@ -13,6 +14,9 @@ export default class LapisPlugin extends Plugin {
   private statusBar!: LapisStatusBar;
   private modifyTimers = new Map<string, number>();
   private suppressWatcher = false;
+  private notifyClient: NotifyClient | null = null;
+  private lastPresenceCount = 0;
+  private currentOpenPath: string | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -40,7 +44,13 @@ export default class LapisPlugin extends Plugin {
 
     this.addSettingTab(new LapisSettingTab(this.app, this));
     this.registerWatcher();
+    this.startNotify();
     this.registerInterval(window.setInterval(() => void this.pullChanged(), 5 * 60 * 1000));
+    this.registerInterval(window.setInterval(() => this.reportOpenFile(), 2000));
+  }
+
+  onunload() {
+    this.notifyClient?.close();
   }
 
   async loadSettings() {
@@ -86,6 +96,7 @@ export default class LapisPlugin extends Plugin {
           this.settings.syncToken = token;
           this.settings.lastConnectedAt = new Date().toISOString();
           await this.saveSettings();
+          this.startNotify();
           await this.syncNow();
         },
         onDone: () => this.statusBar.update(this.settings),
@@ -101,6 +112,8 @@ export default class LapisPlugin extends Plugin {
     this.settings.syncToken = "";
     this.settings.lastConnectedAt = null;
     this.journal = null;
+    this.notifyClient?.close();
+    this.notifyClient = null;
     await this.saveSettings();
     new Notice("Lapis: disconnected");
   }
@@ -138,6 +151,67 @@ export default class LapisPlugin extends Plugin {
       return;
     }
     await this.runSync((engine) => engine.pullChanged(), true);
+  }
+
+  private startNotify() {
+    if (!this.settings.syncToken || !this.settings.vaultId || this.notifyClient) {
+      return;
+    }
+    this.notifyClient = new NotifyClient({
+      serverUrl: this.settings.serverUrl,
+      vaultId: this.settings.vaultId,
+      token: this.settings.syncToken,
+      onOpen: async (reconnected) => {
+        this.statusBar.update(this.settings);
+        if (reconnected) await this.syncNow();
+        this.reportOpenFile();
+      },
+      onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0),
+      onMessage: (message) => this.handleNotifyMessage(message),
+    });
+    this.notifyClient.connect();
+  }
+
+  private async handleNotifyMessage(message: NotifyMessage) {
+    if (message.type === "change") {
+      if (message.kind === "put" && this.journal?.fileRevisions[message.path.toLowerCase()] === message.revision) {
+        return;
+      }
+      if (message.kind === "put") {
+        await this.runSync((engine) => engine.applyRemotePut(message.path), true);
+      } else if (message.kind === "rename" && message.newPath) {
+        const newPath = message.newPath;
+        await this.runSync((engine) => engine.applyRemoteRename(message.path, newPath), true);
+      } else if (message.kind === "delete") {
+        await this.runSync((engine) => engine.applyRemoteDelete(message.path), true);
+      }
+      return;
+    }
+
+    if (message.type === "presence") {
+      const others = message.sessions.filter((session) => !session.identity.startsWith(`device:${this.settings.deviceName}`));
+      if (this.lastPresenceCount !== 0 && others.length !== this.lastPresenceCount) {
+        new Notice(`Lapis: ${others.length} other session${others.length === 1 ? "" : "s"} connected`);
+      }
+      this.lastPresenceCount = others.length;
+      return;
+    }
+
+    if (message.type === "same_file_warning") {
+      new Notice(`Lapis: another session is editing ${message.path}`);
+    }
+  }
+
+  private reportOpenFile() {
+    const activeFile = this.app.workspace.getActiveFile();
+    const nextPath = activeFile?.path ?? null;
+    if (nextPath === this.currentOpenPath) return;
+    this.currentOpenPath = nextPath;
+    if (nextPath) {
+      this.notifyClient?.sendOpen(nextPath);
+    } else {
+      this.notifyClient?.sendCloseFile();
+    }
   }
 
   private registerWatcher() {

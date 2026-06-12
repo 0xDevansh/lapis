@@ -74,6 +74,31 @@ export interface BatchSyncResponse {
   results: BatchOpResult[];
 }
 
+export interface ChangeNotification {
+  type: "change";
+  path: string;
+  kind: "put" | "rename" | "delete";
+  revision?: number;
+  newPath?: string;
+  ts: number;
+}
+
+export interface PresenceSession {
+  identity: string;
+  openPath: string | null;
+}
+
+export interface PresenceNotification {
+  type: "presence";
+  sessions: PresenceSession[];
+}
+
+export interface SameFileWarning {
+  type: "same_file_warning";
+  path: string;
+  others: string[];
+}
+
 export interface PluginData {
   settings?: Partial<LapisSettings>;
   journal?: SyncJournal | null;
