@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { CubeTransparent, Plus, Vault as VaultIcon, CaretRight } from "@phosphor-icons/react";
 import * as api from "../api";
 
 interface VaultListPageProps {
@@ -40,48 +41,74 @@ export default function VaultListPage({ user, onSignOut }: VaultListPageProps) {
   }
 
   return (
-    <div style={styles.page}>
-      <header style={styles.header}>
-        <span style={styles.logo}>Lapis</span>
-        <div style={styles.headerRight}>
-          <span style={styles.userEmail}>{user.email}</span>
-          <button style={styles.signOut} onClick={onSignOut}>
+    <div className="flex min-h-screen flex-col bg-canvas text-ink">
+      <header className="flex items-center justify-between border-b border-border bg-secondary px-6 py-3">
+        <div className="flex items-center gap-2">
+          <CubeTransparent size={22} weight="duotone" className="text-accent" />
+          <span className="text-lg font-bold">Lapis</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="text-sm text-muted">{user.email}</span>
+          <button
+            className="rounded border border-border px-3 py-1.5 text-sm text-muted transition-colors hover:border-border-strong hover:text-ink"
+            onClick={onSignOut}
+          >
             Sign out
           </button>
         </div>
       </header>
 
-      <main style={styles.main}>
-        <h2 style={styles.heading}>Your Web Vaults</h2>
+      <main className="mx-auto w-full max-w-2xl px-6 py-8">
+        <h2 className="mb-5 text-xl font-bold">Your Web Vaults</h2>
 
-        <form onSubmit={handleCreate} style={styles.createForm}>
+        <form onSubmit={handleCreate} className="mb-5 flex gap-2">
           <input
-            style={styles.input}
+            className="flex-1 rounded border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none"
             type="text"
             placeholder="New vault name"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             required
           />
-          <button style={styles.createButton} type="submit" disabled={creating}>
+          <button
+            className="flex items-center gap-1.5 whitespace-nowrap rounded bg-accent px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-accent-soft disabled:opacity-60"
+            type="submit"
+            disabled={creating}
+          >
+            <Plus size={16} weight="bold" />
             {creating ? "Creating..." : "Create vault"}
           </button>
         </form>
 
-        {error && <p style={styles.error}>{error}</p>}
+        {error && <p className="mb-4 text-sm text-danger">{error}</p>}
 
         {loading ? (
-          <p style={styles.muted}>Loading...</p>
+          <p className="text-sm text-muted">Loading...</p>
         ) : vaults.length === 0 ? (
-          <p style={styles.muted}>No vaults yet. Create one above.</p>
+          <div className="rounded-lg border border-dashed border-border py-12 text-center">
+            <VaultIcon size={32} weight="duotone" className="mx-auto mb-2 text-faint" />
+            <p className="text-sm text-muted">No vaults yet. Create one above.</p>
+          </div>
         ) : (
-          <ul style={styles.list}>
+          <ul className="flex list-none flex-col gap-2 p-0">
             {vaults.map((vault) => (
-              <li key={vault.id} style={styles.item}>
-                <Link to={`/vault/${vault.id}`} style={styles.vaultLink}>
-                  <span style={styles.vaultName}>{vault.name}</span>
-                  <span style={styles.vaultDate}>
-                    {new Date(vault.createdAt).toLocaleDateString()}
+              <li key={vault.id}>
+                <Link
+                  to={`/vault/${vault.id}`}
+                  className="group flex items-center justify-between rounded-lg border border-border bg-surface px-4 py-3 text-ink no-underline transition-colors hover:border-border-strong hover:bg-elevated"
+                >
+                  <span className="flex items-center gap-3">
+                    <VaultIcon size={20} weight="duotone" className="text-accent-soft" />
+                    <span className="font-semibold">{vault.name}</span>
+                  </span>
+                  <span className="flex items-center gap-3">
+                    <span className="text-sm text-muted">
+                      {new Date(vault.createdAt).toLocaleDateString()}
+                    </span>
+                    <CaretRight
+                      size={16}
+                      className="text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-muted"
+                    />
                   </span>
                 </Link>
               </li>
@@ -92,114 +119,3 @@ export default function VaultListPage({ user, onSignOut }: VaultListPageProps) {
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    minHeight: "100vh",
-    display: "flex",
-    flexDirection: "column",
-    background: "#ffffff",
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "0.85rem 1.5rem",
-    borderBottom: "1px solid #e0e0e0",
-    background: "#ffffff",
-  },
-  logo: {
-    fontWeight: 700,
-    fontSize: "1.2rem",
-    color: "#7c5cbf",
-  },
-  headerRight: {
-    display: "flex",
-    alignItems: "center",
-    gap: "1rem",
-  },
-  userEmail: {
-    color: "#6b6b6b",
-    fontSize: "0.9rem",
-  },
-  signOut: {
-    background: "none",
-    border: "1px solid #e0e0e0",
-    borderRadius: 6,
-    padding: "0.3rem 0.75rem",
-    fontSize: "0.85rem",
-    color: "#6b6b6b",
-  },
-  main: {
-    padding: "2rem 1.5rem",
-    maxWidth: 640,
-    width: "100%",
-    margin: "0 auto",
-  },
-  heading: {
-    margin: "0 0 1.25rem",
-    fontWeight: 700,
-    fontSize: "1.3rem",
-  },
-  createForm: {
-    display: "flex",
-    gap: "0.6rem",
-    marginBottom: "1.25rem",
-  },
-  input: {
-    flex: 1,
-    padding: "0.55rem 0.75rem",
-    border: "1px solid #e0e0e0",
-    borderRadius: 6,
-    fontSize: "0.95rem",
-  },
-  createButton: {
-    padding: "0.55rem 1rem",
-    background: "#7c5cbf",
-    color: "#ffffff",
-    border: "none",
-    borderRadius: 6,
-    fontWeight: 600,
-    fontSize: "0.9rem",
-    whiteSpace: "nowrap",
-  },
-  list: {
-    listStyle: "none",
-    padding: 0,
-    margin: 0,
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-  },
-  item: {
-    border: "1px solid #e0e0e0",
-    borderRadius: 6,
-    overflow: "hidden",
-  },
-  vaultLink: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "0.85rem 1rem",
-    color: "inherit",
-    textDecoration: "none",
-    background: "#ffffff",
-    transition: "background 0.1s",
-  },
-  vaultName: {
-    fontWeight: 600,
-  },
-  vaultDate: {
-    color: "#6b6b6b",
-    fontSize: "0.85rem",
-  },
-  error: {
-    color: "#c0392b",
-    fontSize: "0.85rem",
-    margin: "0 0 1rem",
-  },
-  muted: {
-    color: "#6b6b6b",
-    fontSize: "0.9rem",
-  },
-};

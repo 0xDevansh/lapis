@@ -1,15 +1,21 @@
 /**
  * BacklinksPanel — shows all notes that link to the currently open file.
- * Rendered at the bottom of the content pane when a Markdown file is open.
+ * Rendered inside the right workspace panel under the "Backlinks" tab.
  */
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { LinkSimple, FileText } from "@phosphor-icons/react";
 import * as api from "../api";
 
 interface Props {
   vaultId: string;
   path: string;
   onNavigate: (path: string) => void;
+}
+
+function basename(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  return name.endsWith(".md") ? name.slice(0, -3) : name;
 }
 
 export default function BacklinksPanel({ vaultId, path, onNavigate }: Props) {
@@ -26,107 +32,36 @@ export default function BacklinksPanel({ vaultId, path, onNavigate }: Props) {
   }, [vaultId, path]);
 
   if (error) {
-    return (
-      <div style={styles.panel}>
-        <p style={styles.err}>{error}</p>
-      </div>
-    );
+    return <p className="px-1 py-2 text-[13px] text-danger">{error}</p>;
   }
 
   if (!backlinks) {
+    return <p className="px-1 py-2 text-[13px] text-muted">Loading backlinks…</p>;
+  }
+
+  if (backlinks.length === 0) {
     return (
-      <div style={styles.panel}>
-        <p style={styles.muted}>Loading backlinks…</p>
+      <div className="flex flex-col items-center gap-2 px-1 py-8 text-center">
+        <LinkSimple size={24} weight="duotone" className="text-faint" />
+        <p className="text-[13px] text-muted">No notes link here.</p>
       </div>
     );
   }
 
   return (
-    <div style={styles.panel}>
-      <h4 style={styles.heading}>
-        Backlinks
-        {backlinks.length > 0 && (
-          <span style={styles.count}>{backlinks.length}</span>
-        )}
-      </h4>
-
-      {backlinks.length === 0 ? (
-        <p style={styles.muted}>No notes link here.</p>
-      ) : (
-        <ul style={styles.list}>
-          {backlinks.map((bl) => (
-            <li key={bl.sourcePath} style={styles.item}>
-              <button
-                style={styles.linkBtn}
-                onClick={() => onNavigate(bl.sourcePath)}
-              >
-                {bl.sourcePath}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <ul className="flex flex-col gap-0.5">
+      {backlinks.map((bl) => (
+        <li key={bl.sourcePath}>
+          <button
+            onClick={() => onNavigate(bl.sourcePath)}
+            title={bl.sourcePath}
+            className="group flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          >
+            <FileText size={15} className="shrink-0 text-accent-soft" />
+            <span className="min-w-0 flex-1 truncate">{basename(bl.sourcePath)}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  panel: {
-    borderTop: "1px solid #e0e0e0",
-    padding: "0.75rem 1.5rem 1rem",
-    background: "#fafafa",
-  },
-  heading: {
-    margin: "0 0 0.5rem",
-    fontSize: "0.8rem",
-    fontWeight: 700,
-    color: "#6b6b6b",
-    textTransform: "uppercase",
-    letterSpacing: "0.05em",
-    display: "flex",
-    alignItems: "center",
-    gap: "0.4rem",
-  },
-  count: {
-    background: "#ede8f8",
-    color: "#7c5cbf",
-    borderRadius: 10,
-    padding: "0 0.4rem",
-    fontSize: "0.72rem",
-    fontWeight: 600,
-  },
-  muted: {
-    color: "#6b6b6b",
-    fontSize: "0.8rem",
-    margin: 0,
-  },
-  err: {
-    color: "#c0392b",
-    fontSize: "0.8rem",
-    margin: 0,
-  },
-  list: {
-    listStyle: "none",
-    margin: 0,
-    padding: 0,
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.2rem",
-  },
-  item: {
-    margin: 0,
-    padding: 0,
-  },
-  linkBtn: {
-    background: "none",
-    border: "none",
-    padding: "0.2rem 0",
-    cursor: "pointer",
-    fontSize: "0.8rem",
-    fontFamily: "var(--font-mono)",
-    color: "#7c5cbf",
-    textAlign: "left",
-    textDecoration: "underline",
-    textDecorationStyle: "dotted",
-  },
-};

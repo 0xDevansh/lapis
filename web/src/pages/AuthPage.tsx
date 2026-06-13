@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { CubeTransparent } from "@phosphor-icons/react";
 
 interface AuthPageProps {
   onSignIn: (email: string, password: string) => Promise<void>;
@@ -35,22 +36,34 @@ export default function AuthPage({
 
   const displayError = localError ?? error;
 
-  return (
-    <div style={styles.container}>
-      <div style={styles.card}>
-        <h1 style={styles.logo}>Lapis</h1>
-        <p style={styles.tagline}>Your Obsidian vault, anywhere.</p>
+  const tabBase =
+    "flex-1 rounded px-3 py-2 text-sm font-medium transition-colors";
+  const tabActive = "bg-accent text-white";
+  const tabIdle = "bg-surface text-muted hover:text-ink hover:bg-elevated";
 
-        <div style={styles.tabs}>
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-canvas p-4">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-secondary p-8 shadow-2xl shadow-black/40">
+        <div className="mb-1 flex items-center gap-2">
+          <CubeTransparent size={28} weight="duotone" className="text-accent" />
+          <h1 className="text-2xl font-bold text-ink">Lapis</h1>
+        </div>
+        <p className="mb-6 text-sm text-muted">Your Obsidian vault, anywhere.</p>
+
+        <div className="mb-5 flex gap-1" role="tablist">
           <button
-            style={mode === "signin" ? styles.tabActive : styles.tab}
+            role="tab"
+            aria-selected={mode === "signin"}
+            className={`${tabBase} ${mode === "signin" ? tabActive : tabIdle}`}
             onClick={() => setMode("signin")}
             type="button"
           >
             Sign in
           </button>
           <button
-            style={mode === "signup" ? styles.tabActive : styles.tab}
+            role="tab"
+            aria-selected={mode === "signup"}
+            className={`${tabBase} ${mode === "signup" ? tabActive : tabIdle}`}
             onClick={() => setMode("signup")}
             type="button"
           >
@@ -58,10 +71,10 @@ export default function AuthPage({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} style={styles.form}>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           {mode === "signup" && (
             <input
-              style={styles.input}
+              className="w-full rounded border border-border bg-surface px-3 py-2.5 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none"
               type="text"
               placeholder="Name"
               value={name}
@@ -71,7 +84,7 @@ export default function AuthPage({
             />
           )}
           <input
-            style={styles.input}
+            className="w-full rounded border border-border bg-surface px-3 py-2.5 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none"
             type="email"
             placeholder="Email"
             value={email}
@@ -80,7 +93,7 @@ export default function AuthPage({
             autoComplete="email"
           />
           <input
-            style={styles.input}
+            className="w-full rounded border border-border bg-surface px-3 py-2.5 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none"
             type="password"
             placeholder="Password"
             value={password}
@@ -89,8 +102,14 @@ export default function AuthPage({
             autoComplete={mode === "signin" ? "current-password" : "new-password"}
             minLength={8}
           />
-          {displayError && <p style={styles.error}>{displayError}</p>}
-          <button style={styles.button} type="submit" disabled={loading}>
+          {displayError && (
+            <p className="m-0 text-sm text-danger">{displayError}</p>
+          )}
+          <button
+            className="mt-1 rounded bg-accent px-3 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-soft disabled:opacity-60"
+            type="submit"
+            disabled={loading}
+          >
             {loading
               ? "..."
               : mode === "signin"
@@ -102,84 +121,3 @@ export default function AuthPage({
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "100vh",
-    background: "#f6f6f6",
-    padding: "1rem",
-  },
-  card: {
-    background: "#ffffff",
-    borderRadius: 8,
-    border: "1px solid #e0e0e0",
-    padding: "2rem",
-    width: "100%",
-    maxWidth: 380,
-  },
-  logo: {
-    margin: "0 0 0.25rem",
-    fontSize: "1.8rem",
-    fontWeight: 700,
-    color: "#7c5cbf",
-  },
-  tagline: {
-    margin: "0 0 1.5rem",
-    color: "#6b6b6b",
-    fontSize: "0.9rem",
-  },
-  tabs: {
-    display: "flex",
-    gap: 4,
-    marginBottom: "1.25rem",
-  },
-  tab: {
-    flex: 1,
-    padding: "0.45rem",
-    border: "1px solid #e0e0e0",
-    borderRadius: 6,
-    background: "#f6f6f6",
-    color: "#6b6b6b",
-    fontSize: "0.9rem",
-  },
-  tabActive: {
-    flex: 1,
-    padding: "0.45rem",
-    border: "1px solid #7c5cbf",
-    borderRadius: 6,
-    background: "#7c5cbf",
-    color: "#ffffff",
-    fontSize: "0.9rem",
-  },
-  form: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.75rem",
-  },
-  input: {
-    padding: "0.6rem 0.75rem",
-    border: "1px solid #e0e0e0",
-    borderRadius: 6,
-    fontSize: "0.95rem",
-    outline: "none",
-    width: "100%",
-  },
-  button: {
-    padding: "0.65rem",
-    background: "#7c5cbf",
-    color: "#ffffff",
-    border: "none",
-    borderRadius: 6,
-    fontSize: "0.95rem",
-    fontWeight: 600,
-    marginTop: "0.25rem",
-  },
-  error: {
-    margin: 0,
-    color: "#c0392b",
-    fontSize: "0.85rem",
-  },
-};

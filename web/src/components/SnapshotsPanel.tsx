@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { CaretRight, ClockCounterClockwise } from "@phosphor-icons/react";
 import { listSnapshots, type Snapshot } from "../api";
 
 interface SnapshotsPanelProps {
@@ -31,7 +32,6 @@ export default function SnapshotsPanel({ vaultId }: SnapshotsPanelProps) {
   function formatDate(ts: string): string {
     try {
       return new Date(ts).toLocaleString(undefined, {
-        year: "numeric",
         month: "short",
         day: "numeric",
         hour: "2-digit",
@@ -47,31 +47,48 @@ export default function SnapshotsPanel({ vaultId }: SnapshotsPanelProps) {
   }
 
   return (
-    <div className="snapshots-panel">
+    <div className="border-t border-border">
       <button
-        className="snapshots-toggle"
-        onClick={() => setOpen(o => !o)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted transition-colors hover:text-ink"
+        onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
-        {open ? "▾" : "▸"} Sealed History
+        <CaretRight
+          size={12}
+          className={`transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <ClockCounterClockwise size={13} />
+        Sealed History
       </button>
 
       {open && (
-        <div className="snapshots-list">
-          {loading && <div className="snapshots-empty">Loading...</div>}
-          {error && <div className="snapshots-empty snapshots-error">{error}</div>}
+        <div className="max-h-56 overflow-y-auto px-2 pb-2 custom-scroll">
+          {loading && <div className="px-2 py-1.5 text-xs text-muted">Loading…</div>}
+          {error && <div className="px-2 py-1.5 text-xs text-danger">{error}</div>}
           {!loading && !error && snapshots.length === 0 && (
-            <div className="snapshots-empty">
+            <div className="px-2 py-1.5 text-xs leading-relaxed text-faint">
               No sealed commits yet. Commits are created automatically after writes.
             </div>
           )}
-          {!loading && !error && snapshots.map(s => (
-            <div key={s.hash} className="snapshot-entry">
-              <span className="snapshot-hash">{shortHash(s.hash)}</span>
-              <span className="snapshot-message">{s.message}</span>
-              <span className="snapshot-ts">{formatDate(s.ts)}</span>
-            </div>
-          ))}
+          {!loading &&
+            !error &&
+            snapshots.map((s) => (
+              <div
+                key={s.hash}
+                className="flex flex-col gap-0.5 rounded px-2 py-1.5 hover:bg-hover"
+                title={s.hash}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-[11px] text-accent-soft">
+                    {shortHash(s.hash)}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-faint">
+                    {formatDate(s.ts)}
+                  </span>
+                </div>
+                <span className="truncate text-[12px] text-ink">{s.message}</span>
+              </div>
+            ))}
         </div>
       )}
     </div>

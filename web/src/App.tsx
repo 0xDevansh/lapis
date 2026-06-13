@@ -2,24 +2,20 @@ import { Routes, Route } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import AuthPage from "./pages/AuthPage";
 import VaultListPage from "./pages/VaultListPage";
-import VaultBrowserPage from "./pages/VaultBrowserPage";
+import VaultWorkspace from "./pages/VaultWorkspace";
 import DevicesPage from "./pages/DevicesPage";
+import { ToastProvider } from "./components/ui/Toast";
 
 export default function App() {
   const { user, loading, error, signIn, signUp, signOut } = useAuth();
 
   if (loading) {
     return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: "100vh",
-          color: "#6b6b6b",
-        }}
-      >
-        Loading...
+      <div className="flex min-h-screen items-center justify-center bg-canvas text-muted">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+          Loading…
+        </div>
       </div>
     );
   }
@@ -36,23 +32,23 @@ export default function App() {
   }
 
   return (
-    <Routes>
-      <Route
-        path="/"
-        element={<VaultListPage user={user} onSignOut={signOut} />}
-      />
-      {/* Device management — Slice 07 */}
-      <Route path="/vault/:id/devices" element={<DevicesPage />} />
-      {/* Vault browser — Slice 02 */}
-      <Route path="/vault/:id/*" element={<VaultBrowserPage />} />
-      <Route
-        path="*"
-        element={
-          <div style={{ padding: "2rem", color: "#6b6b6b" }}>
-            Page not found.
-          </div>
-        }
-      />
-    </Routes>
+    <ToastProvider>
+      <Routes>
+        <Route
+          path="/"
+          element={<VaultListPage user={user} onSignOut={signOut} />}
+        />
+        {/* Device management — Slice 07 */}
+        <Route path="/vault/:id/devices" element={<DevicesPage />} />
+        {/* Vault workspace — tabbed Obsidian-style editor */}
+        <Route path="/vault/:id/*" element={<VaultWorkspace />} />
+        <Route
+          path="*"
+          element={
+            <div className="p-8 text-muted">Page not found.</div>
+          }
+        />
+      </Routes>
+    </ToastProvider>
   );
 }

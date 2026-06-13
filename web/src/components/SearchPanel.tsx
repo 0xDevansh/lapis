@@ -4,12 +4,18 @@
  */
 
 import React, { useState, useRef, useCallback } from "react";
+import { MagnifyingGlass, X } from "@phosphor-icons/react";
 import * as api from "../api";
 
 interface Props {
   vaultId: string;
   onSelect: (path: string) => void;
   inputRef?: React.RefObject<HTMLInputElement>;
+}
+
+function basename(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  return name.endsWith(".md") ? name.slice(0, -3) : name;
 }
 
 export default function SearchPanel({ vaultId, onSelect, inputRef }: Props) {
@@ -65,6 +71,12 @@ export default function SearchPanel({ vaultId, onSelect, inputRef }: Props) {
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape" && query) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSearch();
+      return;
+    }
     if (!results || results.length === 0) return;
 
     if (e.key === "ArrowDown") {
@@ -90,46 +102,76 @@ export default function SearchPanel({ vaultId, onSelect, inputRef }: Props) {
     const parts = raw.split(/(\*\*[^*]+\*\*)/);
     return parts.map((p, i) => {
       if (p.startsWith("**") && p.endsWith("**")) {
-        return <strong key={i}>{p.slice(2, -2)}</strong>;
+        return (
+          <strong key={i} className="font-semibold text-accent-soft">
+            {p.slice(2, -2)}
+          </strong>
+        );
       }
       return <span key={i}>{p}</span>;
     });
   }
 
   return (
-    <div style={styles.panel}>
-      <input
-        ref={inputRef}
-        style={styles.input}
-        type="search"
-        placeholder="Search notes…"
-        value={query}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        aria-label="Search vault"
-        aria-activedescendant={results?.[activeIndex] ? `search-result-${activeIndex}` : undefined}
-      />
+    <div className="border-b border-border px-2 py-2">
+      <div className="relative">
+        <MagnifyingGlass
+          size={14}
+          className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+        />
+        <input
+          ref={inputRef}
+          className="w-full rounded border border-border bg-surface py-1.5 pl-8 pr-7 text-[13px] text-ink placeholder:text-faint outline-none transition-colors focus:border-accent"
+          type="search"
+          placeholder="Search notes…"
+          value={query}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          aria-label="Search vault"
+          aria-activedescendant={
+            results?.[activeIndex] ? `search-result-${activeIndex}` : undefined
+          }
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={closeSearch}
+            aria-label="Clear search"
+            className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-faint hover:bg-hover hover:text-ink"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
 
-      {loading && <p style={styles.muted}>Searching…</p>}
-      {error && <p style={styles.err}>{error}</p>}
+      {loading && <p className="mt-2 text-xs text-muted">Searching…</p>}
+      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
 
       {results !== null && results.length === 0 && !loading && (
-        <p style={styles.muted}>No results for "{query}"</p>
+        <p className="mt-2 text-xs text-muted">No results for “{query}”</p>
       )}
 
       {results && results.length > 0 && (
-        <ul style={styles.list}>
+        <ul className="mt-2 flex flex-col gap-0.5" role="listbox">
           {results.map((r, index) => (
-            <li key={r.path} style={styles.item}>
+            <li key={r.path} role="presentation">
               <button
                 id={`search-result-${index}`}
-                style={index === activeIndex ? styles.resultBtnActive : styles.resultBtn}
+                role="option"
+                aria-selected={index === activeIndex}
+                className={`block w-full rounded px-2 py-1.5 text-left leading-snug transition-colors ${
+                  index === activeIndex ? "bg-accent/15" : "hover:bg-hover"
+                }`}
                 onMouseEnter={() => setActiveIndex(index)}
                 onClick={() => selectResult(r)}
               >
-                <span style={styles.resultPath}>{r.path}</span>
+                <span className="block truncate text-[13px] font-medium text-ink">
+                  {basename(r.path)}
+                </span>
                 {r.snippet && (
-                  <span style={styles.snippet}>{renderSnippet(r.snippet)}</span>
+                  <span className="mt-0.5 block truncate text-[11px] text-muted">
+                    {renderSnippet(r.snippet)}
+                  </span>
                 )}
               </button>
             </li>
@@ -139,81 +181,3 @@ export default function SearchPanel({ vaultId, onSelect, inputRef }: Props) {
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  panel: {
-    borderBottom: "1px solid #e0e0e0",
-    padding: "0.4rem 0.6rem",
-  },
-  input: {
-    width: "100%",
-    boxSizing: "border-box",
-    padding: "0.35rem 0.5rem",
-    border: "1px solid #e0e0e0",
-    borderRadius: 4,
-    fontSize: "0.8rem",
-    fontFamily: "var(--font-sans)",
-    outline: "none",
-    background: "#fff",
-    color: "#1a1a1a",
-  },
-  muted: {
-    color: "#6b6b6b",
-    fontSize: "0.78rem",
-    margin: "0.35rem 0 0",
-    padding: 0,
-  },
-  err: {
-    color: "#c0392b",
-    fontSize: "0.78rem",
-    margin: "0.35rem 0 0",
-  },
-  list: {
-    listStyle: "none",
-    margin: "0.3rem 0 0",
-    padding: 0,
-  },
-  item: {
-    margin: 0,
-    padding: 0,
-  },
-  resultBtn: {
-    display: "block",
-    width: "100%",
-    textAlign: "left",
-    background: "none",
-    border: "none",
-    borderRadius: 4,
-    padding: "0.3rem 0.4rem",
-    cursor: "pointer",
-    lineHeight: 1.4,
-  },
-  resultBtnActive: {
-    display: "block",
-    width: "100%",
-    textAlign: "left",
-    background: "#ede8f8",
-    border: "none",
-    borderRadius: 4,
-    padding: "0.3rem 0.4rem",
-    cursor: "pointer",
-    lineHeight: 1.4,
-  },
-  resultPath: {
-    display: "block",
-    fontSize: "0.78rem",
-    fontFamily: "var(--font-mono)",
-    color: "#7c5cbf",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-  snippet: {
-    display: "block",
-    fontSize: "0.75rem",
-    color: "#444",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-};

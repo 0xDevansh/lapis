@@ -7,12 +7,15 @@
  *   - Connected devices (with Revoke and internals toggle)
  */
 
-import React, { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
+import { ArrowLeft, Check, X, DeviceMobile } from "@phosphor-icons/react";
 import * as api from "../api";
+import { useToast } from "../components/ui/Toast";
 
 export default function DevicesPage() {
   const { id: vaultId } = useParams<{ id: string }>();
+  const { toast } = useToast();
   const [vault, setVault] = useState<api.Vault | null>(null);
   const [pending, setPending] = useState<api.PendingDevice[] | null>(null);
   const [devices, setDevices] = useState<api.Device[] | null>(null);
@@ -49,7 +52,7 @@ export default function DevicesPage() {
       await api.approveDevice(vaultId, userCode);
       await reload();
     } catch (e) {
-      alert((e as Error).message);
+      toast((e as Error).message, { tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -62,7 +65,7 @@ export default function DevicesPage() {
       await api.denyDevice(vaultId, userCode);
       await reload();
     } catch (e) {
-      alert((e as Error).message);
+      toast((e as Error).message, { tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -75,7 +78,7 @@ export default function DevicesPage() {
       await api.revokeDevice(vaultId, deviceId);
       await reload();
     } catch (e) {
-      alert((e as Error).message);
+      toast((e as Error).message, { tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -90,7 +93,7 @@ export default function DevicesPage() {
       });
       await reload();
     } catch (e) {
-      alert((e as Error).message);
+      toast((e as Error).message, { tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -105,57 +108,77 @@ export default function DevicesPage() {
     });
   }
 
+  const th =
+    "text-left px-3 py-2 border-b-2 border-border text-faint font-semibold text-xs uppercase tracking-wider whitespace-nowrap";
+  const td = "px-3 py-2.5 border-b border-border/60 align-middle text-ink";
+
   return (
-    <div style={styles.page}>
-      <header style={styles.header}>
-        <Link to={`/vault/${vaultId}`} style={styles.back}>
-          ← Back to vault
+    <div className="mx-auto max-w-3xl px-6 py-8 font-sans text-ink">
+      <header className="mb-8">
+        <Link
+          to={`/vault/${vaultId}`}
+          className="mb-2 flex w-fit items-center gap-1.5 text-sm text-muted no-underline transition-colors hover:text-ink"
+        >
+          <ArrowLeft size={16} />
+          Back to vault
         </Link>
-        <h1 style={styles.title}>{vault?.name ?? "…"} — Connected Devices</h1>
+        <h1 className="m-0 text-2xl font-bold">
+          {vault?.name ?? "…"} — Connected Devices
+        </h1>
       </header>
 
-      {error && <p style={styles.err}>{error}</p>}
+      {error && (
+        <p className="mb-6 rounded border border-danger/30 bg-danger/10 px-4 py-3 text-danger">
+          {error}
+        </p>
+      )}
 
       {/* ── Pending approvals ─────────────────────────────────────────────── */}
-      <section style={styles.section}>
-        <h2 style={styles.sectionTitle}>Pending Approvals</h2>
+      <section className="mb-10">
+        <h2 className="mb-3 text-base font-bold">Pending Approvals</h2>
         {!pending ? (
-          <p style={styles.muted}>Loading…</p>
+          <p className="text-sm text-muted">Loading…</p>
         ) : pending.length === 0 ? (
-          <p style={styles.muted}>No pending connection requests.</p>
+          <p className="text-sm text-muted">No pending connection requests.</p>
         ) : (
-          <table style={styles.table}>
+          <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
-                <th style={styles.th}>Code</th>
-                <th style={styles.th}>Device name</th>
-                <th style={styles.th}>Requested</th>
-                <th style={styles.th}>Expires</th>
-                <th style={styles.th}></th>
+                <th className={th}>Code</th>
+                <th className={th}>Device name</th>
+                <th className={th}>Requested</th>
+                <th className={th}>Expires</th>
+                <th className={th}></th>
               </tr>
             </thead>
             <tbody>
               {pending.map((p) => (
                 <tr key={p.userCode}>
-                  <td style={{ ...styles.td, ...styles.code }}>{p.userCode}</td>
-                  <td style={styles.td}>{p.deviceName}</td>
-                  <td style={styles.td}>{formatDate(p.createdAt)}</td>
-                  <td style={styles.td}>{formatDate(p.expiresAt)}</td>
-                  <td style={{ ...styles.td, ...styles.actions }}>
-                    <button
-                      style={styles.btnApprove}
-                      disabled={busy === p.userCode}
-                      onClick={() => handleApprove(p.userCode)}
-                    >
-                      Approve
-                    </button>
-                    <button
-                      style={styles.btnDeny}
-                      disabled={busy === p.userCode}
-                      onClick={() => handleDeny(p.userCode)}
-                    >
-                      Deny
-                    </button>
+                  <td className={`${td} font-mono font-bold tracking-wider text-accent-soft`}>
+                    {p.userCode}
+                  </td>
+                  <td className={td}>{p.deviceName}</td>
+                  <td className={td}>{formatDate(p.createdAt)}</td>
+                  <td className={td}>{formatDate(p.expiresAt)}</td>
+                  <td className={td}>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        className="flex items-center gap-1 rounded-sm bg-success px-3 py-1.5 text-xs font-semibold text-black transition-opacity hover:opacity-90 disabled:opacity-50"
+                        disabled={busy === p.userCode}
+                        onClick={() => handleApprove(p.userCode)}
+                      >
+                        <Check size={14} weight="bold" />
+                        Approve
+                      </button>
+                      <button
+                        className="flex items-center gap-1 rounded-sm border border-border px-3 py-1.5 text-xs text-danger transition-colors hover:border-danger/50 disabled:opacity-50"
+                        disabled={busy === p.userCode}
+                        onClick={() => handleDeny(p.userCode)}
+                      >
+                        <X size={14} weight="bold" />
+                        Deny
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -165,36 +188,43 @@ export default function DevicesPage() {
       </section>
 
       {/* ── Connected devices ─────────────────────────────────────────────── */}
-      <section style={styles.section}>
-        <h2 style={styles.sectionTitle}>Connected Devices</h2>
-        <p style={styles.help}>
+      <section className="mb-10">
+        <h2 className="mb-3 text-base font-bold">Connected Devices</h2>
+        <p className="mb-3 text-sm text-muted">
           To connect a new device, install the Lapis Obsidian plugin and follow the connection flow.
           The plugin will display a code matching one of the "Pending Approvals" above.
         </p>
         {!devices ? (
-          <p style={styles.muted}>Loading…</p>
+          <p className="text-sm text-muted">Loading…</p>
         ) : devices.length === 0 ? (
-          <p style={styles.muted}>No connected devices yet.</p>
+          <div className="rounded-lg border border-dashed border-border py-10 text-center">
+            <DeviceMobile size={28} weight="duotone" className="mx-auto mb-2 text-faint" />
+            <p className="text-sm text-muted">No connected devices yet.</p>
+          </div>
         ) : (
-          <table style={styles.table}>
+          <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
-                <th style={styles.th}>Device name</th>
-                <th style={styles.th}>Connected</th>
-                <th style={styles.th}>Last seen</th>
-                <th style={styles.th}>Vault Internals</th>
-                <th style={styles.th}></th>
+                <th className={th}>Device name</th>
+                <th className={th}>Connected</th>
+                <th className={th}>Last seen</th>
+                <th className={th}>Vault Internals</th>
+                <th className={th}></th>
               </tr>
             </thead>
             <tbody>
               {devices.map((d) => (
                 <tr key={d.id}>
-                  <td style={styles.td}>{d.deviceName}</td>
-                  <td style={styles.td}>{formatDate(d.createdAt)}</td>
-                  <td style={styles.td}>{formatDate(d.lastSeenAt)}</td>
-                  <td style={styles.td}>
+                  <td className={td}>{d.deviceName}</td>
+                  <td className={td}>{formatDate(d.createdAt)}</td>
+                  <td className={td}>{formatDate(d.lastSeenAt)}</td>
+                  <td className={td}>
                     <button
-                      style={d.receiveInternals ? styles.toggleOn : styles.toggleOff}
+                      className={
+                        d.receiveInternals
+                          ? "rounded-sm border border-accent/40 bg-accent/15 px-2.5 py-1 text-xs font-semibold text-accent-soft transition-colors disabled:opacity-50"
+                          : "rounded-sm border border-border px-2.5 py-1 text-xs text-muted transition-colors hover:text-ink disabled:opacity-50"
+                      }
                       disabled={busy === d.id}
                       onClick={() => handleToggleInternals(d)}
                       title="Toggle whether this device receives .obsidian and other vault-internal files"
@@ -202,9 +232,9 @@ export default function DevicesPage() {
                       {d.receiveInternals ? "Enabled" : "Disabled"}
                     </button>
                   </td>
-                  <td style={{ ...styles.td, ...styles.actions }}>
+                  <td className={td}>
                     <button
-                      style={styles.btnRevoke}
+                      className="rounded-sm border border-border px-3 py-1.5 text-xs text-danger transition-colors hover:border-danger/50 disabled:opacity-50"
                       disabled={busy === d.id}
                       onClick={() => handleRevoke(d.id)}
                     >
@@ -220,134 +250,3 @@ export default function DevicesPage() {
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    maxWidth: 780,
-    margin: "0 auto",
-    padding: "2rem 1.5rem",
-    fontFamily: "var(--font-sans)",
-  },
-  header: {
-    marginBottom: "2rem",
-  },
-  back: {
-    fontSize: "0.85rem",
-    color: "#6b6b6b",
-    textDecoration: "none",
-    display: "block",
-    marginBottom: "0.5rem",
-  },
-  title: {
-    margin: 0,
-    fontSize: "1.4rem",
-    fontWeight: 700,
-    color: "#1a1a1a",
-  },
-  err: {
-    color: "#c0392b",
-    background: "#fdf0ee",
-    padding: "0.75rem 1rem",
-    borderRadius: 6,
-    marginBottom: "1.5rem",
-  },
-  section: {
-    marginBottom: "2.5rem",
-  },
-  sectionTitle: {
-    fontSize: "1rem",
-    fontWeight: 700,
-    color: "#1a1a1a",
-    marginBottom: "0.75rem",
-  },
-  help: {
-    fontSize: "0.85rem",
-    color: "#6b6b6b",
-    marginBottom: "0.75rem",
-  },
-  muted: {
-    color: "#6b6b6b",
-    fontSize: "0.9rem",
-  },
-  table: {
-    width: "100%",
-    borderCollapse: "collapse",
-    fontSize: "0.9rem",
-  },
-  th: {
-    textAlign: "left",
-    padding: "0.45rem 0.75rem",
-    borderBottom: "2px solid #e0e0e0",
-    color: "#6b6b6b",
-    fontWeight: 600,
-    fontSize: "0.78rem",
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-    whiteSpace: "nowrap",
-  },
-  td: {
-    padding: "0.55rem 0.75rem",
-    borderBottom: "1px solid #f0f0f0",
-    verticalAlign: "middle",
-    color: "#1a1a1a",
-  },
-  code: {
-    fontFamily: "var(--font-mono)",
-    fontSize: "0.95rem",
-    fontWeight: 700,
-    letterSpacing: "0.05em",
-    color: "#7c5cbf",
-  },
-  actions: {
-    display: "flex",
-    gap: "0.4rem",
-    flexWrap: "wrap",
-  },
-  btnApprove: {
-    padding: "0.3rem 0.75rem",
-    background: "#2ecc71",
-    color: "#fff",
-    border: "none",
-    borderRadius: 4,
-    fontSize: "0.8rem",
-    fontWeight: 600,
-    cursor: "pointer",
-  },
-  btnDeny: {
-    padding: "0.3rem 0.75rem",
-    background: "none",
-    color: "#c0392b",
-    border: "1px solid #e0dede",
-    borderRadius: 4,
-    fontSize: "0.8rem",
-    cursor: "pointer",
-  },
-  btnRevoke: {
-    padding: "0.3rem 0.75rem",
-    background: "none",
-    color: "#c0392b",
-    border: "1px solid #e0dede",
-    borderRadius: 4,
-    fontSize: "0.8rem",
-    cursor: "pointer",
-  },
-  toggleOn: {
-    padding: "0.25rem 0.6rem",
-    background: "#ede8f8",
-    color: "#7c5cbf",
-    border: "1px solid #c5b0f0",
-    borderRadius: 4,
-    fontSize: "0.78rem",
-    fontWeight: 600,
-    cursor: "pointer",
-  },
-  toggleOff: {
-    padding: "0.25rem 0.6rem",
-    background: "none",
-    color: "#6b6b6b",
-    border: "1px solid #e0e0e0",
-    borderRadius: 4,
-    fontSize: "0.78rem",
-    cursor: "pointer",
-  },
-};

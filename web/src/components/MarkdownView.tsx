@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect } from "react";
+import { useMemo, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { parseFrontmatter } from "../markdown/frontmatter";
 import { renderMarkdown } from "../markdown/renderer";
@@ -83,18 +83,32 @@ export default function MarkdownView({
     return () => container.removeEventListener("click", handleClick);
   }, [vaultId, onCreateNote, onNavigate, navigate]);
 
+  // Scroll to a heading when the Outline panel requests a jump (by document order).
+  useEffect(() => {
+    function onJump(e: Event) {
+      const idx = (e as CustomEvent<{ index: number }>).detail?.index;
+      const container = containerRef.current;
+      if (!container || idx == null) return;
+      const headings = container.querySelectorAll("h1, h2, h3, h4, h5, h6");
+      const el = headings[idx] as HTMLElement | undefined;
+      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    window.addEventListener("lapis:outline-jump", onJump as EventListener);
+    return () => window.removeEventListener("lapis:outline-jump", onJump as EventListener);
+  }, []);
+
   const title = (data.title as string | undefined) ?? null;
-  const hasFrontmatter = title || tags.length > 0 || Object.keys(data).length > 0;
+  const hasFrontmatter = title || tags.length > 0;
 
   return (
-    <div style={styles.wrapper}>
+    <div className="markdown-preview w-full px-8 py-6">
       {hasFrontmatter && (
-        <div style={styles.frontmatter}>
-          {title && <div style={styles.fmTitle}>{title}</div>}
+        <div className="mb-5 border-b border-border pb-4">
+          {title && <div className="mb-1.5 text-[1.6rem] font-bold text-ink">{title}</div>}
           {tags.length > 0 && (
-            <div style={styles.tagRow}>
+            <div className="mt-1 flex flex-wrap gap-1.5">
               {tags.map((t) => (
-                <span key={t} style={styles.tag}>
+                <span key={t} className="tag-pill">
                   #{t}
                 </span>
               ))}
@@ -105,49 +119,9 @@ export default function MarkdownView({
       <div
         ref={containerRef}
         className="markdown-body"
-        style={styles.body}
         // eslint-disable-next-line react/no-danger
         dangerouslySetInnerHTML={{ __html: html }}
       />
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  wrapper: {
-    padding: "1.5rem 2rem",
-    maxWidth: 740,
-    margin: "0 auto",
-    width: "100%",
-  },
-  frontmatter: {
-    marginBottom: "1.25rem",
-    paddingBottom: "1rem",
-    borderBottom: "1px solid #e0e0e0",
-  },
-  fmTitle: {
-    fontSize: "1.6rem",
-    fontWeight: 700,
-    marginBottom: "0.4rem",
-    color: "#1a1a1a",
-  },
-  tagRow: {
-    display: "flex",
-    flexWrap: "wrap",
-    gap: "0.4rem",
-    marginTop: "0.3rem",
-  },
-  tag: {
-    background: "#ede8f8",
-    color: "#7c5cbf",
-    borderRadius: 4,
-    padding: "0.15rem 0.5rem",
-    fontSize: "0.8rem",
-    fontWeight: 500,
-  },
-  body: {
-    lineHeight: 1.7,
-    fontSize: "1rem",
-    color: "#1a1a1a",
-  },
-};
