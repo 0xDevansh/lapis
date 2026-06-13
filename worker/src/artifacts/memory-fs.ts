@@ -43,7 +43,27 @@ export class MemoryFS {
     rmdir: this.rmdir.bind(this),
     stat: this.stat.bind(this),
     lstat: this.lstat.bind(this),
+    readlink: this.readlink.bind(this),
+    symlink: this.symlink.bind(this),
+    chmod: this.chmod.bind(this),
   };
+
+  // The vault tree never contains symlinks. isomorphic-git's promise-mode
+  // FileSystem binds readlink/symlink/chmod unconditionally, so these must
+  // exist or `git.init` throws "Cannot read properties of undefined (reading
+  // 'bind')". readlink reports "not a symlink"; symlink is unsupported; chmod
+  // is a no-op (mode is fixed in MemoryStats).
+  async readlink(path: string): Promise<string> {
+    throw Object.assign(new Error(`EINVAL: not a symlink, ${path}`), { code: "EINVAL" });
+  }
+
+  async symlink(): Promise<void> {
+    throw Object.assign(new Error("ENOSYS: symlink not supported"), { code: "ENOSYS" });
+  }
+
+  async chmod(): Promise<void> {
+    // No-op: MemoryStats reports a fixed mode.
+  }
 
   normalize(input: string): string {
     const segments: string[] = [];

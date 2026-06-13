@@ -715,8 +715,14 @@ export class VaultCoordinator extends DurableObject<Env> {
         `(${result.fileCount} files)`
       );
     } catch (err) {
-      // Log via Workers Observability — does not corrupt R2 state
-      console.error(`[lapis] Seal failed for vault ${meta.id}:`, err);
+      // Log via Workers Observability — does not corrupt R2 state.
+      // Surface message + stack so seal failures are diagnosable (a silent
+      // catch previously hid a git.init failure that left history empty).
+      const e = err as Error;
+      console.error(
+        `[lapis] Seal failed for vault ${meta.id}: ${e?.message ?? err}`,
+        e?.stack ?? ""
+      );
     }
   }
 
@@ -800,7 +806,7 @@ export class VaultCoordinator extends DurableObject<Env> {
         const others: string[] = [];
         for (const otherWs of this.ctx.getWebSockets()) {
           const otherEntry = this.getPresence(otherWs);
-          if (otherWs !== ws && otherEntry.openPath === path) {
+          if (otherWs !== ws && otherEntry && otherEntry.openPath === path) {
             others.push(otherEntry.identity);
           }
         }
