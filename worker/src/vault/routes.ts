@@ -2,8 +2,6 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
-import { contentKey } from "./manifest";
-import { indexFile, removeFromIndex, renameInIndex } from "../search/indexer";
 import { buildZip, type ZipEntry } from "./zip";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
@@ -126,19 +124,17 @@ vaultRoutes.get("/:id/files/*", requireSession, async (c) => {
   const vault = await resolveVault(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
-  // Fetch from R2
-  const r2Key = contentKey(id, filePath);
-  const obj = await c.env.VAULT_BUCKET.get(r2Key);
-  if (!obj) return c.json({ error: "Not found" }, 404);
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  const content = await stub.getContent(id, filePath);
+  if (!content) return c.json({ error: "Not found" }, 404);
 
-  const contentType =
-    obj.httpMetadata?.contentType ?? "application/octet-stream";
-
-  return new Response(obj.body, {
+  return new Response(content.bytes, {
     headers: {
-      "Content-Type": contentType,
+      "Content-Type": content.contentType,
       "Cache-Control": "private, max-age=30",
-      "Content-Length": String(obj.size),
+      "Content-Length": String(content.bytes.byteLength),
+      "X-Revision": String(content.revision),
     },
   });
 });
@@ -178,12 +174,10 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
   }
 
   let body: ArrayBuffer;
-  let baseContent: string | undefined;
   let text: string | undefined;
   if (contentType.includes("application/json")) {
-    const json = await c.req.json<{ content?: string; baseContent?: string }>();
+    const json = await c.req.json<{ content?: string }>();
     text = json.content ?? "";
-    baseContent = json.baseContent;
     body = new TextEncoder().encode(text).buffer as ArrayBuffer;
   } else {
     body = await c.req.arrayBuffer();
@@ -198,44 +192,14 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
     : contentType.split(";")[0].trim();
 
   try {
-    let entry;
-    try {
-      entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision);
-    } catch (e: unknown) {
-      const err = e as { status?: number; serverRevision?: number };
-      if (err.status !== 409 || baseRevision === undefined || err.serverRevision === undefined) {
-        throw e;
-      }
-
-      if (text !== undefined && baseContent !== undefined) {
-        const result = await stub.syncMergePatch(id, filePath, "", err.serverRevision, baseRevision, `web:${session.sessionId}`, text, baseContent);
-        if (result.kind === "conflict") {
-          return c.json({ conflict: true, conflictPath: result.conflictPath, entry: result.entry }, 202);
-        }
-        entry = result.entry;
-      } else {
-        const result = await stub.syncConflictWholeObject(id, filePath, body, storageContentType, err.serverRevision, baseRevision, `web:${session.sessionId}`);
-        return c.json({ conflict: true, conflictPath: result.conflictPath, entry: result.entry }, 202);
-      }
-    }
-
-    // Update search index (fire-and-forget; don't fail the request if indexing fails)
-    let textContent = storageContentType.startsWith("text/") || storageContentType === "application/json"
-      ? text ?? new TextDecoder().decode(body)
-      : undefined;
-    if (entry.path !== filePath || entry.revision !== (baseRevision ?? -1) + 1) {
-      const obj = await c.env.VAULT_BUCKET.get(entry.r2Key);
-      if (obj && (entry.contentType.startsWith("text/") || entry.contentType === "application/json")) {
-        textContent = await obj.text();
-      }
-    }
-    const manifest = await stub.getManifest(id);
-    const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
-    indexFile(c.env.DB, { vaultId: id, path: entry.path, content: textContent, vaultPaths }).catch(() => {});
-
+    const entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision, `web:${session.sessionId}`);
     return c.json(entry, 200);
   } catch (e: unknown) {
-    const err = e as { status?: number; message?: string };
+    const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
+    if (err.status === 409) {
+      const headRevision = err.headRevision ?? err.serverRevision;
+      return c.json({ error: err.message ?? "Revision conflict", headRevision, serverRevision: headRevision }, 409);
+    }
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 409 | 500);
   }
 });
@@ -266,21 +230,7 @@ vaultRoutes.patch("/:id/files/*", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    const entry = await stub.renameFile(id, oldPath, newPath);
-
-    // Update search index for the renamed file (fetch content if it's text)
-    let newContent: string | undefined;
-    if (entry.contentType.startsWith("text/") || entry.contentType === "application/json") {
-      try {
-        const r2Key = contentKey(id, newPath);
-        const obj = await c.env.VAULT_BUCKET.get(r2Key);
-        if (obj) newContent = await obj.text();
-      } catch { /* ignore */ }
-    }
-    const manifest = await stub.getManifest(id);
-    const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
-    renameInIndex(c.env.DB, id, oldPath, newPath, newContent, vaultPaths).catch(() => {});
-
+    const entry = await stub.renameFile(id, oldPath, newPath, `web:${session.sessionId}`);
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -309,11 +259,7 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    await stub.deleteFile(id, filePath);
-
-    // Remove from search index
-    removeFromIndex(c.env.DB, id, filePath).catch(() => {});
-
+    await stub.deleteFile(id, filePath, `web:${session.sessionId}`);
     return c.json({ ok: true });
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -341,6 +287,24 @@ vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
   const snapshots = await stub.getLog(50);
 
   return c.json({ snapshots });
+});
+
+/** POST /api/vaults/:id/seal — manually seal pending changes to Artifacts. */
+vaultRoutes.post("/:id/seal", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  try {
+    return c.json(await stub.sealNow(`manual by ${session.sessionId}`), 200);
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Seal failed" }, (err.status ?? 500) as 404 | 500);
+  }
 });
 
 /**
@@ -387,13 +351,7 @@ vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    const entry = await stub.putFile(id, filePath, encoded.buffer as ArrayBuffer, contentType);
-
-    // Update search index
-    const manifest = await stub.getManifest(id);
-    const vaultPaths = Object.values(manifest.entries).map((e) => e.path);
-    indexFile(c.env.DB, { vaultId: id, path: filePath, content: body.content, vaultPaths }).catch(() => {});
-
+    const entry = await stub.syncPutFile(id, filePath, encoded.buffer as ArrayBuffer, contentType, undefined, `web:${session.sessionId}`);
     return c.json({ restored: true, entry }, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -427,20 +385,11 @@ vaultRoutes.get("/:id/export", requireSession, async (c) => {
     (e) => !isVaultInternal(e.path)
   );
 
-  // Fetch all file contents from R2 concurrently
   const zipEntries: ZipEntry[] = [];
-  const fetched = await Promise.allSettled(
-    entries.map(async (e) => {
-      const obj = await c.env.VAULT_BUCKET.get(e.r2Key);
-      if (!obj) return null;
-      const buf = await obj.arrayBuffer();
-      return { path: e.path, data: new Uint8Array(buf) } satisfies ZipEntry;
-    })
-  );
-
-  for (const result of fetched) {
-    if (result.status === "fulfilled" && result.value) {
-      zipEntries.push(result.value);
+  for (const entry of entries) {
+    const content = await stub.getContent(id, entry.path);
+    if (content) {
+      zipEntries.push({ path: entry.path, data: new Uint8Array(content.bytes) });
     }
   }
 

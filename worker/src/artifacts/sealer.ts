@@ -25,13 +25,16 @@
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { MemoryFS } from "./memory-fs";
-import type { VaultManifest } from "../vault/manifest";
-
 export interface SealResult {
   commitHash: string;
   repoName: string;
   remote: string;
   fileCount: number;
+}
+
+export interface IncrementalSealChange {
+  path: string;
+  deleted?: boolean;
 }
 
 export interface SealedCommit {
@@ -117,7 +120,7 @@ export async function ensureRepoAndToken(
 export async function sealVault(
   artifacts: Artifacts,
   vaultId: string,
-  manifest: VaultManifest,
+  changes: IncrementalSealChange[],
   existingRemote: string | null,
   readFile: (path: string) => Promise<ArrayBuffer | null>,
   label?: string
@@ -126,26 +129,48 @@ export async function sealVault(
 
   const dir = "/vault";
   const fs = new MemoryFS();
-  await git.init({ fs, dir, defaultBranch: "main" });
 
-  const entries = Object.values(manifest.entries);
+  if (existingRemote) {
+    try {
+      await git.clone({
+        fs,
+        http,
+        dir,
+        url: remote,
+        ref: "main",
+        singleBranch: true,
+        depth: 1,
+        noCheckout: false,
+        onAuth: () => ({ username: "x", password: tokenSecret }),
+      });
+    } catch {
+      await git.init({ fs, dir, defaultBranch: "main" });
+    }
+  } else {
+    await git.init({ fs, dir, defaultBranch: "main" });
+  }
+
   let fileCount = 0;
+  for (const change of changes) {
+    if (change.deleted) {
+      try {
+        await git.remove({ fs, dir, filepath: change.path });
+        fileCount++;
+      } catch {
+        // Deleting an already-absent path is idempotent for sealing purposes.
+      }
+      continue;
+    }
 
-  // Write current vault content into the in-memory working tree
-  for (const entry of entries) {
-    const content = await readFile(entry.path);
+    const content = await readFile(change.path);
     if (content === null) continue;
-    await fs.promises.writeFile(`${dir}/${entry.path}`, new Uint8Array(content));
+    await fs.promises.writeFile(`${dir}/${change.path}`, new Uint8Array(content));
+    await git.add({ fs, dir, filepath: change.path });
     fileCount++;
   }
 
-  // Stage all written files
-  for (const entry of entries) {
-    try {
-      await git.add({ fs, dir, filepath: entry.path });
-    } catch {
-      // Skip files that failed to write above
-    }
+  if (fileCount === 0) {
+    return { commitHash: "", repoName: repoName(vaultId), remote, fileCount };
   }
 
   const now = new Date();
@@ -165,14 +190,12 @@ export async function sealVault(
     },
   });
 
-  // Force push — handles both first push to an empty repo and incremental updates
   await git.push({
     fs,
     http,
     dir,
     url: remote,
     ref: "main",
-    force: true,
     onAuth: () => ({ username: "x", password: tokenSecret }),
   });
 

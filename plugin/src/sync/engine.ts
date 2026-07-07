@@ -1,8 +1,8 @@
 import { Notice, TFile } from "obsidian";
 import type { App, Vault } from "obsidian";
-import { LapisClient } from "../net/client";
+import { LapisClient, StaleWriteError } from "../net/client";
 import type { LapisSettings, ManifestEntry, SyncJournal, VaultManifest } from "../types";
-import { createPatch } from "./diff";
+import { applyPatch, createPatch } from "./diff";
 import { bytesToBase64, sha256Hex } from "./hash";
 import { appendPendingOp, emptyJournal, removeEntry, setEntry } from "./journal";
 import { isVaultInternal, lowerPath, shouldSyncPath } from "./paths";
@@ -83,19 +83,19 @@ export class SyncEngine {
 
     const pendingOps = [...journal.pendingOps];
     const response = await this.client.batchSync(this.vaultId, pendingOps, this.token);
+    const remaining = [...pendingOps];
     for (const result of response.results) {
       if (result.entry) {
-        if (result.status === "conflict") {
-          await this.pullEntry(result.entry, journal);
-        } else {
-          setEntry(journal, result.entry);
-        }
+        setEntry(journal, result.entry);
       }
-      if (result.status === "accepted" && result.op.op === "delete") {
-        removeEntry(journal, result.op.path);
+      if (result.status === "accepted" && result.op === "delete") {
+        removeEntry(journal, result.path);
+      }
+      if (result.status === "accepted") {
+        remaining.shift();
       }
     }
-    journal.pendingOps = [];
+    journal.pendingOps = remaining;
     await this.options.setJournal(journal);
     await this.pullChanged();
   }
@@ -183,19 +183,13 @@ export class SyncEngine {
       const serverText = new TextDecoder().decode(serverBytes);
       const clientText = new TextDecoder().decode(content);
       const patch = createPatch(path, serverText, clientText);
-      const result = await this.client.applyPatch(this.vaultId, path, patch, baseRevision, clientText, this.token);
-      if ("conflict" in result) {
-        await this.pullEntry(result.entry, journal);
-      } else {
-        setEntry(journal, result, hash);
-      }
+      const result = await this.applyTextPatchWithRebase(path, patch, baseRevision, clientText);
+      setEntry(journal, result, hash);
     } else {
-      const result = await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
-      if ("conflict" in result) {
-        await this.pullEntry(result.entry, journal);
-      } else {
-        setEntry(journal, result, hash);
-      }
+      const result = isTextContentType(contentType)
+        ? await this.putTextWithRebase(path, content, contentType, baseRevision)
+        : await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
+      setEntry(journal, result, hash);
     }
 
     await this.options.setJournal(journal);
@@ -261,7 +255,30 @@ export class SyncEngine {
     await this.options.setJournal(journal);
   }
 
-  async applyRemotePut(path: string): Promise<void> {
+  async applyRemotePut(path: string, revision?: number, patch?: string, baseRevision?: number): Promise<void> {
+    if (patch && revision !== undefined && baseRevision !== undefined) {
+      const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+      const key = lowerPath(path);
+      const existingRevision = journal.fileRevisions[key] ?? -1;
+      const existing = this.vault.getAbstractFileByPath(path);
+      if (existingRevision === baseRevision && existing instanceof TFile) {
+        const current = await this.vault.read(existing);
+        const next = applyPatch(current, patch);
+        if (next !== null) {
+          await this.vault.modify(existing, next);
+          const bytes = new TextEncoder().encode(next).buffer as ArrayBuffer;
+          setEntry(journal, {
+            path,
+            size: bytes.byteLength,
+            contentType: contentTypeFromPath(path),
+            updatedAt: new Date().toISOString(),
+            revision,
+          }, await sha256Hex(bytes));
+          await this.options.setJournal(journal);
+          return;
+        }
+      }
+    }
     const manifest = await this.client.getManifest(this.vaultId, this.token);
     const entry = manifest.entries[lowerPath(path)];
     if (!entry) return;
@@ -312,8 +329,7 @@ export class SyncEngine {
     }
 
     await this.client.completeSeed(this.vaultId, this.token);
-    const manifest = await this.client.getManifest(this.vaultId, this.token);
-    await this.options.setJournal(await this.journalFromManifest(manifest));
+    await this.options.setJournal(journal);
     new Notice("Lapis: seed complete — initial history sealed");
   }
 
@@ -366,14 +382,10 @@ export class SyncEngine {
         if (serverHash === local.hash) {
           setEntry(journal, server, local.hash);
         } else {
-          // With no shared history, force the normal stale-write path so the server preserves
-          // the Web Vault file and captures the local version as a Conflict Note.
-          const result = await this.client.putFileWithBaseRevision(this.vaultId, local.path, local.content, local.contentType, -1, this.token);
-          if ("conflict" in result) {
-            await this.pullEntry(result.entry, journal);
-          } else {
-            setEntry(journal, result, local.hash);
-          }
+          const result = isTextContentType(local.contentType)
+            ? await this.putTextWithRebase(local.path, local.content, local.contentType, server.revision)
+            : await this.client.putFileWithBaseRevision(this.vaultId, local.path, local.content, local.contentType, server.revision, this.token);
+          setEntry(journal, result, local.hash);
         }
       }
     }
@@ -388,13 +400,29 @@ export class SyncEngine {
     setEntry(journal, entry, await sha256Hex(content));
   }
 
-  private async journalFromManifest(manifest: VaultManifest): Promise<SyncJournal> {
-    const journal = emptyJournal(manifest.vaultId);
-    for (const entry of Object.values(manifest.entries)) {
-      const content = await this.client.getFile(this.vaultId, entry.path, this.token);
-      setEntry(journal, entry, await sha256Hex(content));
+  private async applyTextPatchWithRebase(path: string, patch: string, baseRevision: number, clientText: string): Promise<ManifestEntry> {
+    try {
+      return await this.client.applyPatch(this.vaultId, path, patch, baseRevision, this.token);
+    } catch (error) {
+      if (!(error instanceof StaleWriteError)) throw error;
+      const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
+      const serverText = new TextDecoder().decode(serverBytes);
+      const rebasedPatch = createPatch(path, serverText, clientText);
+      return this.client.applyPatch(this.vaultId, path, rebasedPatch, error.headRevision, this.token);
     }
-    return journal;
+  }
+
+  private async putTextWithRebase(path: string, content: ArrayBuffer, contentType: string, baseRevision: number): Promise<ManifestEntry> {
+    const clientText = new TextDecoder().decode(content);
+    try {
+      return await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
+    } catch (error) {
+      if (!(error instanceof StaleWriteError)) throw error;
+      const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
+      const serverText = new TextDecoder().decode(serverBytes);
+      const rebasedPatch = createPatch(path, serverText, clientText);
+      return this.client.applyPatch(this.vaultId, path, rebasedPatch, error.headRevision, this.token);
+    }
   }
 
   private async hashServerFile(entry: ManifestEntry): Promise<string> {

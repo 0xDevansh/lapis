@@ -56,9 +56,16 @@ export async function signOut(): Promise<void> {
   await apiFetch<unknown>("/api/auth/sign-out", { method: "POST" });
 }
 
-export async function getSession(): Promise<{ user: User } | null> {
+export interface SessionInfo {
+  user: User;
+  session?: {
+    id: string;
+  };
+}
+
+export async function getSession(): Promise<SessionInfo | null> {
   try {
-    return await apiFetch<{ user: User }>("/api/auth/get-session");
+    return await apiFetch<SessionInfo>("/api/auth/get-session");
   } catch {
     return null;
   }
@@ -99,10 +106,11 @@ export interface ManifestEntry {
   revision: number;
 }
 
-export interface ConflictResponse {
-  conflict: true;
-  conflictPath: string;
-  entry: ManifestEntry;
+export class StaleWriteError extends Error {
+  constructor(message: string, readonly headRevision: number) {
+    super(message);
+    this.name = "StaleWriteError";
+  }
 }
 
 export interface VaultManifest {
@@ -135,19 +143,23 @@ export async function putTextFile(
   vaultId: string,
   path: string,
   content: string,
-  options?: { baseRevision?: number; baseContent?: string }
-): Promise<ManifestEntry | ConflictResponse> {
-  return apiFetch<ManifestEntry | ConflictResponse>(
-    `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
-    {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        ...(options?.baseRevision !== undefined ? { "X-Base-Revision": String(options.baseRevision) } : {}),
-      },
-      body: JSON.stringify({ content, baseContent: options?.baseContent }),
-    }
-  );
+  options?: { baseRevision?: number }
+): Promise<ManifestEntry> {
+  const res = await fetch(`/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`, {
+    method: "PUT",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options?.baseRevision !== undefined ? { "X-Base-Revision": String(options.baseRevision) } : {}),
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (res.ok) return res.json() as Promise<ManifestEntry>;
+  const body = await res.json().catch(() => ({})) as { error?: string; headRevision?: number; serverRevision?: number };
+  if (res.status === 409) {
+    throw new StaleWriteError(body.error ?? "Revision conflict", body.headRevision ?? body.serverRevision ?? -1);
+  }
+  throw new Error(body.error ?? `HTTP ${res.status}`);
 }
 
 /** Upload a binary file (uses raw body, not JSON wrapper). */

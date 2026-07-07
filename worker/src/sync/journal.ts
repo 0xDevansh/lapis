@@ -39,17 +39,14 @@ export interface PendingPutOp {
 
 /**
  * Apply a unified diff to a text file.
- * Includes `clientContent` so the server can perform merge3 if the patch is stale.
+ * The server rejects stale patches with a `stale` batch result; clients rebase
+ * locally and retry.
  */
 export interface PendingPatchOp {
   op: "patch";
   path: string;
   patch: string;
   baseRevision: number;
-  /** Full intended content — enables server-side three-way merge on staleness. */
-  clientContent: string;
-  /** Common ancestor content — improves merge quality when available. */
-  baseContent?: string;
 }
 
 /** Rename or move a file. */
@@ -69,11 +66,11 @@ export interface PendingDeleteOp {
 export interface BatchOpResult {
   op: PendingOp["op"];
   path: string;
-  status: "accepted" | "merged" | "conflict" | "error";
-  /** On conflict: the path of the created Conflict Note. */
-  conflictPath?: string;
+  status: "accepted" | "stale" | "error";
   /** On error: human-readable message. */
   error?: string;
+  /** On stale: latest server revision to rebase against. */
+  headRevision?: number;
   /** Updated manifest entry (present on accepted/merged). */
   entry?: Record<string, unknown>;
 }

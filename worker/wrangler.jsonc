@@ -36,7 +36,7 @@
     {
       "binding": "DB",
       "database_name": "lapis-db",
-      "database_id": "local",
+      "database_id": "8e4495ac-44df-4737-9290-60fd939b2418",
       "migrations_dir": "migrations"
     }
   ],
@@ -45,7 +45,7 @@
   "kv_namespaces": [
     {
       "binding": "KV",
-      "id": "local"
+      "id": "de1a29f2802743ccb1ef339d60e7bcf8"
     }
   ],
 

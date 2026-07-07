@@ -32,6 +32,7 @@ import {
   Sun,
   Moon,
   FloppyDisk,
+  ArrowCounterClockwise,
   X as XIcon,
   DeviceMobile,
   House,
@@ -73,6 +74,37 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function applyUnifiedPatch(original: string, patch: string): string | null {
+  const lines = patch.split("\n");
+  const hunkIndex = lines.findIndex((line) => line.startsWith("@@"));
+  if (hunkIndex < 0) return null;
+  const match = lines[hunkIndex].match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+  if (!match) return null;
+
+  const source = original === "" ? [] : original.split("\n");
+  const output: string[] = [];
+  let sourceIndex = 0;
+  const start = Number(match[1]) - 1;
+  while (sourceIndex < start) output.push(source[sourceIndex++]);
+  for (const line of lines.slice(hunkIndex + 1)) {
+    if (line === "") continue;
+    const prefix = line[0];
+    const content = line.slice(1);
+    if (prefix === " ") {
+      if (source[sourceIndex] !== content) return null;
+      output.push(content);
+      sourceIndex++;
+    } else if (prefix === "-") {
+      if (source[sourceIndex] !== content) return null;
+      sourceIndex++;
+    } else if (prefix === "+") {
+      output.push(content);
+    }
+  }
+  while (sourceIndex < source.length) output.push(source[sourceIndex++]);
+  return output.join("\n");
+}
+
 type Modal =
   | { kind: "none" }
   | { kind: "newNote"; value: string; error: string | null }
@@ -111,6 +143,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const [vault, setVault] = useState<api.Vault | null>(null);
   const [manifest, setManifest] = useState<api.VaultManifest | null>(null);
   const [manifestError, setManifestError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   const [load, setLoad] = useState<{
@@ -149,6 +182,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   useEffect(() => {
     api.getVault(vaultId).then(setVault).catch(() => {});
+    api.getSession().then((session) => setSessionId(session?.session?.id ?? null)).catch(() => setSessionId(null));
     refreshManifest();
   }, [vaultId, refreshManifest]);
 
@@ -277,21 +311,19 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       if (tab.editBuffer === undefined) return;
       setSaving(true);
       try {
-        const result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
-          baseRevision: tab.baseRevision ?? 0,
-          baseContent: tab.baseContent ?? "",
-        });
-        const next = await refreshManifest();
-        if ("conflict" in result) {
-          toast(
-            `A newer version exists. Lapis created a Conflict Note at ${result.conflictPath}.`,
-            { tone: "error" }
-          );
-          if (next?.entries[result.conflictPath.toLowerCase()]) {
-            dispatch({ type: "OPEN_FILE", path: result.conflictPath });
-          }
-          return;
+        let result: api.ManifestEntry;
+        try {
+          result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
+            baseRevision: tab.baseRevision ?? 0,
+          });
+        } catch (error) {
+          if (!(error instanceof api.StaleWriteError)) throw error;
+          await api.getFileText(vaultId, tab.path);
+          result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
+            baseRevision: error.headRevision,
+          });
         }
+        await refreshManifest();
         dispatch({
           type: "MARK_TAB_SAVED",
           id: tab.id,
@@ -308,10 +340,50 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     [vaultId, refreshManifest, dispatch, toast]
   );
 
+  // ── Revert the active tab to the server version ──────────────────────────--
+
+  const doRevert = useCallback(
+    async (tab: Tab) => {
+      try {
+        const content = await api.getFileText(vaultId, tab.path);
+        const m = await refreshManifest();
+        const entry = m?.entries[tab.path.toLowerCase()];
+        dispatch({
+          type: "SET_TAB_CONTENT",
+          id: tab.id,
+          editBuffer: content,
+          baseContent: content,
+          baseRevision: entry?.revision ?? tab.baseRevision ?? 0,
+        });
+        toast("Reverted to server version", { tone: "success", duration: 1500 });
+      } catch (e) {
+        toast((e as Error).message, { tone: "error" });
+      }
+    },
+    [vaultId, refreshManifest, dispatch, toast]
+  );
+
+  const revertTab = useCallback(
+    (tab: Tab) => {
+      setModal({
+        kind: "confirm",
+        title: "Revert to server version?",
+        message: `Discard your local changes to ${tab.path} and reload the version saved on the server?`,
+        confirmLabel: "Revert",
+        danger: true,
+        onConfirm: () => void doRevert(tab),
+      });
+    },
+    [doRevert]
+  );
+
   // ── Remote changes ─────────────────────────────────────────────────────--
 
   const handleRemoteChange = useCallback(
     async (msg: import("../hooks/useVaultNotify").ChangeNotification) => {
+      if (sessionId && msg.author === `web:${sessionId}`) {
+        return;
+      }
       const next = await refreshManifest();
       const key = msg.path.toLowerCase();
       if (msg.kind === "delete") {
@@ -331,6 +403,25 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         if (tab && !tab.dirty && next) {
           const entry = next.entries[key];
           if (entry && isTextType(entry.contentType)) {
+            if (
+              msg.patch &&
+              msg.revision !== undefined &&
+              msg.baseRevision !== undefined &&
+              tab.baseContent !== undefined &&
+              tab.baseRevision === msg.baseRevision
+            ) {
+              const patched = applyUnifiedPatch(tab.baseContent, msg.patch);
+              if (patched !== null) {
+                dispatch({
+                  type: "SET_TAB_CONTENT",
+                  id: tab.id,
+                  editBuffer: patched,
+                  baseContent: patched,
+                  baseRevision: msg.revision,
+                });
+                return;
+              }
+            }
             try {
               const content = await api.getFileText(vaultId, tab.path);
               dispatch({
@@ -347,7 +438,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         }
       }
     },
-    [refreshManifest, dispatch, vaultId]
+    [refreshManifest, dispatch, vaultId, sessionId]
   );
 
   const { connected, presence, sameFileWarning } = useVaultNotify(
@@ -433,10 +524,14 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   // ── Derived ────────────────────────────────────────────────────────────--
 
-  const treeNodes = manifest ? buildTree(Object.values(manifest.entries)) : [];
-  const vaultPaths = manifest
-    ? Object.values(manifest.entries).map((e) => e.path)
-    : [];
+  const treeNodes = useMemo(
+    () => (manifest ? buildTree(Object.values(manifest.entries)) : []),
+    [manifest]
+  );
+  const vaultPaths = useMemo(
+    () => (manifest ? Object.values(manifest.entries).map((e) => e.path) : []),
+    [manifest]
+  );
   const contentTypeFor = (path: string) =>
     manifest?.entries[path.toLowerCase()]?.contentType;
 
@@ -753,6 +848,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             dispatch({ type: "EDIT_TAB_BUFFER", id: activeTab.id, editBuffer: buf })
           }
           onSave={() => activeTab && saveTab(activeTab)}
+          onRevert={() => activeTab && revertTab(activeTab)}
           onSetMode={(mode) =>
             activeTab && dispatch({ type: "SET_TAB_MODE", id: activeTab.id, mode })
           }
@@ -939,6 +1035,7 @@ function EditorArea({
   vaultPaths,
   onEdit,
   onSave,
+  onRevert,
   onSetMode,
   onRename,
   onDelete,
@@ -953,6 +1050,7 @@ function EditorArea({
   vaultPaths: string[];
   onEdit: (buffer: string) => void;
   onSave: () => void;
+  onRevert: () => void;
   onSetMode: (mode: "live" | "preview") => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
@@ -1061,6 +1159,7 @@ function EditorArea({
         saving={saving}
         dirty={activeTab.dirty}
         onSave={onSave}
+        onRevert={onRevert}
       />
       {previewMode ? (
         <div className="custom-scroll min-h-0 flex-1 overflow-y-auto">
@@ -1122,6 +1221,7 @@ function FileHeader({
   saving,
   dirty,
   onSave,
+  onRevert,
 }: {
   path: string;
   onRename: (path: string) => void;
@@ -1130,11 +1230,23 @@ function FileHeader({
   saving?: boolean;
   dirty?: boolean;
   onSave?: () => void;
+  onRevert?: () => void;
 }) {
   return (
     <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-secondary px-3">
       <span className="flex-1 truncate font-mono text-[12px] text-muted">{path}</span>
       {right}
+      {onRevert && (
+        <button
+          onClick={onRevert}
+          disabled={!dirty || saving}
+          title="Revert to server version"
+          aria-label="Revert to server version"
+          className="flex items-center gap-1 rounded border border-border px-2.5 py-1 text-[12px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ArrowCounterClockwise size={13} /> Revert
+        </button>
+      )}
       {onSave && (
         <button
           onClick={onSave}

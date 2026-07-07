@@ -48,8 +48,6 @@ export interface PendingPatchOp {
   path: string;
   patch: string;
   baseRevision: number;
-  clientContent: string;
-  baseContent?: string;
 }
 
 export interface PendingRenameOp {
@@ -64,11 +62,11 @@ export interface PendingDeleteOp {
 }
 
 export interface BatchOpResult {
-  op: PendingOp;
+  op: PendingOp["op"];
   path: string;
-  status: "accepted" | "merged" | "conflict" | "error";
-  conflictPath?: string;
+  status: "accepted" | "stale" | "error";
   error?: string;
+  headRevision?: number;
   entry?: ManifestEntry;
 }
 
@@ -80,9 +78,12 @@ export interface ChangeNotification {
   type: "change";
   path: string;
   kind: "put" | "rename" | "delete";
+  baseRevision?: number;
   revision?: number;
+  patch?: string;
   newPath?: string;
-  ts: number;
+  author?: string;
+  ts: string;
 }
 
 export interface PresenceSession {
@@ -150,14 +151,13 @@ export interface LapisRequestOptions {
   headers?: Record<string, string>;
 }
 
-export interface ConflictResponse {
-  conflict: true;
-  conflictPath: string;
-  entry: ManifestEntry;
+export interface StaleWriteResponse {
+  error?: string;
+  headRevision?: number;
+  serverRevision?: number;
 }
 
 export interface PatchResponse {
-  merged?: boolean;
   entry: ManifestEntry;
 }
 

@@ -6,12 +6,19 @@ import type {
   LapisRequestOptions,
   LapisResponse,
   ManifestEntry,
-  ConflictResponse,
   BatchSyncResponse,
   PatchResponse,
+  StaleWriteResponse,
   SeedCompleteResult,
   VaultManifest,
 } from "../types";
+
+export class StaleWriteError extends Error {
+  constructor(message: string, readonly headRevision: number) {
+    super(message);
+    this.name = "StaleWriteError";
+  }
+}
 
 export class LapisClient {
   constructor(private readonly serverUrl: string) {}
@@ -158,8 +165,8 @@ export class LapisClient {
     contentType: string,
     baseRevision: number,
     token: string
-  ): Promise<ManifestEntry | ConflictResponse> {
-    const response = await this.request<ManifestEntry | ConflictResponse>({
+  ): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry | StaleWriteResponse>({
       method: "PUT",
       path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
       body: content,
@@ -167,8 +174,11 @@ export class LapisClient {
       token,
       headers: { "X-Base-Revision": String(baseRevision) },
     });
-    if ((response.status === 200 || response.status === 202) && response.data) {
+    if (response.status === 200 && isManifestEntry(response.data)) {
       return response.data;
+    }
+    if (response.status === 409) {
+      throw staleWriteError(staleBody(response.data), response.text);
     }
     throw new Error(response.text || `File upload failed (${response.status})`);
   }
@@ -178,24 +188,26 @@ export class LapisClient {
     path: string,
     patch: string,
     baseRevision: number,
-    clientContent: string,
     token: string
-  ): Promise<ManifestEntry | ConflictResponse> {
-    const response = await this.request<ManifestEntry | PatchResponse | ConflictResponse>({
+  ): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry | PatchResponse | StaleWriteResponse>({
       method: "POST",
       path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}/patch`,
-      body: JSON.stringify({ patch, baseRevision, clientContent }),
+      body: JSON.stringify({ patch, baseRevision }),
       contentType: "application/json",
       token,
     });
-    if ((response.status === 200 || response.status === 202) && response.data) {
+    if (response.status === 200 && response.data) {
       if ("entry" in response.data) {
-        if ("conflict" in response.data) {
-          return response.data;
-        }
         return response.data.entry;
       }
+      if (!isManifestEntry(response.data)) {
+        throw new Error(response.text || "Invalid patch response");
+      }
       return response.data;
+    }
+    if (response.status === 409) {
+      throw staleWriteError(staleBody(response.data), response.text);
     }
     throw new Error(response.text || `Patch failed (${response.status})`);
   }
@@ -259,4 +271,20 @@ export class LapisClient {
 
 function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function staleWriteError(data: StaleWriteResponse | null, fallback: string): StaleWriteError {
+  const headRevision = data?.headRevision ?? data?.serverRevision;
+  if (typeof headRevision === "number") {
+    return new StaleWriteError(data?.error ?? "Revision conflict", headRevision);
+  }
+  return new StaleWriteError(fallback || "Revision conflict", -1);
+}
+
+function isManifestEntry(value: unknown): value is ManifestEntry {
+  return typeof value === "object" && value !== null && typeof (value as ManifestEntry).path === "string" && typeof (value as ManifestEntry).revision === "number";
+}
+
+function staleBody(value: unknown): StaleWriteResponse | null {
+  return typeof value === "object" && value !== null ? (value as StaleWriteResponse) : null;
 }

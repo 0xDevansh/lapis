@@ -13,6 +13,7 @@ const LOCAL_CHANGE_DEBOUNCE_MS = 5_000;
 export default class LapisPlugin extends Plugin {
   settings!: LapisSettings;
   journal: SyncJournal | null = null;
+  settingTab!: LapisSettingTab;
   private statusBar!: LapisStatusBar;
   private modifyTimers = new Map<string, number>();
   private suppressWatcher = false;
@@ -56,7 +57,8 @@ export default class LapisPlugin extends Plugin {
       callback: () => void this.showSyncDiagnostics(),
     });
 
-    this.addSettingTab(new LapisSettingTab(this.app, this));
+    this.settingTab = new LapisSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     this.registerWatcher();
     this.registerEditorChangeFallback();
     this.startNotify();
@@ -77,6 +79,10 @@ export default class LapisPlugin extends Plugin {
   async saveSettings() {
     await this.savePluginData();
     this.updateStatus();
+  }
+
+  refreshSettingsTab() {
+    this.settingTab?.display();
   }
 
   async saveJournal(journal: SyncJournal) {
@@ -113,6 +119,7 @@ export default class LapisPlugin extends Plugin {
           this.settings.deviceId = deviceId;
           this.settings.lastConnectedAt = new Date().toISOString();
           await this.saveSettings();
+          this.refreshSettingsTab();
           this.startNotify();
           await this.syncNow();
         },
@@ -133,6 +140,7 @@ export default class LapisPlugin extends Plugin {
     this.notifyClient?.close();
     this.notifyClient = null;
     await this.saveSettings();
+    this.refreshSettingsTab();
     new Notice("Lapis: disconnected");
   }
 
@@ -266,11 +274,14 @@ export default class LapisPlugin extends Plugin {
 
   private async handleNotifyMessage(message: NotifyMessage) {
     if (message.type === "change") {
+      if (message.author === `device:${this.settings.deviceId}`) {
+        return;
+      }
       if (message.kind === "put" && this.journal?.fileRevisions[message.path.toLowerCase()] === message.revision) {
         return;
       }
       if (message.kind === "put") {
-        await this.runSync((engine) => engine.applyRemotePut(message.path), true);
+        await this.runSync((engine) => engine.applyRemotePut(message.path, message.revision, message.patch, message.baseRevision), true);
       } else if (message.kind === "rename" && message.newPath) {
         const newPath = message.newPath;
         await this.runSync((engine) => engine.applyRemoteRename(message.path, newPath), true);
