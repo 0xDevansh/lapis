@@ -1,14 +1,25 @@
 import type { ReactNode } from "react";
-import { useWorkspace, LEFT_DEFAULT_WIDTH, RIGHT_DEFAULT_WIDTH, LEFT_MIN_WIDTH, LEFT_MAX_WIDTH, RIGHT_MIN_WIDTH, RIGHT_MAX_WIDTH } from "../../store/workspace";
+import {
+  useWorkspace,
+  LEFT_DEFAULT_WIDTH,
+  RIGHT_DEFAULT_WIDTH,
+  LEFT_MIN_WIDTH,
+  LEFT_MAX_WIDTH,
+  RIGHT_MIN_WIDTH,
+  RIGHT_MAX_WIDTH,
+} from "../../store/workspace";
 import ResizeHandle from "./ResizeHandle";
+import { useIsMobile } from "../../hooks/useMobile";
 
 interface WorkspaceLayoutProps {
   /** 40px top chrome: window controls, breadcrumb, panel toggles, search, theme. */
   titleBar?: ReactNode;
-  /** Tab strip beneath the title bar. */
+  /** Tab strip beneath the title bar — hidden on mobile. */
   tabBar?: ReactNode;
-  /** 24px bottom chrome: presence, counts, sync state. */
+  /** 24px bottom chrome: presence, counts, sync state — hidden on mobile. */
   statusBar?: ReactNode;
+  /** Bottom toolbar rendered only on mobile. */
+  mobileBar?: ReactNode;
   /** Left sidebar contents (file tree, search, snapshots). */
   left: ReactNode;
   /** Center editor / viewer region. */
@@ -21,20 +32,26 @@ export default function WorkspaceLayout({
   titleBar,
   tabBar,
   statusBar,
+  mobileBar,
   left,
   children,
   right,
 }: WorkspaceLayoutProps) {
   const { state, dispatch } = useWorkspace();
+  const isMobile = useIsMobile();
   const leftOpen = !state.left.collapsed;
   const rightOpen = !state.right.collapsed;
+
+  const closeLeft = () => dispatch({ type: "TOGGLE_LEFT", collapsed: true });
+  const closeRight = () => dispatch({ type: "TOGGLE_RIGHT", collapsed: true });
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
       {titleBar}
+
       <div className="flex min-h-0 flex-1">
-        {/* Left sidebar */}
-        {leftOpen && (
+        {/* ── Desktop: left sidebar inline ── */}
+        {!isMobile && leftOpen && (
           <aside
             className="flex min-h-0 shrink-0 flex-col border-r border-border bg-secondary"
             style={{ width: state.left.width }}
@@ -43,7 +60,7 @@ export default function WorkspaceLayout({
             {left}
           </aside>
         )}
-        {leftOpen && (
+        {!isMobile && leftOpen && (
           <ResizeHandle
             side="left"
             width={state.left.width}
@@ -57,16 +74,16 @@ export default function WorkspaceLayout({
           />
         )}
 
-        {/* Center column */}
+        {/* ── Center column ── */}
         <div className="flex min-w-0 flex-1 flex-col">
-          {tabBar}
+          {!isMobile && tabBar}
           <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {children}
           </main>
         </div>
 
-        {/* Right panel */}
-        {rightOpen && (
+        {/* ── Desktop: right panel inline ── */}
+        {!isMobile && rightOpen && (
           <ResizeHandle
             side="right"
             width={state.right.width}
@@ -79,7 +96,7 @@ export default function WorkspaceLayout({
             ariaLabel="Resize right panel"
           />
         )}
-        {rightOpen && (
+        {!isMobile && rightOpen && (
           <aside
             className="flex min-h-0 shrink-0 flex-col border-l border-border bg-secondary"
             style={{ width: state.right.width }}
@@ -89,7 +106,39 @@ export default function WorkspaceLayout({
           </aside>
         )}
       </div>
-      {statusBar}
+
+      {/* ── Bottom bars ── */}
+      {isMobile ? mobileBar : statusBar}
+
+      {/* ── Mobile overlay drawers ── */}
+      {isMobile && (leftOpen || rightOpen) && (
+        <div
+          className="fixed inset-0 z-30 bg-black/50"
+          aria-hidden
+          onClick={() => {
+            closeLeft();
+            closeRight();
+          }}
+        />
+      )}
+
+      {isMobile && leftOpen && (
+        <aside
+          className="fixed inset-y-0 left-0 z-40 flex w-4/5 max-w-xs flex-col border-r border-border bg-secondary"
+          aria-label="Sidebar"
+        >
+          {left}
+        </aside>
+      )}
+
+      {isMobile && rightOpen && (
+        <aside
+          className="fixed inset-y-0 right-0 z-40 flex w-4/5 max-w-xs flex-col border-l border-border bg-secondary"
+          aria-label="Right panel"
+        >
+          {right}
+        </aside>
+      )}
     </div>
   );
 }

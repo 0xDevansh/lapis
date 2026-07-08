@@ -35,11 +35,13 @@ function IconButton({
   label,
   active,
   onClick,
+  extraClass,
   children,
 }: {
   label: string;
   active?: boolean;
   onClick?: () => void;
+  extraClass?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -52,6 +54,7 @@ function IconButton({
       className={[
         "flex h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink",
         active ? "text-accent-soft" : "",
+        extraClass ?? "",
       ].join(" ")}
     >
       {children}
@@ -137,12 +140,6 @@ export default function TitleBar({
 
       {/* Right controls */}
       <div className="flex shrink-0 items-center gap-0.5">
-        <IconButton label="Search (⌘F)" onClick={onOpenSearch}>
-          <MagnifyingGlass size={16} />
-        </IconButton>
-        <IconButton label="Command palette (⌘P)" onClick={onOpenPalette}>
-          <Command size={16} />
-        </IconButton>
         <IconButton
           label={theme === "dark" ? "Light theme" : "Dark theme"}
           onClick={onToggleTheme}
@@ -150,7 +147,15 @@ export default function TitleBar({
           {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
         </IconButton>
 
-        <div className="mx-1 h-4 w-px bg-border" aria-hidden />
+        {/* Hidden on mobile — available via command palette or keyboard shortcuts */}
+        <IconButton label="Search (⌘F)" onClick={onOpenSearch} extraClass="hidden md:flex">
+          <MagnifyingGlass size={16} />
+        </IconButton>
+        <IconButton label="Command palette (⌘P)" onClick={onOpenPalette} extraClass="hidden md:flex">
+          <Command size={16} />
+        </IconButton>
+
+        <div className="mx-1 hidden h-4 w-px bg-border md:block" aria-hidden />
 
         <Link
           to={`/vault/${vaultId}/devices`}
@@ -159,7 +164,7 @@ export default function TitleBar({
           onClick={(e) => {
             if (!onNavigateGuard()) e.preventDefault();
           }}
-          className="flex h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
+          className="hidden h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink md:flex"
         >
           <DeviceMobile size={17} weight="duotone" />
         </Link>
@@ -168,7 +173,7 @@ export default function TitleBar({
           download
           title="Export vault as zip"
           aria-label="Export vault"
-          className="flex h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
+          className="hidden h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink md:flex"
         >
           <DownloadSimple size={17} />
         </a>
@@ -177,6 +182,7 @@ export default function TitleBar({
           label={rightCollapsed ? "Show right panel" : "Hide right panel"}
           active={!rightCollapsed}
           onClick={onToggleRight}
+          extraClass="hidden md:flex"
         >
           <SidebarRight size={17} />
         </IconButton>

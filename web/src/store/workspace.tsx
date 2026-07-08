@@ -134,7 +134,7 @@ function reducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState
       const tab: Tab = {
         id: newTabId(),
         path: action.path,
-        mode: action.mode ?? "live",
+        mode: action.mode ?? "preview",
         dirty: false,
       };
       return {

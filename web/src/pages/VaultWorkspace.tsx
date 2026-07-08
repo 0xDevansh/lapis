@@ -9,6 +9,7 @@ import RightPanel from "../components/layout/RightPanel";
 import MarkdownEditor from "../components/editor/MarkdownEditor";
 import { useTheme } from "../hooks/useTheme";
 import { useVaultNotify } from "../hooks/useVaultNotify";
+import { useIsMobile } from "../hooks/useMobile";
 import {
   WorkspaceProvider,
   useWorkspace,
@@ -18,6 +19,7 @@ import WorkspaceLayout from "../components/layout/WorkspaceLayout";
 import TitleBar from "../components/layout/TitleBar";
 import TabBar from "../components/layout/TabBar";
 import StatusBar, { type SyncState } from "../components/layout/StatusBar";
+import MobileToolbar from "../components/layout/MobileToolbar";
 import {
   FilePlus,
   UploadSimple,
@@ -139,6 +141,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const { state, dispatch, activeTab } = useWorkspace();
   const { theme, toggleTheme } = useTheme();
   const { toast } = useToast();
+  const isMobile = useIsMobile();
 
   const [vault, setVault] = useState<api.Vault | null>(null);
   const [manifest, setManifest] = useState<api.VaultManifest | null>(null);
@@ -191,8 +194,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const openFile = useCallback(
     (path: string) => {
       dispatch({ type: "OPEN_FILE", path });
+      // On mobile, close the file tree drawer after opening a file.
+      if (isMobile && !state.left.collapsed) {
+        dispatch({ type: "TOGGLE_LEFT", collapsed: true });
+      }
     },
-    [dispatch]
+    [dispatch, isMobile, state.left.collapsed]
   );
 
   // Handle initial deep link (/vault/:id/file/...) once manifest is loaded.
@@ -543,6 +550,22 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       ? "dirty"
       : "idle";
 
+  const activeIsMd = activeTab
+    ? isMarkdown(
+        manifest?.entries[activeTab.path.toLowerCase()]?.contentType ?? "",
+        activeTab.path
+      )
+    : false;
+
+  const toggleActiveMode = useCallback(() => {
+    if (!activeTab) return;
+    dispatch({
+      type: "SET_TAB_MODE",
+      id: activeTab.id,
+      mode: activeTab.mode === "preview" ? "live" : "preview",
+    });
+  }, [activeTab, dispatch]);
+
   const openSearch = useCallback(() => {
     if (state.left.collapsed) dispatch({ type: "TOGGLE_LEFT", collapsed: false });
     requestAnimationFrame(() => {
@@ -810,6 +833,20 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             onDismissWarning={() => setDismissedWarning(true)}
             activeText={activeText}
             syncState={syncState}
+          />
+        }
+        mobileBar={
+          <MobileToolbar
+            hasActiveTab={activeTab !== null}
+            dirty={activeTab?.dirty ?? false}
+            saving={saving}
+            isMd={activeIsMd}
+            mode={activeTab?.mode ?? "preview"}
+            onToggleLeft={() => dispatch({ type: "TOGGLE_LEFT" })}
+            onNewNote={() => setModal({ kind: "newNote", value: "", error: null })}
+            onSave={() => activeTab && saveTab(activeTab)}
+            onToggleMode={toggleActiveMode}
+            onToggleRight={() => dispatch({ type: "TOGGLE_RIGHT" })}
           />
         }
         left={
