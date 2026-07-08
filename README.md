@@ -1,28 +1,72 @@
 # Lapis
 
-Access and manage your Obsidian vault from any browser. Self-hosted on Cloudflare.
+Your Obsidian vault, accessible from any browser — no Obsidian required.
 
-## Features
+Lapis is a self-hosted web app that turns your Obsidian vault into a private, always-accessible notes workspace. Open a note from your phone, edit it from a work computer, and have it waiting in Obsidian when you get home. Everything runs on your own Cloudflare account, so your notes stay yours.
 
-- **Web vault** — browse, edit, and navigate notes without installing Obsidian
-- **Markdown rendering** — wikilinks, embeds, callouts, tags, frontmatter, and built-in themes
-- **Full-text search** — keyword search with snippets powered by D1 FTS
-- **Backlinks and tags** — server-computed backlink graph and tag index
-- **File operations** — create, edit, upload, rename, move, and delete vault content
-- **Two-way sync** — Obsidian plugin connects via device-code and syncs patches in both directions
-- **Sealed history** — vault changes committed to Artifacts (Git) after a debounce; per-file and whole-vault restore
-- **Conflict notes** — three-way merge for stale patches; unresolvable conflicts written to `.sync-conflicts/`
-- **Offline journal** — plugin queues operations locally and replays them on reconnect
-- **Live presence** — WebSocket notifications, reconnect recovery, and same-file editing warnings
-- **Zip export** — download latest vault content as a zip
-- **Auth-gated** — email/password login via better-auth; no E2EE in first slice
+## What you get
 
-## Requirements
+- **Web vault** — browse, search, and edit notes from any browser; no Obsidian installation needed
+- **Two-way sync** — an Obsidian plugin keeps your local vault and web vault in sync; changes flow both ways in real time
+- **Markdown rendering** — wikilinks, embeds, callouts, tags, frontmatter, backlinks, and built-in themes rendered faithfully
+- **Full-text search** — fast keyword search with highlighted snippets powered by SQLite FTS5
+- **Sealed history** — every save is committed to a Git repo in your Cloudflare account; restore any file or your whole vault to any point in time
+- **Conflict notes** — when edits collide, Lapis writes a human-readable conflict note instead of silently overwriting your work
+- **Offline journal** — the plugin queues changes locally when you're offline and replays them when you reconnect
+- **Live presence** — edits appear in your browser in real time; you'll know if another device has the same file open
+- **Zip export** — download your entire vault as a zip at any time
+- **Private by default** — email/password auth; your vault is not publicly visible
 
-- [Cloudflare account](https://cloudflare.com) with access to Workers, R2, D1, KV, Durable Objects, and Artifacts
-- Node.js 18+ and pnpm
+## Install the Obsidian plugin
 
-## Setup
+The plugin syncs your local vault to the web. You install it manually — it is not yet listed in the Obsidian community plugin directory.
+
+### Option 1 — Release ZIP (recommended)
+
+1. Go to the [latest release](https://github.com/your-org/lapis/releases/latest) and download `lapis-sync.zip`.
+2. Unzip it. You'll get three files: `main.js`, `manifest.json`, `styles.css`.
+3. In your vault, create the folder `.obsidian/plugins/lapis-sync/` if it doesn't exist.
+4. Copy all three files into that folder.
+5. Open Obsidian → **Settings → Community plugins** → toggle **Lapis Sync** on.
+
+### Option 2 — Build from source
+
+1. Clone this repo and install dependencies:
+
+```sh
+git clone https://github.com/your-org/lapis
+cd lapis
+pnpm install
+```
+
+2. Copy the plugin into your vault:
+
+```sh
+export VAULT_PATH="/path/to/your-vault"
+pnpm plugin:install
+```
+
+3. Open Obsidian → **Settings → Community plugins** → toggle **Lapis Sync** on.
+
+### Connect to your web vault
+
+After enabling the plugin:
+
+1. Open **Settings → Lapis Sync**.
+2. Set the **Server URL** (your deployed Lapis worker URL) and **Vault ID** (from the web app).
+3. Run **Lapis: Connect** from the command palette (⌘P / Ctrl+P).
+4. A device code will appear. Approve it in the Lapis web app under **Devices**.
+5. The plugin performs an initial sync, then keeps both vaults in sync automatically.
+
+## Deploy your own Lapis
+
+Lapis runs entirely on Cloudflare's free or paid tier. You need a Cloudflare account with Workers, R2, D1, KV, Durable Objects, and Artifacts enabled.
+
+### Requirements
+
+- [Cloudflare account](https://cloudflare.com)
+- Node.js 18+ and [pnpm](https://pnpm.io)
+- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/): `npm install -g wrangler`
 
 ### 1. Clone and install
 
@@ -35,103 +79,106 @@ pnpm install
 ### 2. Create Cloudflare resources
 
 ```sh
-# R2 bucket
+# Object storage for vault content
 wrangler r2 bucket create lapis-vault
 
-# D1 database (copy the returned database_id into worker/wrangler.jsonc)
+# SQLite database for auth, search, and metadata
+# Copy the returned database_id into worker/wrangler.jsonc
 wrangler d1 create lapis-db
 
-# KV namespace (copy the returned id into worker/wrangler.jsonc)
+# KV namespace for session storage
+# Copy the returned id into worker/wrangler.jsonc
 wrangler kv namespace create lapis-kv
 
-# Artifacts namespace
+# Artifacts namespace for sealed Git history
 wrangler artifacts namespace create lapis
 ```
 
-Update `worker/wrangler.jsonc` with the `database_id` from D1 and the `id` from KV.
+Open `worker/wrangler.jsonc` and paste the `database_id` and KV `id` into the right fields.
 
 ### 3. Set secrets
 
 ```sh
 cd worker
-wrangler secret put BETTER_AUTH_SECRET   # generate a random 32+ char string
-wrangler secret put BETTER_AUTH_URL      # your deployed worker URL, e.g. https://lapis.example.workers.dev
+wrangler secret put BETTER_AUTH_SECRET   # any random 32+ character string
+wrangler secret put BETTER_AUTH_URL      # your worker URL, e.g. https://lapis.example.workers.dev
 ```
 
 ### 4. Run migrations
 
-For local D1:
-
 ```sh
-pnpm migrate
-```
-
-For remote D1:
-
-```sh
+# Apply database migrations
 pnpm migrate:remote
 ```
 
 ### 5. Build and deploy
 
 ```sh
-# Build the web frontend
-cd web && pnpm build && cd ..
-
-# Deploy
+pnpm build
 cd worker && wrangler deploy
 ```
+
+Open your worker URL and sign up. Your web vault is live.
 
 ## Local development
 
 ```sh
-# Terminal 1 — worker (with local R2, D1, KV, DO)
-cd worker
-cp .dev.vars.example .dev.vars   # fill in BETTER_AUTH_SECRET and BETTER_AUTH_URL
-wrangler dev
+# Copy example env file and fill in values
+cp worker/.dev.vars.example worker/.dev.vars
 
-# Terminal 2 — web dev server (proxies /api to localhost:8787)
-cd web
+# Apply migrations to the local D1 instance
+pnpm migrate
+
+# Start everything: worker + web dev server
 pnpm dev
 ```
 
-Then open `http://localhost:5173` and sign up.
+Open `http://localhost:5173`, sign up, and start adding notes.
 
-## Obsidian Plugin
-
-The Obsidian plugin lives in [`plugin/`](plugin/). See [`plugin/README.md`](plugin/README.md) for installation and quick-start instructions.
-
-### Dev Install
-
-Build the plugin and copy it into a development vault:
+To develop the plugin alongside it:
 
 ```sh
-export VAULT_PATH="/path/to/dev-vault"
-pnpm plugin:install
-```
-
-Then reload Obsidian, enable **Lapis Sync**, set `http://localhost:8787` as the server URL, paste the Web Vault ID, and run **Lapis: Connect** from the command palette.
-
-During active plugin development, run:
-
-```sh
+# In a separate terminal, watch and rebuild the plugin
 pnpm plugin:dev
+
+# Copy the build into a dev vault whenever it rebuilds
+export VAULT_PATH="/path/to/your-dev-vault"
+pnpm plugin:copy
 ```
 
-After each rebuild, run `pnpm plugin:copy` and reload the plugin in Obsidian.
+Disable and re-enable **Lapis Sync** in Obsidian to pick up rebuilt plugin files.
 
-## Project structure
+## API
+
+Lapis exposes a REST API that makes it straightforward to read and write vault content programmatically. This is useful for AI agents, automation scripts, and integrations. See [`examples/`](examples/) for working code.
+
+Key endpoints (all require a session cookie or, for the plugin, a device Bearer token):
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/vaults` | List your vaults |
+| `GET` | `/api/vaults/:id/manifest` | Metadata for every file in the vault |
+| `GET` | `/api/vaults/:id/files/*` | Read a file by path |
+| `PUT` | `/api/vaults/:id/files/*` | Create or update a file |
+| `DELETE` | `/api/vaults/:id/files/*` | Delete a file |
+| `GET` | `/api/vaults/:id/search?q=` | Full-text search with snippets |
+| `GET` | `/api/vaults/:id/backlinks?path=` | Notes that link to a given path |
+| `GET` | `/api/vaults/:id/tags` | All tags with counts |
+| `GET` | `/api/vaults/:id/export` | Download vault as a zip |
+
+## Project layout
 
 ```
 worker/   Cloudflare Worker — Hono API, Durable Objects, sync, search
-web/      React SPA — vault browser, Markdown renderer, presence UI
-plugin/   Obsidian plugin — device-code connection and Local Vault sync
+web/      React SPA — vault browser, Markdown renderer, CodeMirror editor
+plugin/   Obsidian plugin — device-code auth and two-way sync
+examples/ Example scripts and agent integrations
 docs/     Build slices, ADRs, PRD, self-hosting guide
 ```
 
 ## Self-hosting notes
 
-See [`docs/self-hosting.md`](docs/self-hosting.md) for detailed guidance on required Cloudflare services, Artifacts configuration, optional upload/storage limits, and operational recovery procedures.
+See [`docs/self-hosting.md`](docs/self-hosting.md) for guidance on Cloudflare service configuration, Artifacts setup, storage limits, and operational recovery.
 
 ## License
 
