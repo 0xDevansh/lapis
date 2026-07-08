@@ -1,0 +1,59 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release Lapis Sync plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build plugin
+        run: pnpm plugin:build
+
+      - name: Package plugin ZIP
+        run: |
+          mkdir -p dist-plugin
+          cp plugin/main.js dist-plugin/
+          cp plugin/manifest.json dist-plugin/
+          cp plugin/styles.css dist-plugin/
+          cd dist-plugin
+          zip ../lapis-sync.zip main.js manifest.json styles.css
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: lapis-sync.zip
+          body: |
+            ## Install
+
+            1. Download `lapis-sync.zip` below.
+            2. Unzip it — you'll get `main.js`, `manifest.json`, and `styles.css`.
+            3. In your Obsidian vault, create `.obsidian/plugins/lapis-sync/` if it doesn't exist.
+            4. Copy all three files into that folder.
+            5. Open Obsidian → **Settings → Community plugins** → enable **Lapis Sync**.
+
+            Then open plugin settings, set your server URL and vault ID, and run **Lapis: Connect** from the command palette.
