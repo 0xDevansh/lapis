@@ -1,0 +1,12 @@
+# Local development secrets — copy this file to .dev.vars and fill in your values.
+# .dev.vars is gitignored; never commit real credentials.
+
+# Base URL of your running Lapis server (no trailing slash)
+LAPIS_URL=http://localhost:8787
+
+# Credentials for the vault owner account in Lapis
+LAPIS_EMAIL=you@example.com
+LAPIS_PASSWORD=your-password-here
+
+# Vault ID from the Lapis web app (shown in the URL after you open a vault)
+LAPIS_VAULT_ID=your-vault-id-here
