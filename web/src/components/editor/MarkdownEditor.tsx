@@ -27,6 +27,8 @@ import { livePreview } from "./livePreview";
 interface MarkdownEditorProps {
   /** The file path — used as a key to know when to fully reset the document. */
   docKey: string;
+  /** Canonical vault path of the open note. */
+  currentPath: string;
   value: string;
   onChange: (value: string) => void;
   onSave: () => void;
@@ -40,6 +42,7 @@ interface MarkdownEditorProps {
 
 export default function MarkdownEditor({
   docKey,
+  currentPath,
   value,
   onChange,
   onSave,
@@ -101,6 +104,7 @@ export default function MarkdownEditor({
         livePreview({
           fileUrl: (path: string) => fileUrl(cbRef.current.vaultId, path),
           pathMap,
+          currentPath,
           onOpenLink: (path: string) => cbRef.current.onOpenLink(path),
         })
       );
@@ -120,7 +124,7 @@ export default function MarkdownEditor({
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docKey, livePreviewEnabled, pathMap]);
+  }, [docKey, currentPath, livePreviewEnabled, pathMap]);
 
   // Sync external value changes (remote edits, saves) into the editor without
   // disturbing the cursor when the change originated locally.

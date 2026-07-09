@@ -6,18 +6,82 @@
  */
 import { marked, type MarkedExtension, type Token } from "marked";
 import DOMPurify from "dompurify";
-import { resolveWikilink } from "./wikilinks";
+import { fileUrl } from "../api";
+import type { ManifestEntry } from "../api";
+import { resolveVaultPath, resolveWikilink } from "./wikilinks";
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp"]);
+
+function isImagePath(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTS.has(ext);
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function manifestEntry(
+  path: string | null,
+  entries?: Record<string, ManifestEntry>
+): ManifestEntry | undefined {
+  if (!path || !entries) return undefined;
+  return entries[path.toLowerCase()];
+}
+
+function vaultImageSrc(vaultId: string, path: string, entry?: ManifestEntry): string {
+  const base = fileUrl(vaultId, path);
+  return entry?.revision != null ? `${base}?rev=${entry.revision}` : base;
+}
+
+function renderImageFigure(options: {
+  vaultId: string;
+  path: string;
+  alt: string;
+  entry?: ManifestEntry;
+  broken?: boolean;
+}): string {
+  const { vaultId, path, alt, entry, broken } = options;
+  const name = path.split("/").pop() ?? path;
+  const src = broken ? "" : vaultImageSrc(vaultId, path, entry);
+  const metaParts: string[] = [];
+  if (entry?.contentType) {
+    metaParts.push(entry.contentType.split("/").pop()?.toUpperCase() ?? entry.contentType);
+  }
+  if (entry?.size != null) metaParts.push(formatBytes(entry.size));
+
+  const showCaption = Boolean(alt && alt !== name && !alt.endsWith(name));
+  const captionHtml = showCaption
+    ? `<span class="vault-image-caption">${escapeHtml(alt)}</span>`
+    : "";
+  const detailsHtml =
+    metaParts.length > 0
+      ? `<span class="vault-image-details">${escapeHtml(metaParts.join(" · "))}</span>`
+      : "";
+
+  const figcaption = `<figcaption class="vault-image-meta">${captionHtml}<span class="vault-image-name">${escapeHtml(name)}</span>${detailsHtml}</figcaption>`;
+
+  if (broken) {
+    return `<figure class="vault-image-embed vault-image-broken"><div class="vault-image-placeholder">Missing: ${escapeHtml(name)}</div>${figcaption}</figure>`;
+  }
+
+  return `<figure class="vault-image-embed"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt || name)}" class="vault-embed-image" loading="lazy" />${figcaption}</figure>`;
+}
 
 // ── Wikilink extension ────────────────────────────────────────────────────────
 
 /**
  * Build a marked extension that:
  *   - Replaces [[wikilink]] tokens with <a> tags (resolved or broken)
- *   - Replaces ![[embed]] tokens with <img> or a file-link fallback
+ *   - Replaces ![[embed]] tokens with image figures or file links
  */
 function wikilinkExtension(options: {
   vaultId: string;
   pathByLower: Map<string, string>;
+  currentPath?: string;
+  manifestEntries?: Record<string, ManifestEntry>;
   onCreateNote?: (path: string) => void;
 }): MarkedExtension {
   return {
@@ -29,7 +93,6 @@ function wikilinkExtension(options: {
           return src.indexOf("[[");
         },
         tokenizer(src: string) {
-          // Match [[...]] optionally preceded by !
           const match = /^(!?)\[\[([^\]]+?)\]\]/.exec(src);
           if (!match) return undefined;
           return {
@@ -43,7 +106,6 @@ function wikilinkExtension(options: {
           const isEmbed = token.isEmbed ?? false;
           const inner = token.inner ?? "";
 
-          // Parse inner: [[target#fragment|alias]]
           const pipeIdx = inner.indexOf("|");
           let refPart = pipeIdx !== -1 ? inner.slice(0, pipeIdx).trim() : inner.trim();
           const alias = pipeIdx !== -1 ? inner.slice(pipeIdx + 1).trim() : "";
@@ -59,34 +121,43 @@ function wikilinkExtension(options: {
             if (fragment) displayText += ` > ${fragment}`;
           }
 
-          const resolvedPath = resolveWikilink(target, options.pathByLower);
+          const resolvedPath = resolveVaultPath(target, options.pathByLower, {
+            currentPath: options.currentPath,
+          });
 
-          // ── Embed (![[...]]) ─────────────────────────────────────────────
           if (isEmbed) {
             if (!resolvedPath) {
-              return `<span class="wikilink-broken" title="File not found: ${escapeHtml(target)}">${escapeHtml(displayText)}</span>`;
+              return renderImageFigure({
+                vaultId: options.vaultId,
+                path: target,
+                alt: displayText,
+                broken: true,
+              });
             }
-            const ext = resolvedPath.split(".").pop()?.toLowerCase() ?? "";
-            const imgExts = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif"];
-            if (imgExts.includes(ext)) {
-              const src = `/api/vaults/${options.vaultId}/files/${resolvedPath}`;
-              return `<img src="${src}" alt="${escapeHtml(displayText)}" class="vault-embed-image" loading="lazy" />`;
+            if (isImagePath(resolvedPath)) {
+              return renderImageFigure({
+                vaultId: options.vaultId,
+                path: resolvedPath,
+                alt: displayText,
+                entry: manifestEntry(resolvedPath, options.manifestEntries),
+              });
             }
-            // Non-image embed — show as a link
             const href = `/vault/${options.vaultId}/file/${encodeVaultPath(resolvedPath)}`;
             return `<a href="${escapeHtml(href)}" class="wikilink">${escapeHtml(displayText)}</a>`;
           }
 
-          // ── Regular wikilink ─────────────────────────────────────────────
-          if (!resolvedPath) {
-            // Broken link
+          const notePath = resolveWikilink(target, options.pathByLower, {
+            currentPath: options.currentPath,
+          });
+
+          if (!notePath) {
             const dataPath = encodeURIComponent(
               target.endsWith(".md") ? target : target + ".md"
             );
             return `<a class="wikilink wikilink-broken" title="Note not found — click to create" data-create-path="${dataPath}">${escapeHtml(displayText)}</a>`;
           }
 
-          const href = `/vault/${options.vaultId}/file/${encodeVaultPath(resolvedPath)}${fragment ? "#" + encodeURIComponent(fragment) : ""}`;
+          const href = `/vault/${options.vaultId}/file/${encodeVaultPath(notePath)}${fragment ? "#" + encodeURIComponent(fragment) : ""}`;
           return `<a href="${escapeHtml(href)}" class="wikilink">${escapeHtml(displayText)}</a>`;
         },
       },
@@ -95,12 +166,6 @@ function wikilinkExtension(options: {
 }
 
 // ── Callout post-processing ────────────────────────────────────────────────────
-//
-// Obsidian callouts look like:
-//   > [!NOTE] Optional title
-//   > Content here
-//
-// marked converts them to <blockquote>. We post-process the HTML to wrap them.
 
 const CALLOUT_TYPES = new Set([
   "note", "tip", "important", "warning", "caution", "danger", "error",
@@ -109,7 +174,6 @@ const CALLOUT_TYPES = new Set([
 ]);
 
 function processCallouts(html: string): string {
-  // Replace <blockquote> starting with <p>[!TYPE]
   return html.replace(
     /<blockquote>\s*<p>\[!(\w+)\]([^\n<]*)/gi,
     (_, type, titleRest) => {
@@ -135,12 +199,75 @@ function calloutIcon(type: string): string {
   return icons[type] ?? "📝";
 }
 
+function resolveMarkdownImageSrc(
+  href: string,
+  options: {
+    vaultId: string;
+    pathByLower: Map<string, string>;
+    currentPath?: string;
+    manifestEntries?: Record<string, ManifestEntry>;
+  }
+): { path: string | null; src: string; entry?: ManifestEntry } {
+  const trimmed = href.trim();
+  if (/^(https?:|data:|\/api\/)/i.test(trimmed)) {
+    return { path: null, src: trimmed };
+  }
+
+  const resolved = resolveVaultPath(trimmed, options.pathByLower, {
+    currentPath: options.currentPath,
+  });
+  if (resolved && isImagePath(resolved)) {
+    const entry = manifestEntry(resolved, options.manifestEntries);
+    return { path: resolved, src: vaultImageSrc(options.vaultId, resolved, entry), entry };
+  }
+
+  return { path: null, src: trimmed };
+}
+
+/** Upgrade bare <img> tags from standard markdown ![](...) into vault image figures. */
+function processMarkdownImages(
+  html: string,
+  options: {
+    vaultId: string;
+    pathByLower: Map<string, string>;
+    currentPath?: string;
+    manifestEntries?: Record<string, ManifestEntry>;
+  }
+): string {
+  return html.replace(
+    /<img([^>]*)\ssrc="([^"]*)"([^>]*)>/gi,
+    (match, _before, src, _after) => {
+      if (match.includes("vault-embed-image")) return match;
+
+      const altMatch = match.match(/\salt="([^"]*)"/i);
+      const alt = altMatch?.[1] ?? "";
+      const { path, src: resolvedSrc, entry } = resolveMarkdownImageSrc(src, options);
+
+      if (!path) {
+        if (resolvedSrc === src) return match;
+        return `<img src="${escapeHtml(resolvedSrc)}" alt="${escapeHtml(alt)}" class="vault-embed-image" loading="lazy" />`;
+      }
+
+      return renderImageFigure({
+        vaultId: options.vaultId,
+        path,
+        alt,
+        entry,
+      });
+    }
+  );
+}
+
 // ── Public render API ─────────────────────────────────────────────────────────
 
 export interface RenderOptions {
   vaultId: string;
   /** All vault paths (canonical casing). Used for wikilink resolution. */
   vaultPaths: string[];
+  /** Path of the note being rendered (for relative image/link resolution). */
+  currentPath?: string;
+  /** Manifest entries keyed by lower-cased path (for image metadata). */
+  manifestEntries?: Record<string, ManifestEntry>;
   onCreateNote?: (path: string) => void;
 }
 
@@ -150,15 +277,20 @@ export interface RenderOptions {
  */
 export function renderMarkdown(source: string, options: RenderOptions): string {
   const pathByLower = new Map(options.vaultPaths.map((p) => [p.toLowerCase(), p]));
+  const imageOpts = {
+    vaultId: options.vaultId,
+    pathByLower,
+    currentPath: options.currentPath,
+    manifestEntries: options.manifestEntries,
+  };
 
-  // Register wikilink extension (stateless per call)
-  marked.use(wikilinkExtension({ vaultId: options.vaultId, pathByLower }));
+  marked.use(wikilinkExtension({ ...imageOpts, onCreateNote: options.onCreateNote }));
   marked.use({ breaks: false, gfm: true });
 
   const raw = marked.parse(source, { async: false }) as string;
-  const withCallouts = processCallouts(raw);
+  const withImages = processMarkdownImages(processCallouts(raw), imageOpts);
 
-  return DOMPurify.sanitize(withCallouts, {
+  return DOMPurify.sanitize(withImages, {
     ALLOWED_TAGS: [
       "p", "br", "strong", "em", "del", "code", "pre", "blockquote",
       "h1", "h2", "h3", "h4", "h5", "h6",
@@ -167,10 +299,12 @@ export function renderMarkdown(source: string, options: RenderOptions): string {
       "table", "thead", "tbody", "tr", "th", "td",
       "hr",
       "div", "span",
+      "figure", "figcaption",
+      "time",
     ],
     ALLOWED_ATTR: [
       "href", "title", "src", "alt", "class", "id",
-      "data-create-path", "loading",
+      "data-create-path", "loading", "datetime",
       "colspan", "rowspan",
     ],
     ALLOW_DATA_ATTR: true,

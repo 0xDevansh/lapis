@@ -21,7 +21,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@uiw/react-codemirror": "^4.25.10",
     "dompurify": "^3.4.9",
-    "gray-matter": "^4.0.3",
+    "js-yaml": "^4.1.0",
     "marked": "^15.0.12",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -30,6 +30,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",
     "@types/dompurify": "^3.2.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

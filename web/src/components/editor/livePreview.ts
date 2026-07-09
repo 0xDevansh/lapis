@@ -20,7 +20,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
-import { tokenize, resolveWikilink } from "../../markdown/wikilinks";
+import { tokenize, resolveVaultPath, resolveWikilink } from "../../markdown/wikilinks";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp"];
 
@@ -29,6 +29,8 @@ export interface LivePreviewConfig {
   fileUrl: (path: string) => string;
   /** Lower-cased path -> canonical path map for resolving wikilinks. */
   pathMap: Map<string, string>;
+  /** Path of the note being edited (for relative embed resolution). */
+  currentPath?: string;
   /** Open a vault file by (resolved) path. */
   onOpenLink: (path: string) => void;
 }
@@ -146,7 +148,9 @@ export function livePreview(config: LivePreviewConfig) {
             const tok = tokenize(m);
             if (tok.isEmbed && isImageTarget(tok.target)) {
               const resolved =
-                resolveWikilink(tok.target, config.pathMap) ?? tok.target;
+                resolveVaultPath(tok.target, config.pathMap, {
+                  currentPath: config.currentPath,
+                }) ?? tok.target;
               deco.push(
                 Decoration.replace({
                   widget: new ImageEmbedWidget(
@@ -157,7 +161,9 @@ export function livePreview(config: LivePreviewConfig) {
                 }).range(start, end)
               );
             } else {
-              const resolved = resolveWikilink(tok.target, config.pathMap);
+              const resolved = resolveWikilink(tok.target, config.pathMap, {
+                currentPath: config.currentPath,
+              });
               const open = () =>
                 config.onOpenLink(
                   resolved ??

@@ -40,6 +40,7 @@ import {
   House,
   FileMagnifyingGlass,
 } from "@phosphor-icons/react";
+import { deviceAuthor } from "../identity";
 import { useToast } from "../components/ui/Toast";
 import CommandPalette, {
   type Command,
@@ -388,8 +389,11 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   const handleRemoteChange = useCallback(
     async (msg: import("../hooks/useVaultNotify").ChangeNotification) => {
-      if (sessionId && msg.author === `web:${sessionId}`) {
+      if (sessionId && msg.author === deviceAuthor("web", sessionId)) {
         return;
+      }
+      if (msg.path.startsWith(".sync-conflicts/")) {
+        toast("Sync conflict recorded — check .sync-conflicts/", { tone: "info", duration: 5000 });
       }
       const next = await refreshManifest();
       const key = msg.path.toLowerCase();
@@ -445,7 +449,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         }
       }
     },
-    [refreshManifest, dispatch, vaultId, sessionId]
+    [refreshManifest, dispatch, vaultId, sessionId, toast]
   );
 
   const { connected, presence, sameFileWarning } = useVaultNotify(
@@ -1203,7 +1207,9 @@ function EditorArea({
           <MarkdownView
             source={buffer}
             vaultId={vaultId}
+            currentPath={activeTab.path}
             vaultPaths={vaultPaths}
+            manifestEntries={manifest?.entries}
             onCreateNote={onCreateNote}
             onNavigate={onOpenFile}
           />
@@ -1211,6 +1217,7 @@ function EditorArea({
       ) : (
         <MarkdownEditor
           docKey={activeTab.id}
+          currentPath={activeTab.path}
           value={buffer}
           onChange={onEdit}
           onSave={onSave}

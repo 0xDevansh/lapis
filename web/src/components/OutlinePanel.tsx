@@ -7,6 +7,7 @@
 
 import { useMemo } from "react";
 import { ListBullets } from "@phosphor-icons/react";
+import { splitFrontmatter } from "../markdown/frontmatter";
 
 interface Heading {
   level: number;
@@ -25,13 +26,8 @@ interface Props {
  */
 export function parseHeadings(source: string): Heading[] {
   const headings: Heading[] = [];
-  let lines = source.split("\n");
-
-  // Strip a leading frontmatter block (--- ... ---).
-  if (lines[0]?.trim() === "---") {
-    const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
-    if (end > 0) lines = lines.slice(end + 1);
-  }
+  const { content } = splitFrontmatter(source);
+  let lines = content.split("\n");
 
   let inFence = false;
   let fenceMarker = "";

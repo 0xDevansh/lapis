@@ -69,37 +69,96 @@ export function tokenize(match: RegExpExecArray): WikilinkToken {
   return { raw: match[0], target, fragment, alias, isEmbed };
 }
 
+type PathIndex = Set<string> | Map<string, string>;
+
+function lookupExact(lowerPath: string, paths: PathIndex): string | null {
+  if (paths instanceof Map) {
+    return paths.get(lowerPath) ?? null;
+  }
+  return paths.has(lowerPath) ? lowerPath : null;
+}
+
+function lookupBasename(basename: string, paths: PathIndex): string | null {
+  for (const [lowerPath, canonicalPath] of paths instanceof Map
+    ? paths
+    : Array.from(paths, (p) => [p, p] as const)) {
+    if (lowerPath.split("/").pop() === basename) return canonicalPath;
+  }
+  return null;
+}
+
+function hasFileExtension(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  const dot = base.lastIndexOf(".");
+  return dot > 0 && dot < base.length - 1;
+}
+
+function buildCandidates(target: string, currentPath?: string): string[] {
+  const trimmed = target.trim().replace(/^\.\//, "");
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const push = (p: string) => {
+    const key = p.toLowerCase();
+    if (!p || seen.has(key)) return;
+    seen.add(key);
+    out.push(p);
+  };
+
+  if (currentPath) {
+    const dir = currentPath.includes("/")
+      ? currentPath.slice(0, currentPath.lastIndexOf("/"))
+      : "";
+    if (!trimmed.startsWith("/")) {
+      push(dir ? `${dir}/${trimmed}` : trimmed);
+    }
+  }
+
+  push(trimmed.startsWith("/") ? trimmed.slice(1) : trimmed);
+  return out;
+}
+
 /**
- * Given a wikilink target (e.g. "MyNote", "folder/MyNote") and the set of
- * all known vault paths (lower-cased), return the matching path or null.
+ * Resolve a vault-relative path (note, attachment, or image) against known paths.
  *
- * Obsidian resolution order:
- *   1. Exact path match (with or without .md)
- *   2. Basename-only match anywhere in the vault
+ * Resolution order:
+ *   1. Exact match for each candidate path (relative to current note, then as given)
+ *   2. Append `.md` when the target has no extension
+ *   3. Basename match anywhere in the vault
+ */
+export function resolveVaultPath(
+  target: string,
+  paths: PathIndex,
+  options?: { currentPath?: string }
+): string | null {
+  for (const candidate of buildCandidates(target, options?.currentPath)) {
+    const exact = lookupExact(candidate.toLowerCase(), paths);
+    if (exact) return exact;
+
+    if (!hasFileExtension(candidate)) {
+      const withMd = lookupExact(`${candidate}.md`.toLowerCase(), paths);
+      if (withMd) return withMd;
+    }
+  }
+
+  const basename = target.trim().split("/").pop()?.toLowerCase() ?? "";
+  if (!basename) return null;
+
+  if (hasFileExtension(basename)) {
+    return lookupBasename(basename, paths);
+  }
+
+  return lookupBasename(`${basename}.md`, paths);
+}
+
+/**
+ * Resolve a wikilink target to a vault path.
+ * Notes without an extension are normalised to `.md`; attachments keep their extension.
  */
 export function resolveWikilink(
   target: string,
-  paths: Set<string> | Map<string, string>
+  paths: PathIndex,
+  options?: { currentPath?: string }
 ): string | null {
-  // Normalize: treat the target as potentially relative or absolute
-  let normalised = target.trim();
-  if (!normalised.endsWith(".md")) normalised += ".md";
-
-  const lowerTarget = normalised.toLowerCase();
-
-  // 1. Exact match
-  if (paths instanceof Map) {
-    const exact = paths.get(lowerTarget);
-    if (exact) return exact;
-  } else if (paths.has(lowerTarget)) {
-    return lowerTarget;
-  }
-
-  // 2. Basename match
-  const basename = lowerTarget.split("/").pop()!;
-  for (const [lowerPath, canonicalPath] of paths instanceof Map ? paths : Array.from(paths, (p) => [p, p] as const)) {
-    if (lowerPath.split("/").pop() === basename) return canonicalPath;
-  }
-
-  return null;
+  return resolveVaultPath(target, paths, options);
 }

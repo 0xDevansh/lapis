@@ -1,13 +1,19 @@
 import { useMemo, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import FrontmatterPanel from "./FrontmatterPanel";
 import { parseFrontmatter } from "../markdown/frontmatter";
 import { renderMarkdown } from "../markdown/renderer";
+import type { ManifestEntry } from "../api";
 
 interface MarkdownViewProps {
   source: string;
   vaultId: string;
+  /** Path of the note being previewed (for relative image resolution). */
+  currentPath?: string;
   /** All canonical vault paths for wikilink resolution */
   vaultPaths: string[];
+  /** Manifest entries for embedded image metadata */
+  manifestEntries?: Record<string, ManifestEntry>;
   onCreateNote?: (path: string) => void;
   /** Called when the user clicks a wikilink that navigates within the vault */
   onNavigate?: (path: string) => void;
@@ -16,7 +22,9 @@ interface MarkdownViewProps {
 export default function MarkdownView({
   source,
   vaultId,
+  currentPath,
   vaultPaths,
+  manifestEntries,
   onCreateNote,
   onNavigate,
 }: MarkdownViewProps) {
@@ -33,10 +41,14 @@ export default function MarkdownView({
       renderMarkdown(content, {
         vaultId,
         vaultPaths,
+        currentPath,
+        manifestEntries,
         onCreateNote,
       }),
-    [content, vaultId, vaultPaths, onCreateNote]
+    [content, vaultId, vaultPaths, currentPath, manifestEntries, onCreateNote]
   );
+
+  const hasFrontmatter = Object.keys(data).length > 0 || tags.length > 0;
 
   // Wire up wikilink clicks
   useEffect(() => {
@@ -48,7 +60,6 @@ export default function MarkdownView({
       const anchor = target.closest("a");
       if (!anchor) return;
 
-      // Broken wikilink create-note action
       const createPath = anchor.dataset.createPath;
       if (createPath) {
         e.preventDefault();
@@ -60,7 +71,6 @@ export default function MarkdownView({
       const href = anchor.getAttribute("href");
       if (!href) return;
 
-      // Internal vault links
       if (href.startsWith(`/vault/${vaultId}/`)) {
         e.preventDefault();
         const rawPath = href.slice(`/vault/${vaultId}/`.length).replace(/^file\//, "").split("#", 1)[0];
@@ -97,25 +107,9 @@ export default function MarkdownView({
     return () => window.removeEventListener("lapis:outline-jump", onJump as EventListener);
   }, []);
 
-  const title = (data.title as string | undefined) ?? null;
-  const hasFrontmatter = title || tags.length > 0;
-
   return (
     <div className="markdown-preview w-full px-8 py-6">
-      {hasFrontmatter && (
-        <div className="mb-5 border-b border-border pb-4">
-          {title && <div className="mb-1.5 text-[1.6rem] font-bold text-ink">{title}</div>}
-          {tags.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1.5">
-              {tags.map((t) => (
-                <span key={t} className="tag-pill">
-                  #{t}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {hasFrontmatter && <FrontmatterPanel data={data} tags={tags} />}
       <div
         ref={containerRef}
         className="markdown-body"
