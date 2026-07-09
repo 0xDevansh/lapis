@@ -1,19 +1,20 @@
 # Lapis
 
-Your Obsidian vault, accessible from any browser — no Obsidian required.
+My take on OwO - Obsidian without Obsidian
 
-Lapis is a self-hosted web app that turns your Obsidian vault into a private, always-accessible notes workspace. Open a note from your phone, edit it from a work computer, and have it waiting in Obsidian when you get home. Everything runs on your own Cloudflare account, so your notes stay yours.
+Lapis is a self-hosted web app that turns your Obsidian vault into a private, always-accessible web interface. Open a note from your phone, edit it from a work computer, and have it waiting in Obsidian when you get home. Everything runs on your own Cloudflare account, so your notes stay yours.
 
-## What you get
+> [!NOTE]
+> **Road to v0.1**: Lapis is still under development, so expect some instability. Feature requests and bug reports are welcome!
+
+## Features
 
 - **Web vault** — browse, search, and edit notes from any browser; no Obsidian installation needed
-- **Two-way sync** — an Obsidian plugin keeps your local vault and web vault in sync; changes flow both ways in real time
+- **Two-way sync** — an Obsidian plugin keeps your local vault and web vault in sync; changes flow both ways
 - **Markdown rendering** — wikilinks, embeds, callouts, tags, frontmatter, backlinks, and built-in themes rendered faithfully
 - **Full-text search** — fast keyword search with highlighted snippets powered by SQLite FTS5
-- **Sealed history** — every save is committed to a Git repo in your Cloudflare account; restore any file or your whole vault to any point in time
 - **Conflict notes** — when edits collide, Lapis writes a human-readable conflict note instead of silently overwriting your work
-- **Offline journal** — the plugin queues changes locally when you're offline and replays them when you reconnect
-- **Live presence** — edits appear in your browser in real time; you'll know if another device has the same file open
+- **Works offline** — the plugin queues changes locally when you're offline and replays them when you reconnect
 - **Zip export** — download your entire vault as a zip at any time
 - **Private by default** — email/password auth; your vault is not publicly visible
 
@@ -22,6 +23,9 @@ Lapis is a self-hosted web app that turns your Obsidian vault into a private, al
 The plugin syncs your local vault to the web. You install it manually — it is not yet listed in the Obsidian community plugin directory.
 
 ### Option 1 — Release ZIP (recommended)
+
+> [!NOTE]
+> This won't be available until v0.1 is released lol, go to Option 2
 
 1. Go to the [latest release](https://github.com/your-org/lapis/releases/latest) and download `lapis-sync.zip`.
 2. Unzip it. You'll get three files: `main.js`, `manifest.json`, `styles.css`.
@@ -34,7 +38,7 @@ The plugin syncs your local vault to the web. You install it manually — it is 
 1. Clone this repo and install dependencies:
 
 ```sh
-git clone https://github.com/your-org/lapis
+git clone https://github.com/0xDevansh/lapis
 cd lapis
 pnpm install
 ```
@@ -60,7 +64,7 @@ After enabling the plugin:
 
 ## Deploy your own Lapis
 
-Lapis runs entirely on Cloudflare's free or paid tier. You need a Cloudflare account with Workers, R2, D1, KV, Durable Objects, and Artifacts enabled.
+Lapis runs entirely on Cloudflare's free tier.
 
 ### Requirements
 
