@@ -9,9 +9,10 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { ArrowLeft, Check, X, DeviceMobile } from "@phosphor-icons/react";
+import { ArrowLeft, Check, X, DeviceMobile, Copy } from "@phosphor-icons/react";
 import * as api from "../api";
 import { useToast } from "../components/ui/Toast";
+import GitHubRemotePanel from "../components/GitHubRemotePanel";
 
 export default function DevicesPage() {
   const { id: vaultId } = useParams<{ id: string }>();
@@ -99,6 +100,22 @@ export default function DevicesPage() {
     }
   }
 
+  function vaultLink(): string {
+    if (!vaultId) return "";
+    return `${window.location.origin}/vault/${vaultId}`;
+  }
+
+  async function copyVaultLink() {
+    const link = vaultLink();
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast("Vault link copied — paste it in Obsidian → Settings → Lapis", { tone: "success", duration: 4000 });
+    } catch {
+      toast("Could not copy link", { tone: "error" });
+    }
+  }
+
   function formatDate(iso: string | null) {
     if (!iso) return "—";
     return new Date(iso).toLocaleDateString(undefined, {
@@ -123,9 +140,28 @@ export default function DevicesPage() {
           Back to vault
         </Link>
         <h1 className="m-0 text-2xl font-bold">
-          {vault?.name ?? "…"} — Connected Devices
+          {vault?.name ?? "…"} — Devices &amp; Sync
         </h1>
       </header>
+
+      <section className="mb-8 rounded-lg border border-border bg-surface/50 px-4 py-4">
+        <h2 className="mb-2 text-base font-bold">Connect Obsidian</h2>
+        <ol className="mb-3 list-decimal space-y-1 pl-5 text-sm text-muted">
+          <li>In Obsidian, open <strong className="text-ink">Settings → Lapis sync</strong></li>
+          <li>Paste your vault link and click <strong className="text-ink">Connect to vault</strong></li>
+          <li>Enter the approval code from Obsidian below and click Approve</li>
+        </ol>
+        <button
+          type="button"
+          onClick={() => void copyVaultLink()}
+          className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-ink transition-colors hover:border-accent/40 hover:text-accent-soft"
+        >
+          <Copy size={16} />
+          Copy vault link for Obsidian
+        </button>
+      </section>
+
+      {vaultId && <GitHubRemotePanel vaultId={vaultId} />}
 
       {error && (
         <p className="mb-6 rounded border border-danger/30 bg-danger/10 px-4 py-3 text-danger">
@@ -206,6 +242,7 @@ export default function DevicesPage() {
             <thead>
               <tr>
                 <th className={th}>Device name</th>
+                <th className={th}>Kind</th>
                 <th className={th}>Connected</th>
                 <th className={th}>Last seen</th>
                 <th className={th}>Vault Internals</th>
@@ -216,6 +253,7 @@ export default function DevicesPage() {
               {devices.map((d) => (
                 <tr key={d.id}>
                   <td className={td}>{d.deviceName}</td>
+                  <td className={td}>{d.kind ?? "plugin"}</td>
                   <td className={td}>{formatDate(d.createdAt)}</td>
                   <td className={td}>{formatDate(d.lastSeenAt)}</td>
                   <td className={td}>

@@ -1,5 +1,28 @@
-.lapis-user-code {
+/* ── Connect modal ─────────────────────────────────────────────────────────── */
+
+.lapis-connect-modal .lapis-connect-modal-context {
+  color: var(--text-muted);
+  margin-top: 0;
+}
+
+.lapis-connect-steps {
+  margin: 12px 0 16px;
+  padding-left: 1.25rem;
+  color: var(--text-muted);
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+.lapis-user-code-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 12px 0;
+}
+
+.lapis-user-code {
+  flex: 1;
+  margin: 0;
   padding: 12px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
@@ -10,8 +33,78 @@
   text-align: center;
 }
 
+.lapis-connect-approval-link {
+  display: inline-block;
+  margin-bottom: 12px;
+  text-decoration: none;
+}
+
+.lapis-connect-status {
+  color: var(--text-muted);
+  margin-bottom: 0;
+}
+
 .lapis-connecting-spinner {
   color: var(--text-muted);
+}
+
+/* ── Settings panel ──────────────────────────────────────────────────────── */
+
+.lapis-settings-intro p {
+  color: var(--text-muted);
+  margin-top: 0;
+  line-height: 1.5;
+}
+
+.lapis-settings-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 16px;
+  font-weight: 600;
+}
+
+.lapis-settings-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.lapis-settings-status--connected .lapis-settings-status-dot {
+  background: var(--color-green);
+}
+
+.lapis-settings-card {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary-alt);
+}
+
+.lapis-settings-card-row {
+  font-size: 0.92em;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.lapis-settings-card-muted {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.lapis-settings-advanced {
+  margin-top: 20px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.lapis-settings-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 8px;
 }
 
 .lapis-status-conflicts {

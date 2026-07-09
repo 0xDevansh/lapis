@@ -1,7 +1,14 @@
-import { PluginSettingTab, Setting } from "obsidian";
+import { Notice, PluginSettingTab, Setting } from "obsidian";
 import type { App } from "obsidian";
 import type LapisPlugin from "./main";
 import { DEFAULT_SETTINGS, type LapisSettings } from "./types";
+import {
+  applyVaultLinkToSettings,
+  formatVaultLink,
+  serverHostname,
+  shortVaultId,
+  vaultLinkDisplay,
+} from "./vault-link";
 
 export function normalizeSettings(data: unknown): LapisSettings {
   const partial = typeof data === "object" && data !== null ? (data as Partial<LapisSettings>) : {};
@@ -31,37 +38,113 @@ export class LapisSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    containerEl.addClass("lapis-settings");
+
     containerEl.createEl("h2", { text: "Lapis sync" });
 
+    if (this.plugin.settings.syncToken) {
+      this.renderConnectedState(containerEl);
+    } else {
+      this.renderDisconnectedState(containerEl);
+    }
+
+    this.renderAdvancedSection(containerEl);
+  }
+
+  private renderDisconnectedState(containerEl: HTMLElement): void {
+    const intro = containerEl.createDiv({ cls: "lapis-settings-intro" });
+    intro.createEl("p", {
+      text: "Paste the vault link from your browser, then approve this device on the web.",
+    });
+
+    const status = containerEl.createDiv({ cls: "lapis-settings-status lapis-settings-status--idle" });
+    status.createSpan({ cls: "lapis-settings-status-dot" });
+    status.createSpan({ text: " Not connected" });
+
+    let linkInput = vaultLinkDisplay(this.plugin.settings);
+
     new Setting(containerEl)
-      .setName("Server URL")
-      .setDesc("The base URL of your deployed Lapis Worker.")
-      .addText((text) =>
+      .setName("Vault link")
+      .setDesc("Copy from your browser while viewing the vault (e.g. …/vault/your-id).")
+      .addText((text) => {
         text
-          .setPlaceholder("http://localhost:8787")
-          .setValue(this.plugin.settings.serverUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.serverUrl = value.trim();
+          .setPlaceholder("https://your-lapis-server.com/vault/…")
+          .setValue(linkInput)
+          .onChange((value) => {
+            linkInput = value;
+          });
+      })
+      .addButton((button) =>
+        button
+          .setIcon("link")
+          .setTooltip("Apply link")
+          .onClick(async () => {
+            if (!applyVaultLinkToSettings(this.plugin.settings, linkInput)) {
+              new Notice("Lapis: paste a full vault URL (https://…/vault/…)");
+              return;
+            }
             await this.plugin.saveSettings();
+            this.display();
+            new Notice("Lapis: vault link saved");
           })
       );
 
     new Setting(containerEl)
-      .setName("Web Vault ID")
-      .setDesc("The vault ID from the Web Vault URL.")
-      .addText((text) =>
-        text
-          .setPlaceholder("vault_...")
-          .setValue(this.plugin.settings.vaultId)
-          .onChange(async (value) => {
-            this.plugin.settings.vaultId = value.trim();
-            await this.plugin.saveSettings();
+      .setName("Connect")
+      .setDesc("Opens an approval code — enter it on the vault's Devices page in your browser.")
+      .addButton((button) =>
+        button
+          .setButtonText("Connect to vault")
+          .setCta()
+          .onClick(async () => {
+            if (linkInput.trim() && applyVaultLinkToSettings(this.plugin.settings, linkInput)) {
+              await this.plugin.saveSettings();
+            }
+            void this.plugin.connect();
           })
       );
+  }
+
+  private renderConnectedState(containerEl: HTMLElement): void {
+    const { settings } = this.plugin;
+    const host = serverHostname(settings.serverUrl);
+    const vault = shortVaultId(settings.vaultId);
+    const since = settings.lastConnectedAt
+      ? new Date(settings.lastConnectedAt).toLocaleString()
+      : "recently";
+
+    const status = containerEl.createDiv({ cls: "lapis-settings-status lapis-settings-status--connected" });
+    status.createSpan({ cls: "lapis-settings-status-dot" });
+    status.createSpan({ text: " Connected" });
+
+    const card = containerEl.createDiv({ cls: "lapis-settings-card" });
+    card.createEl("div", { cls: "lapis-settings-card-row", text: `Server: ${host}` });
+    card.createEl("div", { cls: "lapis-settings-card-row", text: `Vault: ${vault}` });
+    card.createEl("div", { cls: "lapis-settings-card-row", text: `Device: ${settings.deviceName}` });
+    card.createEl("div", { cls: "lapis-settings-card-row lapis-settings-card-muted", text: `Since ${since}` });
+
+    if (settings.serverUrl && settings.vaultId) {
+      const linkRow = card.createDiv({ cls: "lapis-settings-card-row lapis-settings-card-muted" });
+      linkRow.createEl("span", { text: formatVaultLink(settings.serverUrl, settings.vaultId) });
+    }
 
     new Setting(containerEl)
+      .setName("Actions")
+      .addButton((button) =>
+        button.setButtonText("Sync now").onClick(() => void this.plugin.syncNow())
+      )
+      .addButton((button) =>
+        button.setButtonText("Disconnect").onClick(() => void this.plugin.disconnect())
+      );
+  }
+
+  private renderAdvancedSection(containerEl: HTMLElement): void {
+    const details = containerEl.createEl("details", { cls: "lapis-settings-advanced" });
+    details.createEl("summary", { text: "Advanced" });
+
+    new Setting(details)
       .setName("Device name")
-      .setDesc("Shown in the Lapis devices list.")
+      .setDesc("Shown in the web vault's device list.")
       .addText((text) =>
         text
           .setValue(this.plugin.settings.deviceName)
@@ -71,9 +154,37 @@ export class LapisSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl)
+    if (!this.plugin.settings.syncToken) {
+      new Setting(details)
+        .setName("Server URL")
+        .setDesc("Only needed if you prefer separate fields instead of a vault link.")
+        .addText((text) =>
+          text
+            .setPlaceholder("http://localhost:8787")
+            .setValue(this.plugin.settings.serverUrl)
+            .onChange(async (value) => {
+              this.plugin.settings.serverUrl = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(details)
+        .setName("Vault ID")
+        .setDesc("The ID from the vault URL, if not using a full link.")
+        .addText((text) =>
+          text
+            .setPlaceholder("vault id")
+            .setValue(this.plugin.settings.vaultId)
+            .onChange(async (value) => {
+              this.plugin.settings.vaultId = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
+    new Setting(details)
       .setName("Receive Vault Internals")
-      .setDesc("Also sync Vault Internals such as .obsidian data for this device.")
+      .setDesc("Also sync .obsidian and other vault-internal files.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.receiveInternals)
@@ -81,9 +192,9 @@ export class LapisSettingTab extends PluginSettingTab {
           .onChange(async (value) => this.plugin.setReceiveInternals(value))
       );
 
-    new Setting(containerEl)
+    new Setting(details)
       .setName("Debug logging")
-      .setDesc("Log watcher and sync diagnostics to the Obsidian developer console.")
+      .setDesc("Log sync activity to the developer console (Ctrl+Shift+I).")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.debugLogging)
@@ -92,16 +203,5 @@ export class LapisSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
-
-    new Setting(containerEl)
-      .setName("Connection")
-      .setDesc(this.plugin.settings.syncToken ? `Connected${this.plugin.settings.lastConnectedAt ? ` since ${this.plugin.settings.lastConnectedAt}` : ""}` : "Not connected")
-      .addButton((button) => {
-        if (this.plugin.settings.syncToken) {
-          button.setButtonText("Disconnect").onClick(() => void this.plugin.disconnect());
-        } else {
-          button.setButtonText("Connect").setCta().onClick(() => void this.plugin.connect());
-        }
-      });
   }
 }
