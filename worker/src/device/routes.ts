@@ -20,6 +20,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
+import { createAgentDevice, createPluginDevice } from "../devices/record";
 
 const deviceRoutes = new Hono<{ Bindings: Env }>();
 
@@ -132,12 +133,13 @@ deviceRoutes.post("/device-auth/token", async (c) => {
 
     const deviceId = crypto.randomUUID();
     const syncToken = generateSecret(40);
-    const now = new Date().toISOString();
-
-    await c.env.DB.prepare(
-      `INSERT INTO devices (id, vault_id, owner_id, device_name, sync_token, receive_internals, revoked, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, 0, ?)`
-    ).bind(deviceId, row.vault_id, row.owner_id, row.device_name, syncToken, now).run();
+    await createPluginDevice(c.env.DB, {
+      id: deviceId,
+      vaultId: row.vault_id,
+      ownerId: row.owner_id,
+      deviceName: row.device_name,
+      syncToken,
+    });
 
     await c.env.DB.prepare(`DELETE FROM device_codes WHERE device_code = ?`)
       .bind(deviceCode).run();
@@ -247,10 +249,13 @@ deviceRoutes.post("/vaults/:id/devices/deny", requireSession, async (c) => {
 export interface Device {
   id: string;
   deviceName: string;
+  kind: string;
   receiveInternals: boolean;
   revoked: boolean;
   createdAt: string;
   lastSeenAt: string | null;
+  capabilities?: Record<string, unknown>;
+  conflictPolicy?: string;
 }
 
 /**
@@ -265,8 +270,10 @@ deviceRoutes.get("/vaults/:id/devices", requireSession, async (c) => {
   if (!owned) return c.json({ error: "Not found" }, 404);
 
   const { results } = await c.env.DB.prepare(
-    `SELECT id, device_name AS deviceName,
+    `SELECT id, device_name AS deviceName, kind,
             receive_internals AS receiveInternals,
+            capabilities,
+            conflict_policy AS conflictPolicy,
             revoked,
             created_at AS createdAt,
             last_seen_at AS lastSeenAt
@@ -280,9 +287,38 @@ deviceRoutes.get("/vaults/:id/devices", requireSession, async (c) => {
     ...d,
     receiveInternals: Boolean(d.receiveInternals),
     revoked: Boolean(d.revoked),
+    capabilities: d.capabilities ? (() => { try { return JSON.parse(String(d.capabilities)); } catch { return undefined; } })() : undefined,
   }));
 
   return c.json(mapped);
+});
+
+/**
+ * POST /api/vaults/:id/agents
+ * Mint a first-class agent device (Slice 24). Token shown once.
+ */
+deviceRoutes.post("/vaults/:id/agents", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
+  if (!owned) return c.json({ error: "Not found" }, 404);
+
+  const body = await c.req.json<{ name?: string }>();
+  const name = (body.name ?? "Agent").trim();
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  const agentId = crypto.randomUUID();
+  const syncToken = generateSecret(40);
+  const { record } = await createAgentDevice(c.env.DB, {
+    id: agentId,
+    vaultId: id,
+    ownerId: session.userId,
+    name,
+    syncToken,
+  });
+
+  return c.json({ agentId: record.id, token: syncToken, name: record.deviceName });
 });
 
 /**

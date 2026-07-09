@@ -7,6 +7,7 @@ import { SyncEngine } from "./sync/engine";
 import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
 import { countConflicts, LapisStatusBar } from "./ui/status";
+import { deviceAuthor } from "./identity";
 
 const LOCAL_CHANGE_DEBOUNCE_MS = 5_000;
 
@@ -20,6 +21,7 @@ export default class LapisPlugin extends Plugin {
   private notifyClient: NotifyClient | null = null;
   private lastPresenceCount = 0;
   private currentOpenPath: string | null = null;
+  private syncChain: Promise<void> = Promise.resolve();
 
   async onload() {
     await this.loadSettings();
@@ -92,12 +94,9 @@ export default class LapisPlugin extends Plugin {
   }
 
   async connect() {
-    if (!this.settings.serverUrl.trim()) {
-      new Notice("Lapis: set a server URL first");
-      return;
-    }
-    if (!this.settings.vaultId.trim()) {
-      new Notice("Lapis: set a Web Vault ID first");
+    if (!this.settings.serverUrl.trim() || !this.settings.vaultId.trim()) {
+      new Notice("Lapis: open Settings → Lapis sync and paste your vault link");
+      this.openSettingsTab();
       return;
     }
 
@@ -112,6 +111,7 @@ export default class LapisPlugin extends Plugin {
 
       new ConnectModal(this.app, {
         serverUrl: this.settings.serverUrl,
+        vaultId: this.settings.vaultId,
         challenge,
         fetchToken: (deviceCode) => client.pollDeviceToken(deviceCode),
         onConnected: async ({ token, deviceId }) => {
@@ -167,37 +167,39 @@ export default class LapisPlugin extends Plugin {
       return;
     }
 
-    this.updateStatus("syncing");
-    const previousSuppress = this.suppressWatcher;
-    this.suppressWatcher = true;
-    const engine = new SyncEngine({
-      app: this.app,
-      settings: this.settings,
-      client: new LapisClient(this.settings.serverUrl),
-      getJournal: () => this.journal,
-      setJournal: (journal) => this.saveJournal(journal),
-    });
-    try {
-      if (this.journal) {
-        await engine.replayPending();
-        const { pushed, deleted } = await engine.pushLocalChanges();
-        await engine.pullChanged();
-        if (pushed > 0 || deleted > 0) {
-          new Notice(`Lapis: pushed ${pushed} change${pushed === 1 ? "" : "s"}${deleted > 0 ? ` and ${deleted} delete${deleted === 1 ? "" : "s"}` : ""}`);
+    await this.enqueueSync(async () => {
+      this.updateStatus("syncing");
+      const previousSuppress = this.suppressWatcher;
+      this.suppressWatcher = true;
+      const engine = new SyncEngine({
+        app: this.app,
+        settings: this.settings,
+        client: new LapisClient(this.settings.serverUrl),
+        getJournal: () => this.journal,
+        setJournal: (journal) => this.saveJournal(journal),
+      });
+      try {
+        if (this.journal) {
+          await engine.replayPending();
+          const { pushed, deleted } = await engine.pushLocalChanges();
+          await engine.pullChanged();
+          if (pushed > 0 || deleted > 0) {
+            new Notice(`Lapis: pushed ${pushed} change${pushed === 1 ? "" : "s"}${deleted > 0 ? ` and ${deleted} delete${deleted === 1 ? "" : "s"}` : ""}`);
+          } else {
+            new Notice("Lapis: sync complete");
+          }
         } else {
-          new Notice("Lapis: sync complete");
+          await engine.firstSync();
         }
-      } else {
-        await engine.firstSync();
+        this.updateStatus();
+      } catch (error) {
+        this.updateStatus("error");
+        const message = error instanceof Error ? error.message : "Sync failed";
+        new Notice(`Lapis: ${message}`);
+      } finally {
+        this.suppressWatcher = previousSuppress;
       }
-      this.updateStatus();
-    } catch (error) {
-      this.updateStatus("error");
-      const message = error instanceof Error ? error.message : "Sync failed";
-      new Notice(`Lapis: ${message}`);
-    } finally {
-      this.suppressWatcher = previousSuppress;
-    }
+    });
   }
 
   private async pullChanged() {
@@ -274,7 +276,7 @@ export default class LapisPlugin extends Plugin {
 
   private async handleNotifyMessage(message: NotifyMessage) {
     if (message.type === "change") {
-      if (message.author === `device:${this.settings.deviceId}`) {
+      if (message.author === deviceAuthor("plugin", this.settings.deviceId)) {
         return;
       }
       if (message.kind === "put" && this.journal?.fileRevisions[message.path.toLowerCase()] === message.revision) {
@@ -292,7 +294,8 @@ export default class LapisPlugin extends Plugin {
     }
 
     if (message.type === "presence") {
-      const others = message.sessions.filter((session) => !session.identity.startsWith(`device:${this.settings.deviceName}`));
+      const selfIdentity = deviceAuthor("plugin", this.settings.deviceId);
+      const others = message.sessions.filter((session) => session.identity !== selfIdentity);
       if (this.lastPresenceCount !== 0 && others.length !== this.lastPresenceCount) {
         new Notice(`Lapis: ${others.length} other session${others.length === 1 ? "" : "s"} connected`);
       }
@@ -378,25 +381,22 @@ export default class LapisPlugin extends Plugin {
     this.modifyTimers.set(path, timer);
   }
 
+  private enqueueSync(run: () => Promise<void>): Promise<void> {
+    this.syncChain = this.syncChain.then(run).catch((error) => {
+      console.error("[lapis] sync chain error", error);
+    });
+    return this.syncChain;
+  }
+
   private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false, onFailure?: (engine: SyncEngine) => Promise<void>) {
     if (!this.settings.syncToken) {
       return;
     }
-    this.updateStatus("syncing");
-    const previousSuppress = this.suppressWatcher;
-    this.suppressWatcher = previousSuppress || suppressWatcher;
-    try {
-      const engine = new SyncEngine({
-        app: this.app,
-        settings: this.settings,
-        client: new LapisClient(this.settings.serverUrl),
-        getJournal: () => this.journal,
-        setJournal: (journal) => this.saveJournal(journal),
-      });
-      await action(engine);
-      this.updateStatus();
-    } catch (error) {
-      if (onFailure) {
+    await this.enqueueSync(async () => {
+      this.updateStatus("syncing");
+      const previousSuppress = this.suppressWatcher;
+      this.suppressWatcher = previousSuppress || suppressWatcher;
+      try {
         const engine = new SyncEngine({
           app: this.app,
           settings: this.settings,
@@ -404,17 +404,36 @@ export default class LapisPlugin extends Plugin {
           getJournal: () => this.journal,
           setJournal: (journal) => this.saveJournal(journal),
         });
-        await onFailure(engine);
-        this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount());
-        return;
+        await action(engine);
+        this.updateStatus();
+      } catch (error) {
+        if (onFailure) {
+          const engine = new SyncEngine({
+            app: this.app,
+            settings: this.settings,
+            client: new LapisClient(this.settings.serverUrl),
+            getJournal: () => this.journal,
+            setJournal: (journal) => this.saveJournal(journal),
+          });
+          await onFailure(engine);
+          this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount());
+          return;
+        }
+        this.updateStatus("error");
+        const message = error instanceof Error ? error.message : "Sync failed";
+        console.error("[lapis] sync failed", error);
+        new Notice(`Lapis: ${message}`);
+      } finally {
+        this.suppressWatcher = previousSuppress;
       }
-      this.updateStatus("error");
-      const message = error instanceof Error ? error.message : "Sync failed";
-      console.error("[lapis] sync failed", error);
-      new Notice(`Lapis: ${message}`);
-    } finally {
-      this.suppressWatcher = previousSuppress;
-    }
+    });
+  }
+
+  private openSettingsTab(): void {
+    const app = this.app as typeof this.app & {
+      setting?: { open(): Promise<void>; openTabById(id: string): Promise<void> };
+    };
+    void app.setting?.open().then(() => app.setting?.openTabById(this.manifest.id));
   }
 
   private debug(...args: unknown[]) {

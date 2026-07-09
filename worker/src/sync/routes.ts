@@ -102,7 +102,7 @@ syncRoutes.put("/:vaultId/files/*", requireDevice, async (c) => {
   const contentType = (c.req.header("Content-Type") ?? detectMime(filePath)).split(";")[0].trim();
 
   try {
-    const entry = await stubFor(c.env, vaultId).syncPutFile(vaultId, filePath, body, contentType, baseRevision, `device:${device.id}`);
+    const entry = await stubFor(c.env, vaultId).syncPutFile(vaultId, filePath, body, contentType, baseRevision, device.author, device.conflictPolicy);
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
@@ -132,7 +132,7 @@ syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
   }
 
   try {
-    const entry = await stubFor(c.env, vaultId).syncApplyPatch(vaultId, filePath, body.patch, body.baseRevision, `device:${device.id}`);
+    const entry = await stubFor(c.env, vaultId).syncApplyPatch(vaultId, filePath, body.patch, body.baseRevision, device.author, device.conflictPolicy);
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
@@ -153,7 +153,7 @@ syncRoutes.patch("/:vaultId/files/*", requireDevice, async (c) => {
   if (!newPath) return c.json({ error: "newPath is required" }, 400);
 
   try {
-    const entry = await stubFor(c.env, vaultId).syncRenameFile(vaultId, filePath, newPath, `device:${device.id}`);
+    const entry = await stubFor(c.env, vaultId).syncRenameFile(vaultId, filePath, newPath, device.author);
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -169,7 +169,7 @@ syncRoutes.delete("/:vaultId/files/*", requireDevice, async (c) => {
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
   try {
-    await stubFor(c.env, vaultId).syncDeleteFile(vaultId, filePath, `device:${device.id}`);
+    await stubFor(c.env, vaultId).syncDeleteFile(vaultId, filePath, device.author);
     return c.json({ ok: true });
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -200,16 +200,16 @@ syncRoutes.post("/:vaultId/batch", requireDevice, async (c) => {
         const bin = atob(op.contentBase64);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const entry = await stub.syncPutFile(vaultId, path, bytes.buffer, op.contentType, op.baseRevision, `device:${device.id}`);
+        const entry = await stub.syncPutFile(vaultId, path, bytes.buffer, op.contentType, op.baseRevision, device.author, device.conflictPolicy);
         results.push({ op: "put", path, status: "accepted", entry: entry as unknown as Record<string, unknown> });
       } else if (op.op === "patch") {
-        const entry = await stub.syncApplyPatch(vaultId, path, op.patch, op.baseRevision, `device:${device.id}`);
+        const entry = await stub.syncApplyPatch(vaultId, path, op.patch, op.baseRevision, device.author, device.conflictPolicy);
         results.push({ op: "patch", path, status: "accepted", entry: entry as unknown as Record<string, unknown> });
       } else if (op.op === "rename") {
-        const entry = await stub.syncRenameFile(vaultId, op.oldPath, op.newPath, `device:${device.id}`);
+        const entry = await stub.syncRenameFile(vaultId, op.oldPath, op.newPath, device.author);
         results.push({ op: "rename", path: op.oldPath, status: "accepted", entry: entry as unknown as Record<string, unknown> });
       } else if (op.op === "delete") {
-        await stub.syncDeleteFile(vaultId, path, `device:${device.id}`);
+        await stub.syncDeleteFile(vaultId, path, device.author);
         results.push({ op: "delete", path, status: "accepted" });
       }
     } catch (e: unknown) {
@@ -250,7 +250,7 @@ syncRoutes.put("/:vaultId/seed/files/*", requireDevice, async (c) => {
   if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
   const body = await c.req.arrayBuffer();
   const contentType = (c.req.header("Content-Type") ?? detectMime(filePath)).split(";")[0].trim();
-  const entry = await stubFor(c.env, vaultId).syncPutFile(vaultId, filePath, body, contentType, undefined, `device:${device.id}`);
+  const entry = await stubFor(c.env, vaultId).syncPutFile(vaultId, filePath, body, contentType, undefined, device.author, device.conflictPolicy);
   return c.json(entry, 200);
 });
 

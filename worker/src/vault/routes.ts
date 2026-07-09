@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
+import { deviceAuthor } from "./identity";
 import { buildZip, type ZipEntry } from "./zip";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
@@ -192,7 +193,7 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
     : contentType.split(";")[0].trim();
 
   try {
-    const entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision, `web:${session.sessionId}`);
+    const entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision, deviceAuthor("web", session.sessionId));
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
@@ -230,7 +231,7 @@ vaultRoutes.patch("/:id/files/*", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    const entry = await stub.renameFile(id, oldPath, newPath, `web:${session.sessionId}`);
+    const entry = await stub.renameFile(id, oldPath, newPath, deviceAuthor("web", session.sessionId));
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -259,7 +260,7 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    await stub.deleteFile(id, filePath, `web:${session.sessionId}`);
+    await stub.deleteFile(id, filePath, deviceAuthor("web", session.sessionId));
     return c.json({ ok: true });
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -351,7 +352,7 @@ vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    const entry = await stub.syncPutFile(id, filePath, encoded.buffer as ArrayBuffer, contentType, undefined, `web:${session.sessionId}`);
+    const entry = await stub.syncPutFile(id, filePath, encoded.buffer as ArrayBuffer, contentType, undefined, deviceAuthor("web", session.sessionId));
     return c.json({ restored: true, entry }, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };

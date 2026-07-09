@@ -20,6 +20,7 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
 import { requireDevice } from "../middleware/syncAuth";
+import { deviceAuthor } from "../vault/identity";
 
 const notifyRoutes = new Hono<{ Bindings: Env }>();
 
@@ -69,8 +70,7 @@ notifyRoutes.get("/vaults/:id/notify", requireSession, async (c) => {
   const owned = await resolveVaultOwner(c.env.DB, vaultId, session.userId);
   if (!owned) return c.json({ error: "Not found" }, 404);
 
-  // Identity: "session:<sessionId>"
-  const identity = `session:${session.sessionId}`;
+  const identity = deviceAuthor("web", session.sessionId);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return upgradeToWebSocket(c.req.raw, vaultId, identity, c.env) as any;
@@ -86,8 +86,7 @@ notifyRoutes.get("/sync/:vaultId/notify", requireDevice, async (c) => {
     return c.json({ error: "Forbidden" }, 403);
   }
 
-  // Identity: "device:<deviceName>"
-  const identity = `device:${device.deviceName}`;
+  const identity = deviceAuthor("plugin", device.id);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return upgradeToWebSocket(c.req.raw, vaultId, identity, c.env) as any;
