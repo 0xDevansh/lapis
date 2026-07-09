@@ -6,7 +6,10 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
-import { applyPatch, createPatch } from "../src/vault/patch";
+import { applyPatch, createPatch, merge3 } from "../src/vault/patch";
+import { deviceAuthor } from "../src/vault/identity";
+import { conflictNotePath, renderConflictNote } from "../src/vault/conflict";
+import { encryptPat, decryptPat, patLast4 } from "../src/git/crypto";
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -50,5 +53,61 @@ describe("Lapis worker", () => {
 	it("rejects stale patch context", () => {
 		const patch = createPatch("note.md", "alpha\nbeta", "alpha\nchanged", 1);
 		expect(applyPatch("alpha\nother", patch)).toBeNull();
+	});
+
+	it("deviceAuthor produces canonical identity strings", () => {
+		expect(deviceAuthor("plugin", "abc-123")).toBe("plugin:abc-123");
+		expect(deviceAuthor("web", "sess-1")).toBe("web:sess-1");
+		expect(deviceAuthor("agent", "agent-1")).toBe("agent:agent-1");
+		expect(deviceAuthor("github", "vault-1")).toBe("github:vault-1");
+	});
+
+	it("merge3 produces merged output for identical server head", () => {
+		const text = "line1\nline2\nline3";
+		const { merged, hasConflicts } = merge3(text, text, text);
+		expect(hasConflicts).toBe(false);
+		expect(merged).toBe(text);
+	});
+
+	it("merge3 flags overlapping edits as conflicts", () => {
+		const base = "shared\nline";
+		const ours = "ours\nline";
+		const theirs = "theirs\nline";
+		const { hasConflicts } = merge3(base, ours, theirs);
+		expect(hasConflicts).toBe(true);
+	});
+
+	it("renders conflict notes with frontmatter", () => {
+		const path = conflictNotePath({
+			path: "notes/foo.md",
+			serverRevision: 3,
+			clientBaseRevision: 1,
+			deviceName: "plugin:dev-1",
+			timestamp: "2024-06-01T12:00:00Z",
+		});
+		expect(path).toContain(".sync-conflicts/");
+		const body = renderConflictNote({
+			path: "notes/foo.md",
+			serverContent: "server",
+			clientContent: "client",
+			baseContent: "base",
+			serverRevision: 3,
+			clientBaseRevision: 1,
+			deviceName: "plugin:dev-1",
+			timestamp: "2024-06-01T12:00:00Z",
+		});
+		expect(body).toContain("type: sync-conflict");
+		expect(body).toContain("server");
+		expect(body).toContain("client");
+	});
+
+	it("encrypts PATs without exposing plaintext in ciphertext", async () => {
+		const kek = "test-key-32-bytes-long-enough!!";
+		const pat = "ghp_supersecrettokenvalue123456";
+		const ciphertext = await encryptPat(kek, pat);
+		expect(ciphertext).not.toContain(pat);
+		expect(patLast4(pat)).toBe("3456");
+		const roundTrip = await decryptPat(kek, ciphertext);
+		expect(roundTrip).toBe(pat);
 	});
 });

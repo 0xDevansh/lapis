@@ -4,9 +4,8 @@
 # Base URL of your running Lapis server (no trailing slash)
 LAPIS_URL=http://localhost:8787
 
-# Credentials for the vault owner account in Lapis
-LAPIS_EMAIL=you@example.com
-LAPIS_PASSWORD=your-password-here
+# Agent device token — mint via POST /api/vaults/:id/agents (shown once)
+LAPIS_AGENT_TOKEN=your-agent-sync-token-here
 
 # Vault ID from the Lapis web app (shown in the URL after you open a vault)
 LAPIS_VAULT_ID=your-vault-id-here

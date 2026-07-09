@@ -1,3 +1,7 @@
 # Copy this to .dev.vars and fill in values for local development
 BETTER_AUTH_SECRET=changeme-use-openssl-rand-hex-32
+# Local dev URL — overrides wrangler.jsonc vars when running wrangler dev
 BETTER_AUTH_URL=http://localhost:8787
+
+# Required only for GitHub remote sync (encrypts stored PATs). Generate with: openssl rand -base64 32
+# GITHUB_PAT_ENCRYPTION_KEY=

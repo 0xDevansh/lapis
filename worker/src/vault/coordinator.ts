@@ -10,14 +10,20 @@ import {
   manifestKey,
 } from "./manifest";
 import { isValidVaultPath, isVaultInternal } from "./path";
-import { applyPatch } from "./patch";
+import { applyPatch, merge3 } from "./patch";
 import { indexFile, removeFromIndex } from "../search/indexer";
 import {
   getVaultLog,
-  sealVault,
+  sealToRemote,
   type IncrementalSealChange,
   type SealedCommit,
 } from "../artifacts/sealer";
+import { conflictNotePath, renderConflictNote, type ConflictContext } from "./conflict";
+import type { ConflictPolicy } from "../devices/types";
+import { ArtifactsRemote } from "../git/artifacts-remote";
+import { createGitHubRemote } from "../git/github-remote";
+import { getGitRemote, updateGitRemoteState } from "../git/store";
+import { reconcileInbound } from "../git/reconcile";
 
 export interface VaultMeta {
   id: string;
@@ -87,6 +93,10 @@ export interface SameFileWarning {
   type: "same_file_warning";
   path: string;
   others: string[];
+}
+
+export interface WriteResult extends ManifestEntry {
+  conflictNote?: string;
 }
 
 export interface VaultContentResult {
@@ -253,9 +263,10 @@ export class VaultCoordinator extends DurableObject<Env> {
     body: ArrayBuffer,
     contentType: string,
     baseRevision?: number,
-    author = "device"
-  ): Promise<ManifestEntry> {
-    return this.applyPut(vaultId, path, body, contentType, baseRevision, author);
+    author = "device",
+    conflictPolicy: ConflictPolicy = "rebase"
+  ): Promise<WriteResult> {
+    return this.applyPut(vaultId, path, body, contentType, baseRevision, author, conflictPolicy);
   }
 
   async syncApplyPatch(
@@ -263,45 +274,30 @@ export class VaultCoordinator extends DurableObject<Env> {
     path: string,
     patch: string,
     baseRevision: number,
-    author = "device"
-  ): Promise<ManifestEntry> {
+    author = "device",
+    conflictPolicy: ConflictPolicy = "rebase"
+  ): Promise<WriteResult> {
     if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
     if (isVaultInternal(path)) throw Object.assign(new Error("Cannot write to vault internals"), { status: 400 });
 
     await this.ensureManifestLoaded(vaultId);
     const entry = this.getEntry(path);
     if (!entry) throw Object.assign(new Error("File not found"), { status: 404 });
-    this.assertBaseRevision(entry, baseRevision);
 
-    const original = await this.headText(vaultId, entry.path);
-    const patched = applyPatch(original, patch);
-    if (patched === null) throw Object.assign(new Error("Patch does not apply cleanly"), { status: 422 });
+    if (baseRevision === entry.revision) {
+      const original = await this.headText(vaultId, entry.path);
+      const patched = applyPatch(original, patch);
+      if (patched === null) throw Object.assign(new Error("Patch does not apply cleanly"), { status: 422 });
+      return this.commitTextHead(vaultId, entry, patched, baseRevision, author, patch);
+    }
 
-    const encoded = new TextEncoder().encode(patched);
-    const next = this.bumpEntry(entry.path, encoded.byteLength, entry.contentType);
-    this.headContent.set(lowerPath(entry.path), patched);
-    this.appendPending({
-      path: entry.path,
-      kind: "patch",
-      patch,
-      contentType: entry.contentType,
-      baseRevision,
-      newRevision: next.revision,
-      author,
-    });
-    this.markDirty(entry.path, false);
-    await this.scheduleFlush();
-    this.broadcast({
-      type: "change",
-      path: entry.path,
-      kind: "put",
-      baseRevision,
-      revision: next.revision,
-      patch,
-      author,
-      ts: next.updatedAt,
-    });
-    return next;
+    const baseText = await this.resolveBaseText(vaultId, path, entry, baseRevision);
+    const resolvedBase = baseText ?? (await this.headText(vaultId, entry.path));
+    const theirs = applyPatch(resolvedBase, patch);
+    if (theirs === null) {
+      return this.recordTextConflict(vaultId, path, entry, baseRevision, resolvedBase, author, conflictPolicy, undefined, patch);
+    }
+    return this.handleStaleTextWrite(vaultId, path, entry, baseRevision, theirs, author, conflictPolicy, resolvedBase);
   }
 
   async renameFile(vaultId: string, oldPath: string, newPath: string, author = "web"): Promise<ManifestEntry> {
@@ -466,28 +462,116 @@ export class VaultCoordinator extends DurableObject<Env> {
     if (!meta) throw Object.assign(new Error("Vault not found"), { status: 404 });
     await this.flushToR2(meta.id);
 
-    const changes = this.dirtyChanges();
-    if (changes.length === 0 && meta.artifactsRemote) {
-      await this.scheduleNextSeal();
-      return { fileCount: 0, remote: meta.artifactsRemote };
+    const gitConfig = await getGitRemote(this.env.DB, meta.id);
+    if (gitConfig && this.env.GITHUB_PAT_ENCRYPTION_KEY) {
+      try {
+        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "pulling" });
+        const remote = await createGitHubRemote(
+          {
+            repoUrl: gitConfig.repoUrl,
+            branch: gitConfig.branch,
+            subdir: gitConfig.subdir,
+            patCiphertext: gitConfig.patCiphertext,
+          },
+          this.env.GITHUB_PAT_ENCRYPTION_KEY
+        );
+        const inbound = await reconcileInbound({
+          remote,
+          vaultId: meta.id,
+          lastSyncedCommit: gitConfig.lastSyncedCommit,
+          getHeadText: (path) => this.headText(meta.id, path),
+          getEntry: (path) => this.getEntry(path),
+          applyMerged: async (path, content, author) => {
+            const entry = this.getEntry(path);
+            if (!entry) {
+              return this.applyPut(
+                meta.id,
+                path,
+                new TextEncoder().encode(content).buffer as ArrayBuffer,
+                "text/markdown",
+                undefined,
+                author
+              );
+            }
+            return this.commitTextHead(meta.id, entry, content, entry.revision, author);
+          },
+          writeConflictNote: (ctx, author) => this.writeConflictNote(meta.id, ctx, author),
+        });
+        for (const change of inbound.applied) {
+          this.broadcast(change);
+        }
+        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "pushing" });
+      } catch (err) {
+        console.error(`[lapis] Git inbound sync failed for vault ${meta.id}:`, err);
+        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "conflict" });
+      }
     }
 
-    const result = await sealVault(
-      this.env.ARTIFACTS,
-      meta.id,
-      changes,
-      meta.artifactsRemote ?? null,
-      async (path) => {
-        const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
-        return obj ? obj.arrayBuffer() : null;
-      },
-      label
-    );
-    if (!meta.artifactsRemote || meta.artifactsRemote !== result.remote) this.setArtifactsRemote(result.remote);
-    this.sql.exec(`DELETE FROM seal_dirty`);
-    await this.setState("last_seal_at", String(Date.now()));
-    await this.scheduleNextSeal();
-    return result;
+    const changes = this.dirtyChanges();
+    if (changes.length === 0) {
+      const remoteUrl = gitConfig?.repoUrl ?? meta.artifactsRemote;
+      if (remoteUrl) await this.scheduleNextSeal();
+      return { fileCount: 0, remote: remoteUrl ?? undefined };
+    }
+
+    try {
+      let result: { commitHash: string; remote: string; fileCount: number };
+      if (gitConfig && this.env.GITHUB_PAT_ENCRYPTION_KEY) {
+        const remote = await createGitHubRemote(
+          {
+            repoUrl: gitConfig.repoUrl,
+            branch: gitConfig.branch,
+            subdir: gitConfig.subdir,
+            patCiphertext: gitConfig.patCiphertext,
+          },
+          this.env.GITHUB_PAT_ENCRYPTION_KEY
+        );
+        result = await sealToRemote(
+          remote,
+          meta.id,
+          changes,
+          async (path) => {
+            const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
+            return obj ? obj.arrayBuffer() : null;
+          },
+          label
+        );
+        await updateGitRemoteState(this.env.DB, meta.id, {
+          syncState: "idle",
+          lastSyncedCommit: result.commitHash || gitConfig.lastSyncedCommit,
+          lastSyncedAt: new Date().toISOString(),
+        });
+      } else if (meta.artifactsRemote || changes.length > 0) {
+        const artifactsRemote = await ArtifactsRemote.create(this.env.ARTIFACTS, meta.id, meta.artifactsRemote ?? null);
+        result = await sealToRemote(
+          artifactsRemote,
+          meta.id,
+          changes,
+          async (path) => {
+            const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
+            return obj ? obj.arrayBuffer() : null;
+          },
+          label
+        );
+        if (!meta.artifactsRemote || meta.artifactsRemote !== result.remote) {
+          this.setArtifactsRemote(result.remote);
+        }
+      } else {
+        await this.scheduleNextSeal();
+        return { fileCount: 0 };
+      }
+
+      this.sql.exec(`DELETE FROM seal_dirty`);
+      await this.setState("last_seal_at", String(Date.now()));
+      await this.scheduleNextSeal();
+      return result;
+    } catch (err: unknown) {
+      const code = (err as { code?: string }).code;
+      if (code === "NON_FAST_FORWARD" && gitConfig) {
+        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "conflict" });
+      }
+      throw err;
+    }
   }
 
   async alarm(): Promise<void> {
@@ -604,13 +688,30 @@ export class VaultCoordinator extends DurableObject<Env> {
     return new Response("Not found", { status: 404 });
   }
 
-  private async applyPut(vaultId: string, path: string, body: ArrayBuffer, contentType: string, baseRevision: number | undefined, author: string): Promise<ManifestEntry> {
+  private async applyPut(
+    vaultId: string,
+    path: string,
+    body: ArrayBuffer,
+    contentType: string,
+    baseRevision: number | undefined,
+    author: string,
+    conflictPolicy: ConflictPolicy = "rebase"
+  ): Promise<WriteResult> {
     if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
     if (isVaultInternal(path)) throw Object.assign(new Error("Cannot write to vault internals"), { status: 400 });
     await this.ensureManifestLoaded(vaultId);
 
     const existing = this.getEntry(path);
-    if (baseRevision !== undefined && existing) this.assertBaseRevision(existing, baseRevision);
+    if (existing && baseRevision !== undefined && baseRevision !== existing.revision) {
+      if (!isTextContentType(contentType)) {
+        return this.recordBinaryConflict(vaultId, path, existing, baseRevision, author);
+      }
+      const modified = new TextDecoder().decode(body);
+      const baseText = await this.resolveBaseText(vaultId, path, existing, baseRevision);
+      const resolvedBase = baseText ?? (await this.headText(vaultId, existing.path));
+      return this.handleStaleTextWrite(vaultId, path, existing, baseRevision, modified, author, conflictPolicy, resolvedBase);
+    }
+
     if (hasCaseDuplicate(await this.getManifest(vaultId), path)) {
       throw Object.assign(new Error("Case conflict: a file with a similar name already exists"), { status: 409 });
     }
@@ -845,6 +946,153 @@ export class VaultCoordinator extends DurableObject<Env> {
   private hasPendingDelete(path: string): boolean {
     const row = this.sql.exec(`SELECT seq FROM pending_ops WHERE path_lower = ? AND kind = 'delete' LIMIT 1`, lowerPath(path)).toArray()[0];
     return Boolean(row);
+  }
+
+  private async resolveBaseText(
+    vaultId: string,
+    path: string,
+    entry: ManifestEntry & { r2Revision: number },
+    baseRevision: number
+  ): Promise<string | null> {
+    if (baseRevision > entry.revision) return null;
+    if (baseRevision < entry.r2Revision) return null;
+
+    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, this.r2BasePathFor(path)));
+    let text = obj ? await obj.text() : "";
+
+    for (const row of this.sql.exec<PendingOpRow>(
+      pendingSelect(`WHERE path_lower = ? ORDER BY seq`),
+      lowerPath(path)
+    ).toArray()) {
+      const newRev = Number(row.newRevision ?? 0);
+      if (newRev > baseRevision) break;
+      const kind = String(row.kind);
+      if (kind === "patch" || kind === "put") {
+        const patch = String(row.patch ?? "");
+        if (!patch.trim()) continue;
+        const next = applyPatch(text, patch);
+        if (next === null) return null;
+        text = next;
+      }
+    }
+    return text;
+  }
+
+  private async commitTextHead(
+    vaultId: string,
+    entry: ManifestEntry & { r2Revision: number },
+    merged: string,
+    baseRevision: number,
+    author: string,
+    patch?: string
+  ): Promise<WriteResult> {
+    const ours = await this.headText(vaultId, entry.path);
+    const effectivePatch = patch ?? createLinePatch(entry.path, ours, merged);
+    const encoded = new TextEncoder().encode(merged);
+    const next = this.bumpEntry(entry.path, encoded.byteLength, entry.contentType);
+    this.headContent.set(lowerPath(entry.path), merged);
+    this.appendPending({
+      path: entry.path,
+      kind: "patch",
+      patch: effectivePatch,
+      contentType: entry.contentType,
+      baseRevision,
+      newRevision: next.revision,
+      author,
+    });
+    this.markDirty(entry.path, false);
+    await this.scheduleFlush();
+    this.broadcast({
+      type: "change",
+      path: entry.path,
+      kind: "put",
+      baseRevision,
+      revision: next.revision,
+      patch: effectivePatch,
+      author,
+      ts: next.updatedAt,
+    });
+    return next;
+  }
+
+  private async handleStaleTextWrite(
+    vaultId: string,
+    path: string,
+    entry: ManifestEntry & { r2Revision: number },
+    baseRevision: number,
+    theirs: string,
+    author: string,
+    conflictPolicy: ConflictPolicy,
+    resolvedBase: string
+  ): Promise<WriteResult> {
+    const ours = await this.headText(vaultId, path);
+    const { merged, hasConflicts } = merge3(resolvedBase, ours, theirs);
+
+    if (!hasConflicts) {
+      return this.commitTextHead(vaultId, entry, merged, entry.revision, author);
+    }
+
+    return this.recordTextConflict(vaultId, path, entry, baseRevision, resolvedBase, author, conflictPolicy, ours, theirs);
+  }
+
+  private async recordTextConflict(
+    vaultId: string,
+    path: string,
+    entry: ManifestEntry & { r2Revision: number },
+    baseRevision: number,
+    baseContent: string,
+    author: string,
+    _conflictPolicy: ConflictPolicy,
+    serverContent?: string,
+    clientContent?: string
+  ): Promise<WriteResult> {
+    const ours = serverContent ?? (await this.headText(vaultId, path));
+    const ctx: ConflictContext = {
+      path,
+      serverContent: ours,
+      clientContent,
+      baseContent: baseContent === ours ? undefined : baseContent,
+      serverRevision: entry.revision,
+      clientBaseRevision: baseRevision,
+      deviceName: author,
+      timestamp: new Date().toISOString(),
+    };
+    const notePath = await this.writeConflictNote(vaultId, ctx, author);
+    return { ...entry, conflictNote: notePath };
+  }
+
+  private async recordBinaryConflict(
+    vaultId: string,
+    path: string,
+    entry: ManifestEntry & { r2Revision: number },
+    baseRevision: number,
+    author: string
+  ): Promise<WriteResult> {
+    const ctx: ConflictContext = {
+      path,
+      serverRevision: entry.revision,
+      clientBaseRevision: baseRevision,
+      deviceName: author,
+      timestamp: new Date().toISOString(),
+      isBinary: true,
+    };
+    const notePath = await this.writeConflictNote(vaultId, ctx, author);
+    return { ...entry, conflictNote: notePath };
+  }
+
+  private async writeConflictNote(vaultId: string, ctx: ConflictContext, author: string): Promise<string> {
+    const notePath = conflictNotePath(ctx);
+    const body = renderConflictNote(ctx);
+    await this.applyPut(
+      vaultId,
+      notePath,
+      new TextEncoder().encode(body).buffer as ArrayBuffer,
+      "text/markdown",
+      undefined,
+      author,
+      "rebase"
+    );
+    return notePath;
   }
 
   private assertBaseRevision(entry: ManifestEntry, baseRevision: number): void {

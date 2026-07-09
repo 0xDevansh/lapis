@@ -23,10 +23,8 @@ export interface Env {
   VaultAgent: DurableObjectNamespace;
   /** Base URL of your deployed Lapis server, e.g. https://lapis.example.workers.dev */
   LAPIS_URL: string;
-  /** Email address of the vault owner */
-  LAPIS_EMAIL: string;
-  /** Password for the vault owner account */
-  LAPIS_PASSWORD: string;
+  /** Agent device token (mint via POST /api/vaults/:id/agents) */
+  LAPIS_AGENT_TOKEN: string;
   /** The vault ID to connect to (shown in the Lapis web app) */
   LAPIS_VAULT_ID: string;
 }
@@ -34,8 +32,34 @@ export interface Env {
 // ── Vault Agent ─────────────────────────────────────────────────────────────
 
 export class VaultAgent extends Think<Env> {
-  /** Cached session cookie — refreshed on auth failure */
-  private sessionCookie: string | null = null;
+  // ── Sync API (agent device token) ─────────────────────────────────────────
+
+  private syncHeaders(): HeadersInit {
+    return {
+      Authorization: `Bearer ${this.env.LAPIS_AGENT_TOKEN}`,
+      "Content-Type": "application/json",
+    };
+  }
+
+  private async syncGet(path: string): Promise<Response> {
+    return fetch(`${this.env.LAPIS_URL}${path}`, {
+      headers: { Authorization: `Bearer ${this.env.LAPIS_AGENT_TOKEN}` },
+    });
+  }
+
+  private async syncPut(path: string, body: BodyInit, contentType: string, baseRevision?: number): Promise<Response> {
+    return fetch(`${this.env.LAPIS_URL}${path}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${this.env.LAPIS_AGENT_TOKEN}`,
+        "Content-Type": contentType,
+        ...(baseRevision !== undefined ? { "X-Base-Revision": String(baseRevision) } : {}),
+      },
+      body,
+    });
+  }
+
+  // ── Read API (session-less; sync token works for manifest + file reads) ───
 
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
@@ -46,12 +70,14 @@ export class VaultAgent extends Think<Env> {
   getSystemPrompt() {
     return `You are a knowledgeable assistant with read access to a private Obsidian vault hosted on Lapis.
 
-You have four tools available:
+You have tools available:
 - vault_list_files: list every file in the vault with path, size, and timestamps
 - vault_read_file: read the full content of a specific note or attachment
 - vault_search: full-text search across all notes with highlighted snippets
 - vault_get_backlinks: find all notes that link to a given note via [[wikilinks]]
 - vault_get_tags: list all tags used in the vault with occurrence counts
+- vault_write_file: write or update a text file in the vault (agent-attributed)
+- vault_apply_patch: apply a unified diff patch to an existing note
 
 Use these tools to answer the user's questions about their vault content.
 When reading notes, render wikilinks like [[Note Name]] as plain references to the target note.
@@ -60,61 +86,9 @@ If you need context from a linked note, use vault_read_file to fetch it.`;
 
   // ── Authentication ─────────────────────────────────────────────────────────
 
-  /**
-   * Sign in to the Lapis server and cache the session cookie.
-   * Called automatically before the first API request and on session expiry.
-   */
-  private async authenticate(): Promise<string> {
-    const res = await fetch(`${this.env.LAPIS_URL}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: this.env.LAPIS_EMAIL,
-        password: this.env.LAPIS_PASSWORD,
-      }),
-    });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Lapis sign-in failed (${res.status}): ${body}`);
-    }
-
-    // Extract all Set-Cookie values and forward them as a single Cookie header
-    const setCookie = res.headers.getSetCookie?.() ?? [];
-    if (setCookie.length === 0) {
-      throw new Error("Lapis sign-in succeeded but returned no session cookie");
-    }
-
-    // Strip directives (Expires, Path, etc.) and join into a single Cookie header
-    const cookie = setCookie
-      .map((c) => c.split(";")[0].trim())
-      .join("; ");
-
-    this.sessionCookie = cookie;
-    return cookie;
-  }
-
-  /**
-   * Make an authenticated GET request to the Lapis API.
-   * Automatically re-authenticates once on 401.
-   */
-  private async lapisGet(path: string, retry = true): Promise<Response> {
-    if (!this.sessionCookie) {
-      await this.authenticate();
-    }
-
-    const res = await fetch(`${this.env.LAPIS_URL}${path}`, {
-      headers: { Cookie: this.sessionCookie! },
-    });
-
-    if (res.status === 401 && retry) {
-      // Session expired — re-authenticate and try once more
-      this.sessionCookie = null;
-      await this.authenticate();
-      return this.lapisGet(path, false);
-    }
-
-    return res;
+  /** Agent devices authenticate with a Bearer sync token (Slice 24). */
+  private async lapisGet(path: string): Promise<Response> {
+    return this.syncGet(path);
   }
 
   // ── Tools ──────────────────────────────────────────────────────────────────
@@ -132,7 +106,7 @@ If you need context from a linked note, use vault_read_file to fetch it.`;
           "List all files in the vault. Returns each file's path, size in bytes, content type, and last-modified revision number.",
         inputSchema: z.object({}),
         execute: async () => {
-          const res = await this.lapisGet(`/api/vaults/${vaultId}/manifest`);
+          const res = await this.lapisGet(`/api/sync/${vaultId}/manifest`);
           if (!res.ok) {
             return { error: `Manifest request failed: ${res.status}` };
           }
@@ -176,7 +150,7 @@ If you need context from a linked note, use vault_read_file to fetch it.`;
             .join("/");
 
           const res = await this.lapisGet(
-            `/api/vaults/${vaultId}/files/${encodedPath}`,
+            `/api/sync/${vaultId}/files/${encodedPath}`,
           );
 
           if (res.status === 404) {
@@ -275,6 +249,58 @@ If you need context from a linked note, use vault_read_file to fetch it.`;
             count: number;
           }>;
           return { count: tags.length, tags };
+        },
+      }),
+
+      vault_write_file: tool({
+        description:
+          "Write or replace a text file in the vault. Changes are attributed to this agent device.",
+        inputSchema: z.object({
+          path: z.string().describe("Vault-relative path, e.g. 'notes/summary.md'"),
+          content: z.string().describe("Full file content"),
+          baseRevision: z.number().optional().describe("Revision the edit is based on (for updates)"),
+        }),
+        execute: async ({ path, content, baseRevision }) => {
+          const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+          const res = await this.syncPut(
+            `/api/sync/${vaultId}/files/${encodedPath}`,
+            new TextEncoder().encode(content),
+            "text/markdown",
+            baseRevision,
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({})) as { error?: string };
+            return { error: body.error ?? `Write failed (${res.status})` };
+          }
+          const entry = await res.json() as { revision: number; conflictNote?: string };
+          return { path, revision: entry.revision, conflictNote: entry.conflictNote };
+        },
+      }),
+
+      vault_apply_patch: tool({
+        description:
+          "Apply a unified diff patch to an existing note via the sync API.",
+        inputSchema: z.object({
+          path: z.string().describe("Vault-relative path of the file to patch"),
+          patch: z.string().describe("Unified diff patch string"),
+          baseRevision: z.number().describe("Revision the patch applies against"),
+        }),
+        execute: async ({ path, patch, baseRevision }) => {
+          const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+          const res = await fetch(
+            `${this.env.LAPIS_URL}/api/sync/${vaultId}/files/${encodedPath}/patch`,
+            {
+              method: "POST",
+              headers: this.syncHeaders(),
+              body: JSON.stringify({ patch, baseRevision }),
+            },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({})) as { error?: string };
+            return { error: body.error ?? `Patch failed (${res.status})` };
+          }
+          const entry = await res.json() as { revision: number; conflictNote?: string };
+          return { path, revision: entry.revision, conflictNote: entry.conflictNote };
         },
       }),
     };

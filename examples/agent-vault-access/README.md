@@ -4,7 +4,7 @@ A [Project Think](https://developers.cloudflare.com/agents/harnesses/think/) age
 
 ## How it works
 
-The agent runs as a Cloudflare Worker backed by a Durable Object (one instance per user session). It authenticates to your Lapis server with email/password on first use and caches the session. When the LLM needs information, it calls one of five vault tools that hit the Lapis REST API.
+The agent runs as a Cloudflare Worker backed by a Durable Object (one instance per user session). It authenticates as a **first-class agent device** using a sync token minted by the vault owner (`POST /api/vaults/:id/agents`). Writes are attributed as `agent:{id}` and use the standard sync API.
 
 ```
 User message
@@ -13,17 +13,15 @@ User message
 VaultAgent (Think, Durable Object)
     │  getSystemPrompt()  → instructs the model about vault tools
     │  getTools()         → vault_list_files, vault_read_file,
-    │                        vault_search, vault_get_backlinks,
-    │                        vault_get_tags
+    │                        vault_search, vault_write_file, …
     │
     ▼
-Lapis REST API  (auth via email/password → session cookie)
+Lapis sync API  (Authorization: Bearer <agent token>)
     │
-    ├── GET /api/vaults/:id/manifest       → file list
-    ├── GET /api/vaults/:id/files/*        → file content
-    ├── GET /api/vaults/:id/search?q=      → full-text search
-    ├── GET /api/vaults/:id/backlinks?path= → backlinks
-    └── GET /api/vaults/:id/tags            → tag counts
+    ├── GET  /api/sync/:id/manifest
+    ├── GET  /api/sync/:id/files/*
+    ├── PUT  /api/sync/:id/files/*        → write file
+    └── POST /api/sync/:id/files/*/patch   → apply patch
 ```
 
 ## Prerequisites

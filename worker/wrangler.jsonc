@@ -51,7 +51,20 @@
 
   // Secrets (set via wrangler secret or .dev.vars)
   // BETTER_AUTH_SECRET
-  // BETTER_AUTH_URL
+  // GITHUB_PAT_ENCRYPTION_KEY — secret for encrypting stored GitHub PATs (Slice 25)
+
+  // Public URL for better-auth (cookies, redirects). Overridden locally by .dev.vars.
+  "vars": {
+    "BETTER_AUTH_URL": "https://lapis.dvenom.in"
+  },
+
+  "routes": [
+    {
+      "pattern": "lapis.dvenom.in",
+      "zone_name": "dvenom.in",
+      "custom_domain": true
+    }
+  ],
 
   "assets": {
     "directory": "../web/dist",

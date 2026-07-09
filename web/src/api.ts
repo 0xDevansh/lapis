@@ -316,10 +316,12 @@ export async function denyDevice(vaultId: string, userCode: string): Promise<voi
 export interface Device {
   id: string;
   deviceName: string;
+  kind?: string;
   receiveInternals: boolean;
   revoked: boolean;
   createdAt: string;
   lastSeenAt: string | null;
+  conflictPolicy?: string;
 }
 
 export async function listDevices(vaultId: string): Promise<Device[]> {
@@ -341,6 +343,59 @@ export async function updateDevice(
     method: "PATCH",
     body: JSON.stringify(updates),
   });
+}
+
+// ── GitHub remote sync (Slices 25–26) ─────────────────────────────────────────
+
+export type GitRemoteSyncState = "idle" | "pulling" | "pushing" | "conflict";
+
+export interface GitRemoteMeta {
+  provider: string;
+  repoUrl: string;
+  branch: string;
+  subdir: string | null;
+  patLast4: string | null;
+  lastSyncedCommit: string | null;
+  lastSyncedAt: string | null;
+  syncState: GitRemoteSyncState;
+}
+
+export interface GitRemoteStatus {
+  connected: boolean;
+  provider?: string;
+  repoUrl?: string;
+  branch?: string;
+  subdir?: string | null;
+  patLast4?: string | null;
+  lastSyncedCommit?: string | null;
+  lastSyncedAt?: string | null;
+  syncState?: GitRemoteSyncState;
+}
+
+export async function getGitRemote(vaultId: string): Promise<GitRemoteStatus> {
+  return apiFetch<GitRemoteStatus>(`/api/vaults/${vaultId}/git-remote`);
+}
+
+export async function connectGitRemote(
+  vaultId: string,
+  input: { repoUrl: string; branch?: string; subdir?: string; pat: string }
+): Promise<GitRemoteMeta> {
+  return apiFetch<GitRemoteMeta>(`/api/vaults/${vaultId}/git-remote`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function disconnectGitRemote(vaultId: string): Promise<void> {
+  await apiFetch<{ ok: boolean }>(`/api/vaults/${vaultId}/git-remote`, {
+    method: "DELETE",
+  });
+}
+
+export async function pushGitRemote(
+  vaultId: string
+): Promise<{ ok: boolean; commitHash?: string; fileCount?: number; remote?: string }> {
+  return apiFetch(`/api/vaults/${vaultId}/git-remote/push`, { method: "POST" });
 }
 
 // ── Restore & Export (Slice 13) ───────────────────────────────────────────────

@@ -79,8 +79,28 @@ CREATE TABLE IF NOT EXISTS devices (
   receive_internals   INTEGER NOT NULL DEFAULT 0, -- 0 = false, 1 = true
   revoked             INTEGER NOT NULL DEFAULT 0,
   created_at          TEXT NOT NULL,
-  last_seen_at        TEXT
+  last_seen_at        TEXT,
+  kind                TEXT NOT NULL DEFAULT 'plugin',
+  capabilities        TEXT,
+  conflict_policy     TEXT NOT NULL DEFAULT 'rebase',
+  sync_cursor         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_vault  ON devices (vault_id, revoked);
 CREATE INDEX IF NOT EXISTS idx_devices_token  ON devices (sync_token);
+
+-- ── GitHub remote (Slice 25) ─────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS vault_git_remotes (
+  vault_id           TEXT PRIMARY KEY,
+  provider           TEXT NOT NULL DEFAULT 'github',
+  repo_url           TEXT NOT NULL,
+  branch             TEXT NOT NULL DEFAULT 'main',
+  subdir             TEXT,
+  pat_ciphertext     TEXT NOT NULL,
+  pat_last4          TEXT,
+  webhook_secret     TEXT,
+  last_synced_commit TEXT,
+  last_synced_at     TEXT,
+  sync_state         TEXT NOT NULL DEFAULT 'idle'
+);

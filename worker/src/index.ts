@@ -8,6 +8,7 @@ import { searchRoutes } from "./search/routes";
 import { deviceRoutes } from "./device/routes";
 import { syncRoutes } from "./sync/routes";
 import { notifyRoutes } from "./notify/routes";
+import { gitRoutes } from "./git/routes";
 
 export { VaultCoordinator } from "./vault/coordinator";
 
@@ -35,6 +36,7 @@ app.route("/api/vaults", searchRoutes);
 app.route("/api", deviceRoutes);
 app.route("/api/sync", syncRoutes);
 app.route("/api", notifyRoutes);
+app.route("/api", gitRoutes);
 
 // ── SPA fallback ─────────────────────────────────────────────────────────────
 app.get("*", async (c) => {

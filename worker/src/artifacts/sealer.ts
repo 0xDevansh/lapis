@@ -25,6 +25,8 @@
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { MemoryFS } from "./memory-fs";
+import type { GitRemote } from "../git/remote";
+import { gitPathFromVault } from "../git/remote";
 export interface SealResult {
   commitHash: string;
   repoName: string;
@@ -107,70 +109,60 @@ export async function ensureRepoAndToken(
 }
 
 /**
- * Seal the current vault snapshot to Artifacts.
- *
- * @param artifacts      ARTIFACTS binding from env
- * @param vaultId        vault identifier
- * @param manifest       current vault manifest
- * @param existingRemote cached repo remote URL (null on first seal)
- * @param readFile       async function to fetch file bytes from R2 by vault path
- * @param label          optional commit message suffix
- * @returns SealResult including remote URL (persist this for subsequent seals)
+ * Seal vault changes to any GitRemote (Artifacts or GitHub).
  */
-export async function sealVault(
-  artifacts: Artifacts,
+export async function sealToRemote(
+  remote: GitRemote,
   vaultId: string,
   changes: IncrementalSealChange[],
-  existingRemote: string | null,
   readFile: (path: string) => Promise<ArrayBuffer | null>,
-  label?: string
+  label?: string,
+  commitAuthor = "Lapis"
 ): Promise<SealResult & { remote: string }> {
-  const { remote, tokenSecret } = await ensureRepoAndToken(artifacts, vaultId, existingRemote);
-
   const dir = "/vault";
   const fs = new MemoryFS();
+  const auth = remote.onAuth();
 
-  if (existingRemote) {
-    try {
-      await git.clone({
-        fs,
-        http,
-        dir,
-        url: remote,
-        ref: "main",
-        singleBranch: true,
-        depth: 1,
-        noCheckout: false,
-        onAuth: () => ({ username: "x", password: tokenSecret }),
-      });
-    } catch {
-      await git.init({ fs, dir, defaultBranch: "main" });
-    }
-  } else {
-    await git.init({ fs, dir, defaultBranch: "main" });
+  try {
+    await git.clone({
+      fs,
+      http,
+      dir,
+      url: remote.url,
+      ref: remote.branch,
+      singleBranch: true,
+      depth: 1,
+      noCheckout: false,
+      onAuth: () => auth,
+    });
+  } catch {
+    await git.init({ fs, dir, defaultBranch: remote.branch });
   }
 
   let fileCount = 0;
   for (const change of changes) {
+    const gitPath = gitPathFromVault(remote.subdir, change.path);
+    if (!gitPath) continue;
+
     if (change.deleted) {
       try {
-        await git.remove({ fs, dir, filepath: change.path });
+        await git.remove({ fs, dir, filepath: gitPath });
         fileCount++;
       } catch {
-        // Deleting an already-absent path is idempotent for sealing purposes.
+        // idempotent delete
       }
       continue;
     }
 
     const content = await readFile(change.path);
     if (content === null) continue;
-    await fs.promises.writeFile(`${dir}/${change.path}`, new Uint8Array(content));
-    await git.add({ fs, dir, filepath: change.path });
+    await fs.promises.writeFile(`${dir}/${gitPath}`, new Uint8Array(content));
+    await git.add({ fs, dir, filepath: gitPath });
     fileCount++;
   }
 
   if (fileCount === 0) {
-    return { commitHash: "", repoName: repoName(vaultId), remote, fileCount };
+    return { commitHash: "", repoName: repoName(vaultId), remote: remote.url, fileCount };
   }
 
   const now = new Date();
@@ -183,29 +175,86 @@ export async function sealVault(
     dir,
     message: commitMessage,
     author: {
-      name: "Lapis",
+      name: commitAuthor,
       email: "lapis@seal",
       timestamp: Math.floor(now.getTime() / 1000),
       timezoneOffset: 0,
     },
   });
 
-  await git.push({
-    fs,
-    http,
-    dir,
-    url: remote,
-    ref: "main",
-    onAuth: () => ({ username: "x", password: tokenSecret }),
-  });
+  try {
+    await git.push({
+      fs,
+      http,
+      dir,
+      url: remote.url,
+      ref: remote.branch,
+      onAuth: () => auth,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.toLowerCase().includes("not a fast-forward") || message.includes("non-fast-forward")) {
+      throw Object.assign(new Error("Push rejected: non-fast-forward"), { code: "NON_FAST_FORWARD" });
+    }
+    throw err;
+  }
 
-  return { commitHash, repoName: repoName(vaultId), remote, fileCount };
+  return { commitHash, repoName: repoName(vaultId), remote: remote.url, fileCount };
 }
 
 /**
- * Read the sealed commit log for a vault.
- * Clones the repo (shallow) into MemoryFS with a read token, then reads
- * the local git log. Returns commits newest-first.
+ * Seal the current vault snapshot to Artifacts (legacy wrapper).
+ */
+export async function sealVault(
+  artifacts: Artifacts,
+  vaultId: string,
+  changes: IncrementalSealChange[],
+  existingRemote: string | null,
+  readFile: (path: string) => Promise<ArrayBuffer | null>,
+  label?: string
+): Promise<SealResult & { remote: string }> {
+  const { remote, tokenSecret } = await ensureRepoAndToken(artifacts, vaultId, existingRemote);
+  const artifactsRemote: GitRemote = {
+    provider: "artifacts",
+    url: remote,
+    branch: "main",
+    onAuth: () => ({ username: "x", password: tokenSecret }),
+  };
+  return sealToRemote(artifactsRemote, vaultId, changes, readFile, label);
+}
+
+export async function getRemoteLog(remote: GitRemote, limit = 50): Promise<SealedCommit[]> {
+  const dir = "/log";
+  const fs = new MemoryFS();
+  const auth = remote.onAuth();
+
+  try {
+    await git.clone({
+      fs,
+      http,
+      dir,
+      url: remote.url,
+      ref: remote.branch,
+      singleBranch: true,
+      depth: limit,
+      noCheckout: true,
+      onAuth: () => auth,
+    });
+
+    const commits = await git.log({ fs, dir, ref: remote.branch, depth: limit });
+    return commits.map((c) => ({
+      hash: c.oid,
+      message: c.commit.message.trim(),
+      ts: new Date(c.commit.author.timestamp * 1000).toISOString(),
+      author: c.commit.author.name,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read the sealed commit log for a vault (Artifacts wrapper).
  */
 export async function getVaultLog(
   artifacts: Artifacts,
@@ -254,10 +303,39 @@ export async function getVaultLog(
   }
 }
 
+export async function readFileAtRemoteCommit(
+  remote: GitRemote,
+  commitHash: string,
+  filePath: string
+): Promise<Uint8Array | null> {
+  const dir = "/restore";
+  const fs = new MemoryFS();
+  const auth = remote.onAuth();
+  const gitPath = gitPathFromVault(remote.subdir, filePath);
+
+  try {
+    await git.clone({
+      fs,
+      http,
+      dir,
+      url: remote.url,
+      ref: commitHash,
+      singleBranch: true,
+      depth: 1,
+      noCheckout: false,
+      onAuth: () => auth,
+    });
+
+    const content = await fs.promises.readFile(`${dir}/${gitPath}`);
+    if (content instanceof Uint8Array) return content;
+    return new TextEncoder().encode(content as string);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Read a specific file's content at a sealed commit.
- * Clones the repo at the specific commit ref into MemoryFS and reads the file.
- * Returns null if the file doesn't exist at that commit or clone fails.
+ * Read a specific file's content at a sealed commit (Artifacts wrapper).
  */
 export async function readFileAtCommit(
   artifacts: Artifacts,
