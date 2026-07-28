@@ -6,6 +6,7 @@ Lapis is a self-hosted web app that turns your Obsidian vault into a private, al
 
 > [!NOTE]
 > **Road to v0.1**: Lapis is still under development, so expect some instability. Feature requests and bug reports are welcome!
+> Deployed version at https://lapis.dvenom.in
 
 ## Features
 
