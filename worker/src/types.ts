@@ -16,15 +16,14 @@ export interface Env {
   DB: D1Database;
   KV: KVNamespace;
 
-  // Artifacts — sealed Git history
-  ARTIFACTS: Artifacts;
-
   // Static assets (web SPA)
   ASSETS: Fetcher;
 
   // Secrets
   BETTER_AUTH_SECRET: string;
   BETTER_AUTH_URL: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
   /** Secret used to encrypt GitHub PATs at rest before storing in D1 (Slice 25) */
   GITHUB_PAT_ENCRYPTION_KEY?: string;
 }

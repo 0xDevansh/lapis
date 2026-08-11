@@ -1,6 +1,6 @@
 # Lapis Sync
 
-Lapis Sync connects an Obsidian Local Vault to a self-hosted Lapis Web Vault, using the external Lapis server for auth, sync coordination, search indexing, live notifications, conflict notes, and sealed history.
+Lapis Sync connects an Obsidian Local Vault to a self-hosted Lapis Web Vault. Sync uses Yjs CRDTs over a WebSocket; the Lapis server handles auth, search indexing, presence, and optional GitHub history.
 
 ## Requirements
 

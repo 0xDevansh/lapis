@@ -1,55 +1,83 @@
 @import "tailwindcss";
-@import "@fontsource/inter/400.css";
-@import "@fontsource/inter/500.css";
-@import "@fontsource/inter/600.css";
-@import "@fontsource/inter/700.css";
-@import "@fontsource/jetbrains-mono/400.css";
-@import "@fontsource/jetbrains-mono/500.css";
 
 /* ── Theme palette ───────────────────────────────────────────────────────────
    Semantic CSS variables flip with [data-theme]. `@theme inline` below makes
    Tailwind utilities reference these variables so colors respond to the theme.
-   Dark is the default (Obsidian palette from docs/design.md). */
+   Dark is the default. Accent is lapis blue; hex values live only here. */
 
 :root,
 [data-theme="dark"] {
-  --canvas: #0f0f0f;
-  --secondary: #171717;
-  --surface: #1f1f1f;
-  --elevated: #262626;
-  --hover: #232323;
-  --ink: #eeeeee;
-  --muted: #a3a3a3;
-  --faint: #6b6b6b;
-  --accent: #7c3aed;
-  --accent-soft: #a78bfa;
-  --border: #262626;
-  --border-strong: #333333;
-  --success: #4ade80;
-  --danger: #ef4444;
-  --warning: #d97706;
-  --selection: rgba(124, 58, 237, 0.28);
-  --code-bg: #171717;
+  --canvas: #000000;
+  --secondary: #111820;
+  --surface: #172029;
+  --elevated: #1e2a36;
+  --hover: #1a2430;
+  --ink: #e8eef4;
+  --muted: #8b9aab;
+  --faint: #5c6b7a;
+  /* Atom One Dark–inspired steel blue */
+  --accent: #61afef;
+  --accent-soft: #61afef;
+  --accent-deep: #3d7eb8;
+  --brand-gold: #e5c07b;
+  --on-accent: #1a1d23;
+  --on-success: #052e16;
+  --border: #243040;
+  --border-strong: #334155;
+  --success: #98c379;
+  --danger: #e06c75;
+  --warning: #d19a66;
+  --broken: #c678dd;
+  --selection: color-mix(in srgb, var(--accent) 28%, transparent);
+  --code-bg: #111820;
+  --black: #000000;
+  --shadow: color-mix(in srgb, var(--black) 45%, transparent);
+  --scrim: color-mix(in srgb, var(--black) 50%, transparent);
+  --hero-glow: color-mix(in srgb, var(--accent) 18%, transparent);
+  --syntax-keyword: #c678dd;
+  --syntax-name: #61afef;
+  --syntax-string: #98c379;
+  --syntax-number: #d19a66;
+  --syntax-type: #e5c07b;
+  --syntax-tag: #e06c75;
+  --syntax-attr: #d19a66;
 }
 
 [data-theme="light"] {
-  --canvas: #ffffff;
-  --secondary: #f7f7f8;
-  --surface: #f1f1f3;
-  --elevated: #e9e9ec;
-  --hover: #ececef;
-  --ink: #1a1a1a;
-  --muted: #5c5c66;
-  --faint: #8a8a94;
-  --accent: #7c3aed;
-  --accent-soft: #6d28d9;
-  --border: #e2e2e6;
-  --border-strong: #d2d2d8;
-  --success: #16a34a;
-  --danger: #dc2626;
-  --warning: #b45309;
-  --selection: rgba(124, 58, 237, 0.18);
-  --code-bg: #f1f1f3;
+  --canvas: #fafafa;
+  --secondary: #f0f0f0;
+  --surface: #e8e8e8;
+  --elevated: #dedede;
+  --hover: #e4e4e4;
+  --ink: #383a42;
+  --muted: #696c77;
+  --faint: #a0a1a7;
+  /* Atom One Light blue */
+  --accent: #4078f2;
+  --accent-soft: #4078f2;
+  --accent-deep: #2b5bdb;
+  --brand-gold: #c18401;
+  --on-accent: #ffffff;
+  --on-success: #ffffff;
+  --border: #d0d0d0;
+  --border-strong: #b8b8b8;
+  --success: #50a14f;
+  --danger: #e45649;
+  --warning: #c18401;
+  --broken: #a626a4;
+  --selection: color-mix(in srgb, var(--accent) 18%, transparent);
+  --code-bg: #f0f0f0;
+  --black: #383a42;
+  --shadow: color-mix(in srgb, var(--black) 12%, transparent);
+  --scrim: color-mix(in srgb, var(--black) 40%, transparent);
+  --hero-glow: color-mix(in srgb, var(--accent) 12%, transparent);
+  --syntax-keyword: #a626a4;
+  --syntax-name: #4078f2;
+  --syntax-string: #50a14f;
+  --syntax-number: #986801;
+  --syntax-type: #c18401;
+  --syntax-tag: #e45649;
+  --syntax-attr: #986801;
 }
 
 @theme inline {
@@ -63,13 +91,21 @@
   --color-faint: var(--faint);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
+  --color-accent-deep: var(--accent-deep);
+  --color-brand-gold: var(--brand-gold);
+  --color-on-accent: var(--on-accent);
+  --color-on-success: var(--on-success);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
   --color-success: var(--success);
   --color-danger: var(--danger);
   --color-warning: var(--warning);
+  --color-broken: var(--broken);
+  --color-scrim: var(--scrim);
 
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  --font-sans: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  --font-display: "Host Grotesk Variable", "Inter Variable", "Inter",
     sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace,
     monospace;
@@ -304,8 +340,34 @@ body {
 
 /* ── Markdown body ───────────────────────────────────────────────────────── */
 
+.note-inline-title {
+  margin: 0 0 0.75em;
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
 .markdown-body {
   color: var(--ink);
+}
+
+.markdown-body mark {
+  background: color-mix(in srgb, var(--brand-gold) 35%, transparent);
+  color: inherit;
+  padding: 0.05em 0.15em;
+  border-radius: 2px;
+}
+
+.markdown-body .katex-display {
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.markdown-body input[type="checkbox"] {
+  margin-right: 0.4em;
 }
 
 .markdown-body h1,
@@ -461,8 +523,8 @@ body {
   padding: 1.25rem 0.75rem;
   text-align: center;
   font-size: 0.84rem;
-  color: #d8729e;
-  background: color-mix(in srgb, #d8729e 8%, var(--surface));
+  color: var(--broken);
+  background: color-mix(in srgb, var(--broken) 8%, var(--surface));
 }
 
 /* ── Wikilinks ───────────────────────────────────────────────────────────── */
@@ -477,7 +539,7 @@ body {
 }
 
 .wikilink-broken {
-  color: #d8729e;
+  color: var(--broken);
   text-decoration: underline dotted;
   cursor: pointer;
 }
@@ -573,5 +635,180 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes caretBlink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes syncPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes heroOrbA {
+  0%,
+  100% {
+    transform: translate(12%, -6%) scale(1);
+    opacity: 0.85;
+  }
+  40% {
+    transform: translate(-18%, 14%) scale(1.08);image.png
+    opacity: 1;
+  }
+  70% {
+    transform: translate(8%, 22%) scale(0.96);
+    opacity: 0.9;
+  }
+}
+
+@keyframes heroOrbB {
+  0%,
+  100% {
+    transform: translate(-8%, 10%) scale(1);
+    opacity: 0.7;
+  }
+  45% {
+    transform: translate(22%, -16%) scale(1.12);
+    opacity: 0.95;
+  }
+  75% {
+    transform: translate(-14%, -4%) scale(0.94);
+    opacity: 0.75;
+  }
+}
+
+/* ── Landing page atmosphere ─────────────────────────────────────────────── */
+
+.landing-hero-glow {
+  position: relative;
+  isolation: isolate;
+  background: var(--canvas);
+}
+
+.landing-hero-orbs {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+}
+
+.landing-hero-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(72px);
+  will-change: transform, opacity;
+}
+
+.landing-hero-orb-a {
+  top: 8%;
+  right: -5%;
+  width: min(72vw, 640px);
+  height: min(56vw, 480px);
+  background: var(--hero-glow);
+  animation: heroOrbA 22s ease-in-out infinite;
+}
+
+.landing-hero-orb-b {
+  bottom: -8%;
+  left: -8%;
+  width: min(55vw, 480px);
+  height: min(48vw, 400px);
+  background: color-mix(in srgb, var(--accent-deep) 42%, transparent);
+  animation: heroOrbB 28s ease-in-out infinite;
+}
+
+.landing-caret {
+  animation: caretBlink 1.1s steps(1) infinite;
+}
+
+.landing-sync-line {
+  animation: syncPulse 2.4s ease-in-out infinite;
+}
+
+.landing-header-font {
+  font-family: var(--font-display);
+}
+
+/* YAOS-inspired marketing type: Inter body, Host Grotesk for chrome */
+.landing-display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1.06;
+}
+
+.landing-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.landing-body {
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+
+.landing-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 2.625rem;
+  padding: 0 0.85rem;
+  border-radius: 9px;
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1;
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+    color 0.15s ease, opacity 0.15s ease;
+}
+
+.landing-footer {
+  border-top: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
+  background: color-mix(in srgb, var(--black) 55%, var(--canvas));
+}
+
+.landing-footer-heading {
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1;
+  color: color-mix(in srgb, var(--ink) 72%, var(--muted));
+}
+
+.landing-footer-link {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: color-mix(in srgb, var(--ink) 40%, transparent);
+  transition: color 0.15s ease;
+}
+.landing-footer-link:hover {
+  color: color-mix(in srgb, var(--ink) 80%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-caret,
+  .landing-sync-line,
+  .landing-hero-orb-a,
+  .landing-hero-orb-b {
+    animation: none;
   }
 }

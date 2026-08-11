@@ -13,6 +13,8 @@ import { ArrowLeft, Check, X, DeviceMobile, Copy } from "@phosphor-icons/react";
 import * as api from "../api";
 import { useToast } from "../components/ui/Toast";
 import GitHubRemotePanel from "../components/GitHubRemotePanel";
+import { MembersPanel } from "../components/MembersPanel";
+import McpSettingsPanel from "../components/McpSettingsPanel";
 
 export default function DevicesPage() {
   const { id: vaultId } = useParams<{ id: string }>();
@@ -163,6 +165,12 @@ export default function DevicesPage() {
 
       {vaultId && <GitHubRemotePanel vaultId={vaultId} />}
 
+      {vaultId && (
+        <section className="mb-8 rounded-lg border border-border bg-surface/50 px-4 py-4">
+          <McpSettingsPanel vaultId={vaultId} />
+        </section>
+      )}
+
       {error && (
         <p className="mb-6 rounded border border-danger/30 bg-danger/10 px-4 py-3 text-danger">
           {error}
@@ -199,7 +207,7 @@ export default function DevicesPage() {
                   <td className={td}>
                     <div className="flex flex-wrap gap-1.5">
                       <button
-                        className="flex items-center gap-1 rounded-sm bg-success px-3 py-1.5 text-xs font-semibold text-black transition-opacity hover:opacity-90 disabled:opacity-50"
+                        className="flex items-center gap-1 rounded-sm bg-success px-3 py-1.5 text-xs font-semibold text-on-success transition-opacity hover:opacity-90 disabled:opacity-50"
                         disabled={busy === p.userCode}
                         onClick={() => handleApprove(p.userCode)}
                       >
@@ -285,6 +293,12 @@ export default function DevicesPage() {
           </table>
         )}
       </section>
+
+      {vaultId && (
+        <section className="mt-8 rounded-lg border border-border bg-secondary">
+          <MembersPanel vaultId={vaultId} canManage={vault?.role === "owner"} />
+        </section>
+      )}
     </div>
   );
 }

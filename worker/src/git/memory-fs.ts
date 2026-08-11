@@ -5,7 +5,7 @@
  * Since Cloudflare Workers have no real filesystem, this shim holds
  * files and directories in a Map, keyed by normalized absolute paths.
  *
- * Adapted from the Cloudflare Artifacts isomorphic-git example.
+ * In-memory fs for isomorphic-git in Workers.
  */
 
 type Entry =

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { CubeTransparent, Plus, Vault as VaultIcon, CaretRight } from "@phosphor-icons/react";
+import { Plus, Vault as VaultIcon, CaretRight } from "@phosphor-icons/react";
 import * as api from "../api";
+import { BrandLockup } from "../components/BrandLockup";
 
 interface VaultListPageProps {
   user: api.User;
@@ -43,10 +44,7 @@ export default function VaultListPage({ user, onSignOut }: VaultListPageProps) {
   return (
     <div className="flex min-h-screen flex-col bg-canvas text-ink">
       <header className="flex items-center justify-between border-b border-border bg-secondary px-6 py-3">
-        <div className="flex items-center gap-2">
-          <CubeTransparent size={22} weight="duotone" className="text-accent" />
-          <span className="text-lg font-bold">Lapis</span>
-        </div>
+        <BrandLockup size={22} textClassName="text-lg font-bold tracking-wide" />
         <div className="flex items-center gap-4">
           <span className="text-sm text-muted">{user.email}</span>
           <button
@@ -71,7 +69,7 @@ export default function VaultListPage({ user, onSignOut }: VaultListPageProps) {
             required
           />
           <button
-            className="flex items-center gap-1.5 whitespace-nowrap rounded bg-accent px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-accent-soft disabled:opacity-60"
+            className="flex items-center gap-1.5 whitespace-nowrap rounded bg-accent px-4 py-2 text-sm font-semibold text-on-accent transition-colors hover:bg-accent-soft disabled:opacity-60"
             type="submit"
             disabled={creating}
           >
@@ -100,6 +98,11 @@ export default function VaultListPage({ user, onSignOut }: VaultListPageProps) {
                   <span className="flex items-center gap-3">
                     <VaultIcon size={20} weight="duotone" className="text-accent-soft" />
                     <span className="font-semibold">{vault.name}</span>
+                    {vault.role && vault.role !== "owner" && (
+                      <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase text-muted">
+                        {vault.role}
+                      </span>
+                    )}
                   </span>
                   <span className="flex items-center gap-3">
                     <span className="text-sm text-muted">

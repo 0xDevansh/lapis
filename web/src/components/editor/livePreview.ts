@@ -2,13 +2,13 @@
  * Obsidian-style "Live Preview" decorations for CodeMirror 6.
  *
  * The plugin walks the Lezer markdown syntax tree (plus a regex pass for
- * Obsidian wikilinks/embeds, which Lezer does not parse) and:
+ * Obsidian wikilinks/embeds and TeX, which Lezer does not parse) and:
  *   - hides formatting marks (#, **, _, `, ~~, link brackets/urls) on lines
  *     the cursor is NOT on, while keeping them visible on the active line(s)
  *     so you can edit the raw markdown;
  *   - applies styling marks (heading sizes, bold, italic, code, strike, quote);
- *   - replaces [[wikilink]] / ![[embed]] with clickable widgets when not being
- *     edited.
+ *   - replaces [[wikilink]] / ![[embed]] / $math$ with widgets when not being
+ *     edited (TeX becomes raw source when the cursor is over it).
  */
 import { syntaxTree } from "@codemirror/language";
 import { type Range } from "@codemirror/state";
@@ -20,6 +20,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
+import katex from "katex";
 import { tokenize, resolveVaultPath, resolveWikilink } from "../../markdown/wikilinks";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp"];
@@ -86,6 +87,34 @@ class ImageEmbedWidget extends WidgetType {
   }
 }
 
+class MathWidget extends WidgetType {
+  constructor(
+    readonly tex: string,
+    readonly displayMode: boolean
+  ) {
+    super();
+  }
+  eq(other: MathWidget) {
+    return other.tex === this.tex && other.displayMode === this.displayMode;
+  }
+  toDOM() {
+    const el = document.createElement(this.displayMode ? "div" : "span");
+    el.className = this.displayMode ? "cm-math cm-math-block" : "cm-math";
+    try {
+      katex.render(this.tex, el, {
+        throwOnError: false,
+        displayMode: this.displayMode,
+      });
+    } catch {
+      el.textContent = this.tex;
+    }
+    return el;
+  }
+  ignoreEvent() {
+    return false;
+  }
+}
+
 function isImageTarget(target: string): boolean {
   const ext = target.split(".").pop()?.toLowerCase() ?? "";
   return IMAGE_EXTS.includes(ext);
@@ -99,6 +128,45 @@ const EM = Decoration.mark({ class: "cm-em" });
 const STRIKE = Decoration.mark({ class: "cm-strike" });
 const INLINE_CODE = Decoration.mark({ class: "cm-inline-code" });
 const LINK = Decoration.mark({ class: "cm-link" });
+
+/** Find $...$ / $$...$$ ranges, skipping code spans. */
+function findMathRanges(
+  text: string
+): Array<{ from: number; to: number; tex: string; display: boolean }> {
+  const out: Array<{ from: number; to: number; tex: string; display: boolean }> = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith("```", i)) {
+      const end = text.indexOf("```", i + 3);
+      i = end === -1 ? text.length : end + 3;
+      continue;
+    }
+    if (text[i] === "`") {
+      const end = text.indexOf("`", i + 1);
+      i = end === -1 ? text.length : end + 1;
+      continue;
+    }
+    if (text.startsWith("$$", i)) {
+      const end = text.indexOf("$$", i + 2);
+      if (end !== -1) {
+        out.push({ from: i, to: end + 2, tex: text.slice(i + 2, end), display: true });
+        i = end + 2;
+        continue;
+      }
+    }
+    if (text[i] === "$" && text[i + 1] !== "$") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== "$" && text[j] !== "\n") j++;
+      if (text[j] === "$" && j > i + 1) {
+        out.push({ from: i, to: j + 1, tex: text.slice(i + 1, j), display: false });
+        i = j + 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out;
+}
 
 export function livePreview(config: LivePreviewConfig) {
   return ViewPlugin.fromClass(
@@ -120,8 +188,13 @@ export function livePreview(config: LivePreviewConfig) {
         const { state } = view;
         const deco: Range<Decoration>[] = [];
 
-        // Lines that hold the cursor/selection — reveal raw markdown there.
         const revealed = new Set<number>();
+        const selectionTouches = (from: number, to: number) => {
+          for (const r of state.selection.ranges) {
+            if (r.from <= to && r.to >= from) return true;
+          }
+          return false;
+        };
         for (const r of state.selection.ranges) {
           const a = state.doc.lineAt(r.from).number;
           const b = state.doc.lineAt(r.to).number;
@@ -130,21 +203,34 @@ export function livePreview(config: LivePreviewConfig) {
         const lineRevealed = (pos: number) =>
           revealed.has(state.doc.lineAt(pos).number);
 
-        // Track wikilink ranges so tree marks inside them are skipped.
         const occupied: Array<[number, number]> = [];
         const overlaps = (from: number, to: number) =>
           occupied.some(([a, b]) => from < b && to > a);
 
         for (const { from, to } of view.visibleRanges) {
-          // --- Wikilinks / embeds (regex; Lezer doesn't parse them) ----------
           const text = state.doc.sliceString(from, to);
+
+          for (const m of findMathRanges(text)) {
+            const start = from + m.from;
+            const end = from + m.to;
+            occupied.push([start, end]);
+            if (selectionTouches(start, end) || lineRevealed(start)) continue;
+            deco.push(
+              Decoration.replace({
+                widget: new MathWidget(m.tex.trim(), m.display),
+                block: m.display,
+              }).range(start, end)
+            );
+          }
+
           const re = /(!?)\[\[([^\]]+?)\]\]/g;
           let m: RegExpExecArray | null;
           while ((m = re.exec(text)) !== null) {
             const start = from + m.index;
             const end = start + m[0].length;
+            if (overlaps(start, end)) continue;
             occupied.push([start, end]);
-            if (lineRevealed(start)) continue; // editing this line -> show raw
+            if (lineRevealed(start)) continue;
             const tok = tokenize(m);
             if (tok.isEmbed && isImageTarget(tok.target)) {
               const resolved =
@@ -184,7 +270,6 @@ export function livePreview(config: LivePreviewConfig) {
             }
           }
 
-          // --- Syntax tree pass ---------------------------------------------
           syntaxTree(state).iterate({
             from,
             to,
@@ -194,7 +279,6 @@ export function livePreview(config: LivePreviewConfig) {
               const nTo = node.to;
               if (overlaps(nFrom, nTo)) return;
 
-              // Headings: style the whole line, hide the leading "# " marks.
               const hMatch = /^ATXHeading(\d)$/.exec(name);
               if (hMatch) {
                 const level = Number(hMatch[1]);

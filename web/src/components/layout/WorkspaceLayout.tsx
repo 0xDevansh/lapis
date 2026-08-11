@@ -113,7 +113,7 @@ export default function WorkspaceLayout({
       {/* ── Mobile overlay drawers ── */}
       {isMobile && (leftOpen || rightOpen) && (
         <div
-          className="fixed inset-0 z-30 bg-black/50"
+          className="fixed inset-0 z-30 bg-scrim"
           aria-hidden
           onClick={() => {
             closeLeft();

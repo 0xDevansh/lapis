@@ -9,21 +9,19 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
+import { getMembership } from "../auth/access";
 
 const searchRoutes = new Hono<{ Bindings: Env }>();
 
-// ── Helper: verify vault ownership ───────────────────────────────────────────
+// ── Helper: verify vault membership ──────────────────────────────────────────
 
 async function resolveVault(
   db: D1Database,
   vaultId: string,
   userId: string
 ): Promise<boolean> {
-  const row = await db
-    .prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`)
-    .bind(vaultId, userId)
-    .first<{ id: string }>();
-  return row !== null;
+  const m = await getMembership(db, vaultId, userId);
+  return m !== null;
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────

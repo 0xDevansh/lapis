@@ -6,12 +6,19 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^22.15.17",
     "esbuild": "^0.25.5",
     "obsidian": "latest",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "~3.2.6"
+  },
+  "dependencies": {
+    "lib0": "^0.2.117",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32"
   }
 }

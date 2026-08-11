@@ -5,32 +5,28 @@ import {
   type VaultManifest,
   contentKey,
   emptyManifest,
-  hasCaseDuplicate,
-  isAncestorPath,
   manifestKey,
 } from "./manifest";
 import { isValidVaultPath, isVaultInternal } from "./path";
-import { applyPatch, merge3 } from "./patch";
 import { indexFile, removeFromIndex } from "../search/indexer";
 import {
-  getVaultLog,
+  getRemoteLog,
   sealToRemote,
   type IncrementalSealChange,
   type SealedCommit,
-} from "../artifacts/sealer";
+} from "../git/sealer";
 import { conflictNotePath, renderConflictNote, type ConflictContext } from "./conflict";
-import type { ConflictPolicy } from "../devices/types";
-import { ArtifactsRemote } from "../git/artifacts-remote";
 import { createGitHubRemote } from "../git/github-remote";
 import { getGitRemote, updateGitRemoteState } from "../git/store";
 import { reconcileInbound } from "../git/reconcile";
+import { YjsRoom } from "./yjs-room";
+import { setBinaryMeta, getTextContent, getVaultMaps, listActiveFiles, setTextFile, renameFile as yjsRenameFile, softDeleteFile as yjsSoftDelete } from "./yjs/schema";
 
 export interface VaultMeta {
   id: string;
   ownerId: string;
   name: string;
   createdAt: string;
-  artifactsRemote?: string | null;
 }
 
 type VaultMetaRow = Record<string, SqlStorageValue> & {
@@ -38,7 +34,6 @@ type VaultMetaRow = Record<string, SqlStorageValue> & {
   ownerId: SqlStorageValue;
   name: SqlStorageValue;
   createdAt: SqlStorageValue;
-  artifactsRemote: SqlStorageValue;
 };
 
 type ManifestEntryRow = Record<string, SqlStorageValue> & {
@@ -118,18 +113,31 @@ type AttachedWebSocket = WebSocket & {
   deserializeAttachment(): PresenceEntry | undefined;
 };
 
-const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
 const DEFAULT_SEAL_INTERVAL_MS = 5 * 60_000;
-const DEFAULT_FLUSH_MAX_PENDING = 250;
 
 export class VaultCoordinator extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   private readonly presence = new Map<WebSocket, PresenceEntry>();
-  private readonly headContent = new Map<string, string>();
+  private readonly yjs: YjsRoom;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.yjs = new YjsRoom(
+      this.sql,
+      () => this.ctx.getWebSockets("yjs"),
+      async (at) => {
+        const existing = await this.ctx.storage.getAlarm();
+        if (existing === null || existing > at) {
+          await this.ctx.storage.setAlarm(at);
+        }
+      }
+    );
+    this.yjs.setDebounceHandler(() => {
+      void this.reindexFromYjs();
+      this.markYjsDirtyForSeal();
+      void this.armAlarm();
+    });
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS vault_meta (
         id                TEXT PRIMARY KEY,
@@ -189,13 +197,11 @@ export class VaultCoordinator extends DurableObject<Env> {
       meta.createdAt
     );
     await this.ensureManifestLoaded(meta.id);
-    await this.ensureSealScheduled();
   }
 
   async getMeta(): Promise<VaultMeta | null> {
     const row = this.sql.exec<VaultMetaRow>(
-      `SELECT id, owner_id AS ownerId, name, created_at AS createdAt,
-              artifacts_remote AS artifactsRemote
+      `SELECT id, owner_id AS ownerId, name, created_at AS createdAt
        FROM vault_meta LIMIT 1`
     ).toArray()[0];
     if (!row) return null;
@@ -204,40 +210,49 @@ export class VaultCoordinator extends DurableObject<Env> {
       ownerId: String(row.ownerId),
       name: String(row.name),
       createdAt: String(row.createdAt),
-      artifactsRemote: row.artifactsRemote != null ? String(row.artifactsRemote) : null,
     };
   }
 
-  setArtifactsRemote(remote: string): void {
-    this.sql.exec(
-      `UPDATE vault_meta SET artifacts_remote = ? WHERE id = (SELECT id FROM vault_meta LIMIT 1)`,
-      remote
-    );
-  }
-
   async getManifest(vaultId: string): Promise<VaultManifest> {
-    await this.ensureManifestLoaded(vaultId);
-    return this.manifestFromSql(vaultId);
+    await this.ensureYjsMigrated(vaultId);
+    const files = this.yjs.manifest();
+    const now = new Date().toISOString();
+    const entries: Record<string, ManifestEntry> = {};
+    for (const f of files) {
+      entries[f.path.toLowerCase()] = {
+        path: f.path,
+        size: f.size,
+        contentType: f.contentType,
+        updatedAt: now,
+        revision: 1,
+        r2Key: f.r2Key ?? contentKey(vaultId, f.path),
+      };
+    }
+    return { vaultId, updatedAt: now, entries };
   }
 
   async getContent(vaultId: string, path: string): Promise<VaultContentResult | null> {
-    await this.ensureManifestLoaded(vaultId);
-    const entry = this.getEntry(path);
-    if (!entry) return null;
-    if (this.hasPendingDelete(path)) return null;
+    await this.ensureYjsMigrated(vaultId);
+    const doc = this.yjs.getDoc();
+    const { paths } = getVaultMaps(doc);
+    const fileId = paths.get(path.toLowerCase());
+    if (!fileId) return null;
 
-    if (isTextContentType(entry.contentType)) {
-      const text = await this.headText(vaultId, entry.path);
+    const active = listActiveFiles(doc).find((f) => f.fileId === fileId);
+    if (!active) return null;
+
+    if (active.kind === "text") {
+      const text = getTextContent(doc, fileId) ?? "";
       const bytes = new TextEncoder().encode(text).buffer as ArrayBuffer;
-      return { path: entry.path, contentType: entry.contentType, revision: entry.revision, bytes };
+      return { path: active.path, contentType: active.contentType, revision: 1, bytes };
     }
 
-    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, entry.path));
+    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, active.path));
     if (!obj) return null;
     return {
-      path: entry.path,
-      contentType: obj.httpMetadata?.contentType ?? entry.contentType,
-      revision: entry.revision,
+      path: active.path,
+      contentType: obj.httpMetadata?.contentType ?? active.contentType,
+      revision: 1,
       bytes: await obj.arrayBuffer(),
     };
   }
@@ -254,7 +269,7 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   async putFile(vaultId: string, path: string, body: ArrayBuffer, contentType: string): Promise<ManifestEntry> {
-    return this.applyPut(vaultId, path, body, contentType, undefined, "web");
+    return this.applyPut(vaultId, path, body, contentType);
   }
 
   async syncPutFile(
@@ -262,128 +277,63 @@ export class VaultCoordinator extends DurableObject<Env> {
     path: string,
     body: ArrayBuffer,
     contentType: string,
-    baseRevision?: number,
-    author = "device",
-    conflictPolicy: ConflictPolicy = "rebase"
+    author = "device"
   ): Promise<WriteResult> {
-    return this.applyPut(vaultId, path, body, contentType, baseRevision, author, conflictPolicy);
+    return this.applyPut(vaultId, path, body, contentType, author);
   }
 
-  async syncApplyPatch(
-    vaultId: string,
-    path: string,
-    patch: string,
-    baseRevision: number,
-    author = "device",
-    conflictPolicy: ConflictPolicy = "rebase"
-  ): Promise<WriteResult> {
-    if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
-    if (isVaultInternal(path)) throw Object.assign(new Error("Cannot write to vault internals"), { status: 400 });
-
-    await this.ensureManifestLoaded(vaultId);
-    const entry = this.getEntry(path);
-    if (!entry) throw Object.assign(new Error("File not found"), { status: 404 });
-
-    if (baseRevision === entry.revision) {
-      const original = await this.headText(vaultId, entry.path);
-      const patched = applyPatch(original, patch);
-      if (patched === null) throw Object.assign(new Error("Patch does not apply cleanly"), { status: 422 });
-      return this.commitTextHead(vaultId, entry, patched, baseRevision, author, patch);
+  async renameFile(vaultId: string, oldPath: string, newPath: string, _author = "web"): Promise<ManifestEntry> {
+    await this.ensureYjsMigrated(vaultId);
+    if (!isValidVaultPath(oldPath) || !isValidVaultPath(newPath)) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
+    if (isVaultInternal(newPath)) {
+      throw Object.assign(new Error("Cannot move to vault internals"), { status: 400 });
+    }
+    if (oldPath === newPath) {
+      throw Object.assign(new Error("Source and destination are the same"), { status: 400 });
     }
 
-    const baseText = await this.resolveBaseText(vaultId, path, entry, baseRevision);
-    const resolvedBase = baseText ?? (await this.headText(vaultId, entry.path));
-    const theirs = applyPatch(resolvedBase, patch);
-    if (theirs === null) {
-      return this.recordTextConflict(vaultId, path, entry, baseRevision, resolvedBase, author, conflictPolicy, undefined, patch);
-    }
-    return this.handleStaleTextWrite(vaultId, path, entry, baseRevision, theirs, author, conflictPolicy, resolvedBase);
-  }
-
-  async renameFile(vaultId: string, oldPath: string, newPath: string, author = "web"): Promise<ManifestEntry> {
-    await this.ensureManifestLoaded(vaultId);
-    if (!isValidVaultPath(oldPath) || !isValidVaultPath(newPath)) throw Object.assign(new Error("Invalid path"), { status: 400 });
-    if (isVaultInternal(newPath)) throw Object.assign(new Error("Cannot move to vault internals"), { status: 400 });
-    if (oldPath === newPath) throw Object.assign(new Error("Source and destination are the same"), { status: 400 });
-    if (isAncestorPath(oldPath, newPath)) throw Object.assign(new Error("Cannot move a folder into itself"), { status: 400 });
-
-    const oldEntry = this.getEntry(oldPath);
-    if (!oldEntry) throw Object.assign(new Error("Source not found"), { status: 404 });
-    if (hasCaseDuplicate(await this.getManifest(vaultId), newPath, oldPath)) {
-      throw Object.assign(new Error("Case conflict at destination"), { status: 409 });
+    const doc = this.yjs.getDoc();
+    const { paths } = getVaultMaps(doc);
+    const fileId = paths.get(oldPath.toLowerCase());
+    if (!fileId) throw Object.assign(new Error("Source not found"), { status: 404 });
+    if (paths.get(newPath.toLowerCase())) {
+      throw Object.assign(new Error("Destination exists"), { status: 409 });
     }
 
-    // Fold any existing text changes first so the deferred rename has a stable R2 source.
-    await this.flushPathToR2(vaultId, oldEntry.path);
+    yjsRenameFile(doc, fileId, newPath);
 
-    const next: ManifestEntry = {
-      ...oldEntry,
-      path: newPath,
-      r2Key: contentKey(vaultId, newPath),
-      updatedAt: new Date().toISOString(),
-      revision: oldEntry.revision + 1,
-    };
-    this.deleteEntry(oldEntry.path);
-    this.upsertEntry(next, oldEntry.revision);
-    this.headContent.delete(lowerPath(oldEntry.path));
-    this.appendPending({
-      path: newPath,
-      kind: "rename",
-      oldPath: oldEntry.path,
-      newPath,
-      contentType: next.contentType,
-      baseRevision: oldEntry.revision,
-      newRevision: next.revision,
-      author,
-    });
-    this.markDirty(oldEntry.path, true);
+    const files = this.yjs.manifest();
+    const f = files.find((x) => x.fileId === fileId);
     this.markDirty(newPath, false);
-    await this.scheduleFlush();
-    this.broadcast({
-      type: "change",
-      path: oldEntry.path,
-      kind: "rename",
-      baseRevision: oldEntry.revision,
-      revision: next.revision,
-      newPath,
-      author,
-      ts: next.updatedAt,
-    });
-    return next;
+    await this.ensureSealScheduled();
+    await this.armAlarm();
+    return {
+      path: newPath,
+      r2Key: f?.r2Key ?? contentKey(vaultId, newPath),
+      size: f?.size ?? 0,
+      contentType: f?.contentType ?? "text/plain",
+      updatedAt: new Date().toISOString(),
+      revision: 1,
+    };
   }
 
   async syncRenameFile(vaultId: string, oldPath: string, newPath: string, author = "device"): Promise<ManifestEntry> {
     return this.renameFile(vaultId, oldPath, newPath, author);
   }
 
-  async deleteFile(vaultId: string, path: string, author = "web"): Promise<void> {
-    await this.ensureManifestLoaded(vaultId);
+  async deleteFile(vaultId: string, path: string, _author = "web"): Promise<void> {
+    await this.ensureYjsMigrated(vaultId);
     if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
-
-    const entry = this.getEntry(path);
-    if (!entry) return;
-    await this.flushPathToR2(vaultId, entry.path);
-
-    this.deleteEntry(entry.path);
-    this.headContent.delete(lowerPath(entry.path));
-    this.appendPending({
-      path: entry.path,
-      kind: "delete",
-      contentType: entry.contentType,
-      baseRevision: entry.revision,
-      newRevision: entry.revision + 1,
-      author,
-    });
-    this.markDirty(entry.path, true);
-    await this.scheduleFlush();
-    this.broadcast({
-      type: "change",
-      path: entry.path,
-      kind: "delete",
-      baseRevision: entry.revision,
-      author,
-      ts: new Date().toISOString(),
-    });
+    const doc = this.yjs.getDoc();
+    const { paths } = getVaultMaps(doc);
+    const fileId = paths.get(path.toLowerCase());
+    if (!fileId) return;
+    yjsSoftDelete(doc, fileId);
+    this.markDirty(path, true);
+    await this.ensureSealScheduled();
+    await this.armAlarm();
   }
 
   async syncDeleteFile(vaultId: string, path: string, author = "device"): Promise<void> {
@@ -394,7 +344,7 @@ export class VaultCoordinator extends DurableObject<Env> {
     const meta = vaultId ? null : await this.getMeta();
     const id = vaultId ?? meta?.id;
     if (!id) return;
-    await this.ensureManifestLoaded(id);
+    await this.ensureYjsMigrated(id);
 
     const rows = this.sql.exec<PendingOpRow>(pendingSelect(`ORDER BY seq`)).toArray();
     if (rows.length === 0) {
@@ -429,30 +379,9 @@ export class VaultCoordinator extends DurableObject<Env> {
           removeFromIndex(this.env.DB, id, oldPath).catch(() => {});
         }
       }
-
-      const entry = this.getEntry(path);
-      if (!entry) continue;
-      if (isTextContentType(entry.contentType)) {
-        const text = await this.headText(id, entry.path);
-        const bytes = new TextEncoder().encode(text);
-        await this.env.VAULT_BUCKET.put(contentKey(id, entry.path), bytes, {
-          httpMetadata: { contentType: entry.contentType },
-        });
-        this.setR2Revision(entry.path, entry.revision);
-        const manifest = this.manifestFromSql(id);
-        indexFile(this.env.DB, {
-          vaultId: id,
-          path: entry.path,
-          content: text,
-          vaultPaths: Object.values(manifest.entries).map((item) => item.path),
-        }).catch(() => {});
-      } else {
-        this.setR2Revision(entry.path, entry.revision);
-      }
     }
 
     this.sql.exec(`DELETE FROM pending_ops`);
-    this.headContent.clear();
     await this.writeManifestToR2(id);
     await this.clearState("flush_deadline");
   }
@@ -463,111 +392,95 @@ export class VaultCoordinator extends DurableObject<Env> {
     await this.flushToR2(meta.id);
 
     const gitConfig = await getGitRemote(this.env.DB, meta.id);
-    if (gitConfig && this.env.GITHUB_PAT_ENCRYPTION_KEY) {
-      try {
-        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "pulling" });
-        const remote = await createGitHubRemote(
-          {
-            repoUrl: gitConfig.repoUrl,
-            branch: gitConfig.branch,
-            subdir: gitConfig.subdir,
-            patCiphertext: gitConfig.patCiphertext,
-          },
-          this.env.GITHUB_PAT_ENCRYPTION_KEY
-        );
-        const inbound = await reconcileInbound({
-          remote,
-          vaultId: meta.id,
-          lastSyncedCommit: gitConfig.lastSyncedCommit,
-          getHeadText: (path) => this.headText(meta.id, path),
-          getEntry: (path) => this.getEntry(path),
-          applyMerged: async (path, content, author) => {
-            const entry = this.getEntry(path);
-            if (!entry) {
-              return this.applyPut(
-                meta.id,
-                path,
-                new TextEncoder().encode(content).buffer as ArrayBuffer,
-                "text/markdown",
-                undefined,
-                author
-              );
-            }
-            return this.commitTextHead(meta.id, entry, content, entry.revision, author);
-          },
-          writeConflictNote: (ctx, author) => this.writeConflictNote(meta.id, ctx, author),
-        });
-        for (const change of inbound.applied) {
-          this.broadcast(change);
-        }
-        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "pushing" });
-      } catch (err) {
-        console.error(`[lapis] Git inbound sync failed for vault ${meta.id}:`, err);
-        await updateGitRemoteState(this.env.DB, meta.id, { syncState: "conflict" });
+    if (!gitConfig || !this.env.GITHUB_PAT_ENCRYPTION_KEY) {
+      // No GitHub remote — nothing to seal. Drop dirty markers so we don't keep retrying.
+      this.sql.exec(`DELETE FROM seal_dirty`);
+      await this.clearState("seal_deadline");
+      await this.armAlarm();
+      return { fileCount: 0 };
+    }
+
+    try {
+      await updateGitRemoteState(this.env.DB, meta.id, { syncState: "pulling" });
+      const remote = await createGitHubRemote(
+        {
+          repoUrl: gitConfig.repoUrl,
+          branch: gitConfig.branch,
+          subdir: gitConfig.subdir,
+          patCiphertext: gitConfig.patCiphertext,
+        },
+        this.env.GITHUB_PAT_ENCRYPTION_KEY
+      );
+      const inbound = await reconcileInbound({
+        remote,
+        vaultId: meta.id,
+        lastSyncedCommit: gitConfig.lastSyncedCommit,
+        getHeadText: (path) => this.headText(meta.id, path),
+        getEntry: (path) => this.getEntry(path),
+        applyMerged: async (path, content, author) =>
+          this.applyPut(
+            meta.id,
+            path,
+            new TextEncoder().encode(content).buffer as ArrayBuffer,
+            "text/markdown",
+            author
+          ),
+        writeConflictNote: (ctx, author) => this.writeConflictNote(meta.id, ctx, author),
+      });
+      for (const change of inbound.applied) {
+        this.broadcast(change);
       }
+      await updateGitRemoteState(this.env.DB, meta.id, { syncState: "pushing" });
+    } catch (err) {
+      console.error(`[lapis] Git inbound sync failed for vault ${meta.id}:`, err);
+      await updateGitRemoteState(this.env.DB, meta.id, { syncState: "conflict" });
     }
 
     const changes = this.dirtyChanges();
     if (changes.length === 0) {
-      const remoteUrl = gitConfig?.repoUrl ?? meta.artifactsRemote;
-      if (remoteUrl) await this.scheduleNextSeal();
-      return { fileCount: 0, remote: remoteUrl ?? undefined };
+      await this.clearState("seal_deadline");
+      await this.armAlarm();
+      return { fileCount: 0, remote: gitConfig.repoUrl };
     }
 
     try {
-      let result: { commitHash: string; remote: string; fileCount: number };
-      if (gitConfig && this.env.GITHUB_PAT_ENCRYPTION_KEY) {
-        const remote = await createGitHubRemote(
-          {
-            repoUrl: gitConfig.repoUrl,
-            branch: gitConfig.branch,
-            subdir: gitConfig.subdir,
-            patCiphertext: gitConfig.patCiphertext,
-          },
-          this.env.GITHUB_PAT_ENCRYPTION_KEY
-        );
-        result = await sealToRemote(
-          remote,
-          meta.id,
-          changes,
-          async (path) => {
-            const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
-            return obj ? obj.arrayBuffer() : null;
-          },
-          label
-        );
-        await updateGitRemoteState(this.env.DB, meta.id, {
-          syncState: "idle",
-          lastSyncedCommit: result.commitHash || gitConfig.lastSyncedCommit,
-          lastSyncedAt: new Date().toISOString(),
-        });
-      } else if (meta.artifactsRemote || changes.length > 0) {
-        const artifactsRemote = await ArtifactsRemote.create(this.env.ARTIFACTS, meta.id, meta.artifactsRemote ?? null);
-        result = await sealToRemote(
-          artifactsRemote,
-          meta.id,
-          changes,
-          async (path) => {
-            const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
-            return obj ? obj.arrayBuffer() : null;
-          },
-          label
-        );
-        if (!meta.artifactsRemote || meta.artifactsRemote !== result.remote) {
-          this.setArtifactsRemote(result.remote);
-        }
-      } else {
-        await this.scheduleNextSeal();
-        return { fileCount: 0 };
-      }
+      const remote = await createGitHubRemote(
+        {
+          repoUrl: gitConfig.repoUrl,
+          branch: gitConfig.branch,
+          subdir: gitConfig.subdir,
+          patCiphertext: gitConfig.patCiphertext,
+        },
+        this.env.GITHUB_PAT_ENCRYPTION_KEY
+      );
+      const result = await sealToRemote(
+        remote,
+        meta.id,
+        changes,
+        async (path) => {
+          const content = await this.getContent(meta.id, path);
+          return content ? content.bytes : null;
+        },
+        label
+      );
+      await updateGitRemoteState(this.env.DB, meta.id, {
+        syncState: "idle",
+        lastSyncedCommit: result.commitHash || gitConfig.lastSyncedCommit,
+        lastSyncedAt: new Date().toISOString(),
+      });
 
       this.sql.exec(`DELETE FROM seal_dirty`);
       await this.setState("last_seal_at", String(Date.now()));
-      await this.scheduleNextSeal();
+      if (this.dirtyChanges().length > 0) {
+        await this.scheduleNextSeal();
+      } else {
+        await this.clearState("seal_deadline");
+        await this.armAlarm();
+      }
       return result;
     } catch (err: unknown) {
       const code = (err as { code?: string }).code;
-      if (code === "NON_FAST_FORWARD" && gitConfig) {
+      if (code === "NON_FAST_FORWARD") {
         await updateGitRemoteState(this.env.DB, meta.id, { syncState: "conflict" });
       }
       throw err;
@@ -575,6 +488,8 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    this.yjs.maybeRunDebounced();
+
     const meta = await this.getMeta();
     if (!meta) return;
 
@@ -587,13 +502,25 @@ export class VaultCoordinator extends DurableObject<Env> {
     }
 
     if (sealDeadline !== null && sealDeadline <= now) {
-      try {
-        const result = await this.sealNow();
-        console.log(`[lapis] Sealed vault ${meta.id}: ${result.commitHash ?? "no changes"} (${result.fileCount} files)`);
-      } catch (err) {
-        const e = err as Error;
-        console.error(`[lapis] Seal failed for vault ${meta.id}: ${e?.message ?? err}`, e?.stack ?? "");
-        await this.scheduleNextSeal();
+      const dirty = this.dirtyChanges();
+      if (dirty.length === 0) {
+        await this.clearState("seal_deadline");
+      } else {
+        try {
+          const result = await this.sealNow();
+          if (result.fileCount > 0 && result.commitHash) {
+            console.log(
+              `[lapis] Sealed vault ${meta.id}: ${result.commitHash} (${result.fileCount} files)`
+            );
+          }
+        } catch (err) {
+          const e = err as Error;
+          console.error(
+            `[lapis] Seal failed for vault ${meta.id}: ${e?.message ?? err}`,
+            e?.stack ?? ""
+          );
+          await this.scheduleNextSeal();
+        }
       }
     }
 
@@ -603,7 +530,22 @@ export class VaultCoordinator extends DurableObject<Env> {
   async getLog(limit = 50): Promise<SealedCommit[]> {
     const meta = await this.getMeta();
     if (!meta) return [];
-    return getVaultLog(this.env.ARTIFACTS, meta.id, meta.artifactsRemote ?? null, limit);
+    const gitConfig = await getGitRemote(this.env.DB, meta.id);
+    if (!gitConfig || !this.env.GITHUB_PAT_ENCRYPTION_KEY) return [];
+    try {
+      const remote = await createGitHubRemote(
+        {
+          repoUrl: gitConfig.repoUrl,
+          branch: gitConfig.branch,
+          subdir: gitConfig.subdir,
+          patCiphertext: gitConfig.patCiphertext,
+        },
+        this.env.GITHUB_PAT_ENCRYPTION_KEY
+      );
+      return getRemoteLog(remote, limit);
+    } catch {
+      return [];
+    }
   }
 
   broadcast(message: ServerMessage): void {
@@ -618,7 +560,12 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
-    if (typeof message !== "string") return;
+    // Yjs binary frames
+    if (typeof message !== "string") {
+      this.yjs.handleMessage(ws, message);
+      return;
+    }
+
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(message) as Record<string, unknown>;
@@ -675,11 +622,23 @@ export class VaultCoordinator extends DurableObject<Env> {
       await this.initialize(body);
       return new Response("OK");
     }
+    if (url.pathname === "/yjs" && request.method === "GET") {
+      if (request.headers.get("Upgrade") !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+      const canWrite = url.searchParams.get("write") === "1";
+      const vaultId = url.searchParams.get("vaultId");
+      if (vaultId) await this.ensureYjsMigrated(vaultId);
+      const { 0: client, 1: server } = new WebSocketPair();
+      this.ctx.acceptWebSocket(server, ["yjs"]);
+      this.yjs.acceptClient(server, canWrite);
+      return new Response(null, { status: 101, webSocket: client });
+    }
     if (url.pathname === "/ws" && request.method === "GET") {
       if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected WebSocket upgrade", { status: 426 });
       const identity = url.searchParams.get("identity") ?? "unknown";
       const { 0: client, 1: server } = new WebSocketPair();
-      this.ctx.acceptWebSocket(server);
+      this.ctx.acceptWebSocket(server, ["presence"]);
       this.setPresence(server, { identity, openPath: null });
       server.send(JSON.stringify(this.presenceSnapshot()));
       this.broadcast(this.presenceSnapshot());
@@ -688,81 +647,141 @@ export class VaultCoordinator extends DurableObject<Env> {
     return new Response("Not found", { status: 404 });
   }
 
+  /** One-shot: load legacy R2 text into Y.Doc when storage_version < 2. */
+  async ensureYjsMigrated(vaultId: string): Promise<void> {
+    const version = this.stringState("storage_version");
+    if (version === "2") {
+      this.yjs.ensureDoc();
+      return;
+    }
+
+    this.yjs.ensureDoc();
+    const doc = this.yjs.getDoc();
+    if (listActiveFiles(doc).length > 0) {
+      await this.setState("storage_version", "2");
+      return;
+    }
+
+    // Migrate from R2 manifest if present
+    await this.ensureManifestLoaded(vaultId);
+    const manifest = this.manifestFromSql(vaultId);
+    for (const entry of Object.values(manifest.entries)) {
+      if (isVaultInternal(entry.path)) continue;
+      if (isTextContentType(entry.contentType)) {
+        const obj = await this.env.VAULT_BUCKET.get(entry.r2Key);
+        if (!obj) continue;
+        const text = await obj.text();
+        setTextFile(doc, {
+          path: entry.path,
+          content: text,
+          contentType: entry.contentType,
+        });
+      } else {
+        setBinaryMeta(doc, {
+          path: entry.path,
+          r2Key: entry.r2Key,
+          hash: "",
+          size: entry.size,
+          contentType: entry.contentType,
+        });
+      }
+    }
+    this.yjs.compact();
+    await this.setState("storage_version", "2");
+  }
+
+  private async reindexFromYjs(): Promise<void> {
+    const meta = await this.getMeta();
+    if (!meta) return;
+    const doc = this.yjs.getDoc();
+    const files = listActiveFiles(doc);
+    const vaultPaths = files.map((f) => f.path);
+    for (const file of files) {
+      if (isVaultInternal(file.path)) continue;
+      if (file.kind === "text") {
+        const text = getTextContent(doc, file.fileId) ?? "";
+        await indexFile(this.env.DB, {
+          vaultId: meta.id,
+          path: file.path,
+          content: text,
+          vaultPaths,
+        });
+      }
+    }
+  }
+
+  private stringState(key: string): string | null {
+    const row = this.sql
+      .exec<{ value: SqlStorageValue }>(`SELECT value FROM do_state WHERE key = ?`, key)
+      .toArray()[0];
+    return row ? String(row.value) : null;
+  }
+
   private async applyPut(
     vaultId: string,
     path: string,
     body: ArrayBuffer,
     contentType: string,
-    baseRevision: number | undefined,
-    author: string,
-    conflictPolicy: ConflictPolicy = "rebase"
+    author = "web"
   ): Promise<WriteResult> {
     if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
     if (isVaultInternal(path)) throw Object.assign(new Error("Cannot write to vault internals"), { status: 400 });
-    await this.ensureManifestLoaded(vaultId);
 
-    const existing = this.getEntry(path);
-    if (existing && baseRevision !== undefined && baseRevision !== existing.revision) {
-      if (!isTextContentType(contentType)) {
-        return this.recordBinaryConflict(vaultId, path, existing, baseRevision, author);
-      }
-      const modified = new TextDecoder().decode(body);
-      const baseText = await this.resolveBaseText(vaultId, path, existing, baseRevision);
-      const resolvedBase = baseText ?? (await this.headText(vaultId, existing.path));
-      return this.handleStaleTextWrite(vaultId, path, existing, baseRevision, modified, author, conflictPolicy, resolvedBase);
-    }
-
-    if (hasCaseDuplicate(await this.getManifest(vaultId), path)) {
-      throw Object.assign(new Error("Case conflict: a file with a similar name already exists"), { status: 409 });
-    }
-
+    await this.ensureYjsMigrated(vaultId);
+    const doc = this.yjs.getDoc();
     const now = new Date().toISOString();
-    const previousRevision = existing?.revision ?? 0;
-    const nextRevision = previousRevision + 1;
-    const entry: ManifestEntry = {
+
+    if (isTextContentType(contentType)) {
+      const modified = new TextDecoder().decode(body);
+      const { paths } = getVaultMaps(doc);
+      const existingId = paths.get(path.toLowerCase());
+      setTextFile(doc, {
+        fileId: existingId,
+        path,
+        content: modified,
+        contentType,
+      });
+      const bytes = new TextEncoder().encode(modified).byteLength;
+      const entry: WriteResult = {
+        path,
+        r2Key: contentKey(vaultId, path),
+        size: bytes,
+        contentType,
+        updatedAt: now,
+        revision: 1,
+      };
+      this.markDirty(path, false);
+      await this.ensureSealScheduled();
+      await this.armAlarm();
+      return entry;
+    }
+
+    await this.env.VAULT_BUCKET.put(contentKey(vaultId, path), body, {
+      httpMetadata: { contentType },
+    });
+    const { paths } = getVaultMaps(doc);
+    const existingId = paths.get(path.toLowerCase());
+    const hashBuf = await crypto.subtle.digest("SHA-256", body);
+    const hash = [...new Uint8Array(hashBuf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    setBinaryMeta(doc, {
+      fileId: existingId,
+      path,
+      r2Key: contentKey(vaultId, path),
+      hash,
+      size: body.byteLength,
+      contentType,
+    });
+    const entry: WriteResult = {
       path,
       r2Key: contentKey(vaultId, path),
       size: body.byteLength,
       contentType,
       updatedAt: now,
-      revision: nextRevision,
+      revision: 1,
     };
-
-    if (!isTextContentType(contentType)) {
-      await this.env.VAULT_BUCKET.put(contentKey(vaultId, path), body, { httpMetadata: { contentType } });
-      this.upsertEntry(entry, nextRevision);
-      this.markDirty(path, false);
-      await this.scheduleFlush();
-      this.broadcast({ type: "change", path, kind: "put", baseRevision: previousRevision, revision: nextRevision, author, ts: now });
-      return entry;
-    }
-
-    const original = existing ? await this.headText(vaultId, existing.path) : "";
-    const modified = new TextDecoder().decode(body);
-    const patch = createLinePatch(path, original, modified);
-    this.upsertEntry(entry, existing?.r2Revision ?? 0);
-    this.headContent.set(lowerPath(path), modified);
-    this.appendPending({
-      path,
-      kind: existing ? "patch" : "put",
-      patch,
-      contentType,
-      baseRevision: existing ? previousRevision : 0,
-      newRevision: nextRevision,
-      author,
-    });
     this.markDirty(path, false);
-    await this.scheduleFlush();
-    this.broadcast({
-      type: "change",
-      path,
-      kind: "put",
-      baseRevision: existing ? previousRevision : 0,
-      revision: nextRevision,
-      patch,
-      author,
-      ts: now,
-    });
+    await this.ensureSealScheduled();
+    await this.armAlarm();
     return entry;
   }
 
@@ -791,6 +810,21 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   private getEntry(path: string): (ManifestEntry & { r2Revision: number }) | null {
+    this.yjs.ensureDoc();
+    const vaultId = this.metaVaultId();
+    const file = this.yjs.manifest().find((f) => f.path.toLowerCase() === lowerPath(path));
+    if (file) {
+      return {
+        path: file.path,
+        r2Key: file.r2Key ?? contentKey(vaultId, file.path),
+        size: file.size,
+        contentType: file.contentType,
+        updatedAt: new Date().toISOString(),
+        revision: 1,
+        r2Revision: 1,
+      };
+    }
+
     const row = this.sql.exec<ManifestEntryRow>(
       `SELECT path_lower AS pathLower, path, size, content_type AS contentType,
               updated_at AS updatedAt, revision, r2_revision AS r2Revision
@@ -815,110 +849,13 @@ export class VaultCoordinator extends DurableObject<Env> {
     );
   }
 
-  private deleteEntry(path: string): void {
-    this.sql.exec(`DELETE FROM manifest_entries WHERE path_lower = ?`, lowerPath(path));
-  }
-
-  private bumpEntry(path: string, size: number, contentType: string): ManifestEntry {
-    const existing = this.getEntry(path);
-    if (!existing) throw Object.assign(new Error("File not found"), { status: 404 });
-    const entry: ManifestEntry = {
-      path: existing.path,
-      r2Key: existing.r2Key,
-      size,
-      contentType,
-      updatedAt: new Date().toISOString(),
-      revision: existing.revision + 1,
-    };
-    this.upsertEntry(entry, existing.r2Revision);
-    return entry;
-  }
-
-  private setR2Revision(path: string, revision: number): void {
-    this.sql.exec(`UPDATE manifest_entries SET r2_revision = ? WHERE path_lower = ?`, revision, lowerPath(path));
-  }
-
-  private appendPending(input: {
-    path: string;
-    kind: "put" | "patch" | "rename" | "delete";
-    oldPath?: string;
-    newPath?: string;
-    patch?: string;
-    contentType?: string;
-    baseRevision?: number;
-    newRevision?: number;
-    author?: string;
-  }): void {
-    this.sql.exec(
-      `INSERT INTO pending_ops
-       (path_lower, kind, path, old_path, new_path, patch, content_type, base_revision, new_revision, author, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      lowerPath(input.path),
-      input.kind,
-      input.path,
-      input.oldPath ?? null,
-      input.newPath ?? null,
-      input.patch ?? null,
-      input.contentType ?? null,
-      input.baseRevision ?? null,
-      input.newRevision ?? null,
-      input.author ?? null,
-      new Date().toISOString()
-    );
-  }
-
   private async headText(vaultId: string, path: string): Promise<string> {
-    const key = lowerPath(path);
-    const cached = this.headContent.get(key);
-    if (cached !== undefined) return cached;
-    const text = await this.materializeText(vaultId, path);
-    this.headContent.set(key, text);
-    return text;
-  }
-
-  private async materializeText(vaultId: string, path: string): Promise<string> {
-    const basePath = this.r2BasePathFor(path);
-    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, basePath));
-    let text = obj ? await obj.text() : "";
-    for (const row of this.sql.exec<PendingOpRow>(
-      pendingSelect(`WHERE path_lower = ? ORDER BY seq`),
-      lowerPath(path)
-    ).toArray()) {
-      const kind = String(row.kind);
-      if (kind === "patch" || kind === "put") {
-        const patch = String(row.patch ?? "");
-        if (!patch.trim()) continue;
-        const next = applyPatch(text, patch);
-        if (next === null) throw Object.assign(new Error(`Pending patch does not apply for ${path}`), { status: 500 });
-        text = next;
-      }
-    }
-    return text;
-  }
-
-  private r2BasePathFor(path: string): string {
-    const row = this.sql.exec<PendingOpRow>(
-      pendingSelect(`WHERE path_lower = ? AND kind = 'rename' ORDER BY seq LIMIT 1`),
-      lowerPath(path)
-    ).toArray()[0];
-    return row?.oldPath != null ? String(row.oldPath) : path;
-  }
-
-  private async flushPathToR2(vaultId: string, path: string): Promise<void> {
-    const rows = this.sql.exec<PendingOpRow>(
-      pendingSelect(`WHERE path_lower = ? ORDER BY seq`),
-      lowerPath(path)
-    ).toArray();
-    if (rows.length === 0) return;
-    const entry = this.getEntry(path);
-    if (!entry || !isTextContentType(entry.contentType)) return;
-    const text = await this.headText(vaultId, entry.path);
-    await this.env.VAULT_BUCKET.put(contentKey(vaultId, entry.path), new TextEncoder().encode(text), {
-      httpMetadata: { contentType: entry.contentType },
-    });
-    this.setR2Revision(entry.path, entry.revision);
-    this.sql.exec(`DELETE FROM pending_ops WHERE path_lower = ?`, lowerPath(path));
-    this.headContent.delete(lowerPath(path));
+    await this.ensureYjsMigrated(vaultId);
+    const doc = this.yjs.getDoc();
+    const { paths } = getVaultMaps(doc);
+    const fileId = paths.get(path.toLowerCase());
+    if (!fileId) return "";
+    return getTextContent(doc, fileId) ?? "";
   }
 
   private markDirty(path: string, deleted: boolean): void {
@@ -928,6 +865,21 @@ export class VaultCoordinator extends DurableObject<Env> {
       path,
       deleted ? 1 : 0
     );
+    if (this.numberState("seal_deadline") === null) {
+      this.sql.exec(
+        `INSERT OR REPLACE INTO do_state (key, value) VALUES (?, ?)`,
+        "seal_deadline",
+        String(Date.now() + DEFAULT_SEAL_INTERVAL_MS)
+      );
+    }
+  }
+
+  private markYjsDirtyForSeal(): void {
+    const doc = this.yjs.getDoc();
+    for (const file of listActiveFiles(doc)) {
+      if (isVaultInternal(file.path)) continue;
+      this.markDirty(file.path, false);
+    }
   }
 
   private dirtyChanges(): IncrementalSealChange[] {
@@ -937,147 +889,10 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   private async writeManifestToR2(vaultId: string): Promise<void> {
-    const manifest = this.manifestFromSql(vaultId);
+    const manifest = await this.getManifest(vaultId);
     await this.env.VAULT_BUCKET.put(manifestKey(vaultId), JSON.stringify(manifest), {
       httpMetadata: { contentType: "application/json" },
     });
-  }
-
-  private hasPendingDelete(path: string): boolean {
-    const row = this.sql.exec(`SELECT seq FROM pending_ops WHERE path_lower = ? AND kind = 'delete' LIMIT 1`, lowerPath(path)).toArray()[0];
-    return Boolean(row);
-  }
-
-  private async resolveBaseText(
-    vaultId: string,
-    path: string,
-    entry: ManifestEntry & { r2Revision: number },
-    baseRevision: number
-  ): Promise<string | null> {
-    if (baseRevision > entry.revision) return null;
-    if (baseRevision < entry.r2Revision) return null;
-
-    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, this.r2BasePathFor(path)));
-    let text = obj ? await obj.text() : "";
-
-    for (const row of this.sql.exec<PendingOpRow>(
-      pendingSelect(`WHERE path_lower = ? ORDER BY seq`),
-      lowerPath(path)
-    ).toArray()) {
-      const newRev = Number(row.newRevision ?? 0);
-      if (newRev > baseRevision) break;
-      const kind = String(row.kind);
-      if (kind === "patch" || kind === "put") {
-        const patch = String(row.patch ?? "");
-        if (!patch.trim()) continue;
-        const next = applyPatch(text, patch);
-        if (next === null) return null;
-        text = next;
-      }
-    }
-    return text;
-  }
-
-  private async commitTextHead(
-    vaultId: string,
-    entry: ManifestEntry & { r2Revision: number },
-    merged: string,
-    baseRevision: number,
-    author: string,
-    patch?: string
-  ): Promise<WriteResult> {
-    const ours = await this.headText(vaultId, entry.path);
-    const effectivePatch = patch ?? createLinePatch(entry.path, ours, merged);
-    const encoded = new TextEncoder().encode(merged);
-    const next = this.bumpEntry(entry.path, encoded.byteLength, entry.contentType);
-    this.headContent.set(lowerPath(entry.path), merged);
-    this.appendPending({
-      path: entry.path,
-      kind: "patch",
-      patch: effectivePatch,
-      contentType: entry.contentType,
-      baseRevision,
-      newRevision: next.revision,
-      author,
-    });
-    this.markDirty(entry.path, false);
-    await this.scheduleFlush();
-    this.broadcast({
-      type: "change",
-      path: entry.path,
-      kind: "put",
-      baseRevision,
-      revision: next.revision,
-      patch: effectivePatch,
-      author,
-      ts: next.updatedAt,
-    });
-    return next;
-  }
-
-  private async handleStaleTextWrite(
-    vaultId: string,
-    path: string,
-    entry: ManifestEntry & { r2Revision: number },
-    baseRevision: number,
-    theirs: string,
-    author: string,
-    conflictPolicy: ConflictPolicy,
-    resolvedBase: string
-  ): Promise<WriteResult> {
-    const ours = await this.headText(vaultId, path);
-    const { merged, hasConflicts } = merge3(resolvedBase, ours, theirs);
-
-    if (!hasConflicts) {
-      return this.commitTextHead(vaultId, entry, merged, entry.revision, author);
-    }
-
-    return this.recordTextConflict(vaultId, path, entry, baseRevision, resolvedBase, author, conflictPolicy, ours, theirs);
-  }
-
-  private async recordTextConflict(
-    vaultId: string,
-    path: string,
-    entry: ManifestEntry & { r2Revision: number },
-    baseRevision: number,
-    baseContent: string,
-    author: string,
-    _conflictPolicy: ConflictPolicy,
-    serverContent?: string,
-    clientContent?: string
-  ): Promise<WriteResult> {
-    const ours = serverContent ?? (await this.headText(vaultId, path));
-    const ctx: ConflictContext = {
-      path,
-      serverContent: ours,
-      clientContent,
-      baseContent: baseContent === ours ? undefined : baseContent,
-      serverRevision: entry.revision,
-      clientBaseRevision: baseRevision,
-      deviceName: author,
-      timestamp: new Date().toISOString(),
-    };
-    const notePath = await this.writeConflictNote(vaultId, ctx, author);
-    return { ...entry, conflictNote: notePath };
-  }
-
-  private async recordBinaryConflict(
-    vaultId: string,
-    path: string,
-    entry: ManifestEntry & { r2Revision: number },
-    baseRevision: number,
-    author: string
-  ): Promise<WriteResult> {
-    const ctx: ConflictContext = {
-      path,
-      serverRevision: entry.revision,
-      clientBaseRevision: baseRevision,
-      deviceName: author,
-      timestamp: new Date().toISOString(),
-      isBinary: true,
-    };
-    const notePath = await this.writeConflictNote(vaultId, ctx, author);
-    return { ...entry, conflictNote: notePath };
   }
 
   private async writeConflictNote(vaultId: string, ctx: ConflictContext, author: string): Promise<string> {
@@ -1088,32 +903,9 @@ export class VaultCoordinator extends DurableObject<Env> {
       notePath,
       new TextEncoder().encode(body).buffer as ArrayBuffer,
       "text/markdown",
-      undefined,
-      author,
-      "rebase"
+      author
     );
     return notePath;
-  }
-
-  private assertBaseRevision(entry: ManifestEntry, baseRevision: number): void {
-    if (entry.revision !== baseRevision) {
-      throw Object.assign(
-        new Error(`Revision conflict: server has ${entry.revision}, client base is ${baseRevision}`),
-        { status: 409, serverRevision: entry.revision, headRevision: entry.revision }
-      );
-    }
-  }
-
-  private async scheduleFlush(): Promise<void> {
-    const deadline = Date.now() + (this.numberState("flush_interval_ms") ?? DEFAULT_FLUSH_INTERVAL_MS);
-    await this.setState("flush_deadline", String(deadline));
-    const pendingCount = this.sql.exec(`SELECT seq FROM pending_ops LIMIT ?`, DEFAULT_FLUSH_MAX_PENDING + 1).toArray().length;
-    if (pendingCount > (this.numberState("flush_max_pending") ?? DEFAULT_FLUSH_MAX_PENDING)) {
-      const meta = await this.getMeta();
-      if (meta) await this.flushToR2(meta.id);
-      return;
-    }
-    await this.armAlarm();
   }
 
   private async ensureSealScheduled(): Promise<void> {
@@ -1208,45 +1000,4 @@ function lowerPath(path: string): string {
 
 function isTextContentType(contentType: string): boolean {
   return contentType.startsWith("text/") || contentType.includes("json") || contentType.includes("xml") || contentType.includes("svg");
-}
-
-function splitLines(value: string): string[] {
-  return value.length === 0 ? [] : value.replace(/\n$/, "").split("\n");
-}
-
-function createLinePatch(path: string, original: string, modified: string): string {
-  if (original === modified) return "";
-  const before = splitLines(original);
-  const after = splitLines(modified);
-  let prefix = 0;
-  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
-
-  let suffix = 0;
-  while (
-    suffix + prefix < before.length &&
-    suffix + prefix < after.length &&
-    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) {
-    suffix++;
-  }
-
-  const removed = before.slice(prefix, before.length - suffix);
-  const added = after.slice(prefix, after.length - suffix);
-  const contextBefore = before.slice(Math.max(0, prefix - 3), prefix);
-  const contextAfter = before.slice(before.length - suffix, Math.min(before.length, before.length - suffix + 3));
-  const origStart = Math.max(1, prefix - contextBefore.length + 1);
-  const newStart = Math.max(1, prefix - contextBefore.length + 1);
-  const origLen = contextBefore.length + removed.length + contextAfter.length;
-  const newLen = contextBefore.length + added.length + contextAfter.length;
-
-  return [
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    `@@ -${origStart},${origLen} +${newStart},${newLen} @@`,
-    ...contextBefore.map((line) => ` ${line}`),
-    ...removed.map((line) => `-${line}`),
-    ...added.map((line) => `+${line}`),
-    ...contextAfter.map((line) => ` ${line}`),
-    "",
-  ].join("\n");
 }

@@ -1,33 +1,62 @@
 import { useState, useEffect, useCallback } from "react";
 import * as api from "../api";
 
+const SESSION_HINT_KEY = "lapis-has-session";
+
 interface AuthState {
   user: api.User | null;
   loading: boolean;
   error: string | null;
 }
 
+function readSessionHint(): boolean {
+  try {
+    return localStorage.getItem(SESSION_HINT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeSessionHint(hasSession: boolean) {
+  try {
+    if (hasSession) localStorage.setItem(SESSION_HINT_KEY, "1");
+    else localStorage.removeItem(SESSION_HINT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 export function useAuth() {
-  const [state, setState] = useState<AuthState>({
+  const [state, setState] = useState<AuthState>(() => ({
     user: null,
-    loading: true,
+    // Anonymous visitors skip the loading gate so the landing paints immediately.
+    // Returning users (hint set) wait for /get-session to avoid a landing flash.
+    loading: readSessionHint(),
     error: null,
-  });
+  }));
 
   const refresh = useCallback(async () => {
-    setState((s) => ({ ...s, loading: true, error: null }));
+    setState((s) => ({
+      ...s,
+      // Only show the full-screen loader when we expect a session.
+      loading: s.user != null || readSessionHint(),
+      error: null,
+    }));
     const session = await api.getSession();
-    setState({ user: session?.user ?? null, loading: false, error: null });
+    const user = session?.user ?? null;
+    writeSessionHint(user != null);
+    setState({ user, loading: false, error: null });
   }, []);
 
   useEffect(() => {
-    refresh();
+    void refresh();
   }, [refresh]);
 
   const signIn = useCallback(async (email: string, password: string) => {
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
       const user = await api.signIn(email, password);
+      writeSessionHint(true);
       setState({ user, loading: false, error: null });
     } catch (e) {
       setState((s) => ({ ...s, loading: false, error: (e as Error).message }));
@@ -40,8 +69,8 @@ export function useAuth() {
       setState((s) => ({ ...s, loading: true, error: null }));
       try {
         await api.signUp(name, email, password);
-        // Sign in immediately after registration
         const user = await api.signIn(email, password);
+        writeSessionHint(true);
         setState({ user, loading: false, error: null });
       } catch (e) {
         setState((s) => ({
@@ -56,8 +85,12 @@ export function useAuth() {
   );
 
   const signOut = useCallback(async () => {
-    await api.signOut();
-    setState({ user: null, loading: false, error: null });
+    try {
+      await api.signOut();
+    } finally {
+      writeSessionHint(false);
+      setState({ user: null, loading: false, error: null });
+    }
   }, []);
 
   return { ...state, signIn, signUp, signOut, refresh };

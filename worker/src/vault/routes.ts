@@ -4,22 +4,38 @@ import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
 import { deviceAuthor } from "./identity";
 import { buildZip, type ZipEntry } from "./zip";
+import { addVaultOwner, listMemberVaults } from "../auth/access";
+import type { VaultRole } from "../auth/permissions";
+import { canWriteContent } from "../auth/permissions";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
 
-// ── Helper: resolve vault and verify ownership ─────────────────────────────
+// ── Helper: resolve vault via membership ───────────────────────────────────
 
 async function resolveVault(
   db: D1Database,
   vaultId: string,
   userId: string
-): Promise<{ id: string; name: string; createdAt: string } | null> {
+): Promise<{ id: string; name: string; createdAt: string; role: VaultRole } | null> {
   return db
     .prepare(
-      `SELECT id, name, created_at AS createdAt FROM vaults WHERE id = ? AND owner_id = ?`
+      `SELECT v.id, v.name, v.created_at AS createdAt, m.role AS role
+       FROM vaults v
+       INNER JOIN vault_members m ON m.vault_id = v.id AND m.user_id = ?
+       WHERE v.id = ?`
     )
-    .bind(vaultId, userId)
-    .first<{ id: string; name: string; createdAt: string }>();
+    .bind(userId, vaultId)
+    .first<{ id: string; name: string; createdAt: string; role: VaultRole }>();
+}
+
+async function resolveVaultWrite(
+  db: D1Database,
+  vaultId: string,
+  userId: string
+): Promise<{ id: string; name: string; createdAt: string; role: VaultRole } | null> {
+  const vault = await resolveVault(db, vaultId, userId);
+  if (!vault || !canWriteContent(vault.role)) return null;
+  return vault;
 }
 
 // ── Vault CRUD ─────────────────────────────────────────────────────────────
@@ -37,35 +53,29 @@ vaultRoutes.post("/", requireSession, async (c) => {
   const vaultId = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  // Persist vault record in D1 (owner index)
   await c.env.DB.prepare(
     `INSERT INTO vaults (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)`
   )
     .bind(vaultId, session.userId, name, now)
     .run();
 
-  // Initialize the Durable Object for this vault
+  await addVaultOwner(c.env.DB, vaultId, session.userId, now);
+
   const doId = c.env.VAULT_COORDINATOR.idFromName(vaultId);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
   await stub.initialize({ id: vaultId, ownerId: session.userId, name, createdAt: now });
 
-  return c.json({ id: vaultId, name, createdAt: now }, 201);
+  return c.json({ id: vaultId, name, createdAt: now, role: "owner" as const }, 201);
 });
 
-/** GET /api/vaults — list authenticated user's vaults */
+/** GET /api/vaults — list vaults the user belongs to */
 vaultRoutes.get("/", requireSession, async (c) => {
   const session = c.get("session");
-
-  const { results } = await c.env.DB.prepare(
-    `SELECT id, name, created_at AS createdAt FROM vaults WHERE owner_id = ? ORDER BY created_at DESC`
-  )
-    .bind(session.userId)
-    .all<{ id: string; name: string; createdAt: string }>();
-
-  return c.json(results);
+  const vaults = await listMemberVaults(c.env.DB, session.userId);
+  return c.json(vaults);
 });
 
-/** GET /api/vaults/:id — get a single vault (must be owner) */
+/** GET /api/vaults/:id — get a single vault (must be member) */
 vaultRoutes.get("/:id", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
@@ -73,6 +83,25 @@ vaultRoutes.get("/:id", requireSession, async (c) => {
   const vault = await resolveVault(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
   return c.json(vault);
+});
+
+/** GET /api/vaults/:id/yjs — Yjs WebSocket sync */
+vaultRoutes.get("/:id/yjs", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.json({ error: "Expected WebSocket upgrade" }, 426);
+  }
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  const stub = c.env.VAULT_COORDINATOR.get(c.env.VAULT_COORDINATOR.idFromName(id));
+  const url = new URL("https://do/yjs");
+  url.searchParams.set("write", canWriteContent(vault.role) ? "1" : "0");
+  url.searchParams.set("vaultId", id);
+  return stub.fetch(
+    new Request(url.toString(), { headers: { Upgrade: "websocket" } })
+  );
 });
 
 // ── Manifest ───────────────────────────────────────────────────────────────
@@ -155,7 +184,7 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
+  const vault = await resolveVaultWrite(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
   const url = new URL(c.req.url);
@@ -168,17 +197,11 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
   if (isOsJunk(filePath)) return c.json({ error: "OS junk files are not accepted" }, 400);
 
   const contentType = c.req.header("Content-Type") ?? "application/octet-stream";
-  const baseRevisionHeader = c.req.header("X-Base-Revision");
-  const baseRevision = baseRevisionHeader === undefined ? undefined : Number(baseRevisionHeader);
-  if (baseRevisionHeader !== undefined && !Number.isInteger(baseRevision)) {
-    return c.json({ error: "Invalid base revision" }, 400);
-  }
 
   let body: ArrayBuffer;
-  let text: string | undefined;
   if (contentType.includes("application/json")) {
     const json = await c.req.json<{ content?: string }>();
-    text = json.content ?? "";
+    const text = json.content ?? "";
     body = new TextEncoder().encode(text).buffer as ArrayBuffer;
   } else {
     body = await c.req.arrayBuffer();
@@ -193,15 +216,11 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
     : contentType.split(";")[0].trim();
 
   try {
-    const entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision, deviceAuthor("web", session.sessionId));
+    const entry = await stub.syncPutFile(id, filePath, body, storageContentType, deviceAuthor("web", session.sessionId));
     return c.json(entry, 200);
   } catch (e: unknown) {
-    const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
-    if (err.status === 409) {
-      const headRevision = err.headRevision ?? err.serverRevision;
-      return c.json({ error: err.message ?? "Revision conflict", headRevision, serverRevision: headRevision }, 409);
-    }
-    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 409 | 500);
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
   }
 });
 
@@ -214,7 +233,7 @@ vaultRoutes.patch("/:id/files/*", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
+  const vault = await resolveVaultWrite(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
   const url = new URL(c.req.url);
@@ -247,7 +266,7 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
+  const vault = await resolveVaultWrite(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
   const url = new URL(c.req.url);
@@ -272,9 +291,8 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
 
 /**
  * GET /api/vaults/:id/snapshots
- * Returns the sealed commit timeline from Artifacts.
- * Requires Artifacts access (Slice 04). Returns an empty array if the vault
- * has not been sealed yet (e.g. no writes since deployment).
+ * Returns the sealed commit timeline from the configured GitHub remote.
+ * Empty if no GitHub remote is connected or the repo has no commits yet.
  */
 vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
   const session = c.get("session");
@@ -290,12 +308,12 @@ vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
   return c.json({ snapshots });
 });
 
-/** POST /api/vaults/:id/seal — manually seal pending changes to Artifacts. */
+/** POST /api/vaults/:id/seal — manually push pending changes to GitHub (if configured). */
 vaultRoutes.post("/:id/seal", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
+  const vault = await resolveVaultWrite(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
@@ -324,7 +342,7 @@ vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
+  const vault = await resolveVaultWrite(c.env.DB, id, session.userId);
   if (!vault) return c.json({ error: "Not found" }, 404);
 
   const url = new URL(c.req.url);
@@ -352,7 +370,7 @@ vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
 
   try {
-    const entry = await stub.syncPutFile(id, filePath, encoded.buffer as ArrayBuffer, contentType, undefined, deviceAuthor("web", session.sessionId));
+    const entry = await stub.syncPutFile(id, filePath, encoded.buffer as ArrayBuffer, contentType, deviceAuthor("web", session.sessionId));
     return c.json({ restored: true, entry }, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };

@@ -1,17 +1,16 @@
 import { Link } from "react-router-dom";
+import { useRef, useState } from "react";
 import {
   SidebarSimple,
   Sidebar as SidebarRight,
   MagnifyingGlass,
   Command,
-  Sun,
-  Moon,
   House,
-  DeviceMobile,
-  DownloadSimple,
   CaretRight,
+  GearSix,
 } from "@phosphor-icons/react";
 import type { Theme } from "../../hooks/useTheme";
+import SettingsPopover from "../overlays/SettingsPopover";
 
 interface TitleBarProps {
   vaultId: string;
@@ -36,23 +35,29 @@ function IconButton({
   active,
   onClick,
   extraClass,
+  size = "sm",
   children,
+  buttonRef,
 }: {
   label: string;
   active?: boolean;
   onClick?: () => void;
   extraClass?: string;
+  size?: "sm" | "lg";
   children: React.ReactNode;
+  buttonRef?: React.RefObject<HTMLButtonElement | null>;
 }) {
+  const dim = size === "lg" ? "h-9 w-9" : "h-9 w-9";
   return (
     <button
+      ref={buttonRef as React.RefObject<HTMLButtonElement>}
       type="button"
       aria-label={label}
       aria-pressed={active}
       title={label}
       onClick={onClick}
       className={[
-        "flex h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink",
+        `flex ${dim} items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-ink`,
         active ? "text-accent-soft" : "",
         extraClass ?? "",
       ].join(" ")}
@@ -73,12 +78,7 @@ function Breadcrumb({ path }: { path: string | null }) {
         const last = i === segments.length - 1;
         return (
           <span key={i} className="flex min-w-0 items-center gap-1">
-            <span
-              className={[
-                "truncate",
-                last ? "text-ink" : "text-muted",
-              ].join(" ")}
-            >
+            <span className={["truncate", last ? "text-ink" : "text-muted"].join(" ")}>
               {last ? seg.replace(/\.md$/i, "") : seg}
             </span>
             {!last && (
@@ -106,15 +106,17 @@ export default function TitleBar({
   onNavigateGuard,
   exportUrl,
 }: TitleBarProps) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsBtnRef = useRef<HTMLButtonElement>(null);
+
   return (
-    <header className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-secondary px-2">
-      {/* Left controls */}
+    <header className="relative flex h-11 shrink-0 items-center gap-1 border-b border-border bg-secondary px-2">
       <IconButton
         label={leftCollapsed ? "Show sidebar" : "Hide sidebar"}
         active={!leftCollapsed}
         onClick={onToggleLeft}
       >
-        <SidebarSimple size={17} />
+        <SidebarSimple size={22} />
       </IconButton>
 
       <Link
@@ -124,69 +126,57 @@ export default function TitleBar({
         onClick={(e) => {
           if (!onNavigateGuard()) e.preventDefault();
         }}
-        className="flex h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
+        className="flex h-9 w-9 items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-ink"
       >
-        <House size={17} weight="duotone" />
+        <House size={22} weight="duotone" />
       </Link>
 
       <div className="mx-1 h-4 w-px bg-border" aria-hidden />
 
-      {/* Vault name + breadcrumb */}
       <span className="shrink-0 text-[13px] font-semibold text-ink">{vaultName}</span>
-      <CaretRight size={11} className="shrink-0 text-faint" weight="bold" />
+      <CaretRight size={14} className="shrink-0 text-faint" weight="bold" />
       <div className="min-w-0 flex-1 overflow-hidden">
         <Breadcrumb path={activePath} />
       </div>
 
-      {/* Right controls */}
       <div className="flex shrink-0 items-center gap-0.5">
-        <IconButton
-          label={theme === "dark" ? "Light theme" : "Dark theme"}
-          onClick={onToggleTheme}
-        >
-          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-        </IconButton>
-
-        {/* Hidden on mobile — available via command palette or keyboard shortcuts */}
         <IconButton label="Search (⌘F)" onClick={onOpenSearch} extraClass="hidden md:flex">
-          <MagnifyingGlass size={16} />
+          <MagnifyingGlass size={22} />
         </IconButton>
         <IconButton label="Command palette (⌘P)" onClick={onOpenPalette} extraClass="hidden md:flex">
-          <Command size={16} />
+          <Command size={22} />
         </IconButton>
-
-        <div className="mx-1 hidden h-4 w-px bg-border md:block" aria-hidden />
-
-        <Link
-          to={`/vault/${vaultId}/devices`}
-          title="Devices"
-          aria-label="Devices"
-          onClick={(e) => {
-            if (!onNavigateGuard()) e.preventDefault();
-          }}
-          className="hidden h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink md:flex"
-        >
-          <DeviceMobile size={17} weight="duotone" />
-        </Link>
-        <a
-          href={exportUrl}
-          download
-          title="Export vault as zip"
-          aria-label="Export vault"
-          className="hidden h-7 w-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink md:flex"
-        >
-          <DownloadSimple size={17} />
-        </a>
 
         <IconButton
           label={rightCollapsed ? "Show right panel" : "Hide right panel"}
           active={!rightCollapsed}
           onClick={onToggleRight}
-          extraClass="hidden md:flex"
         >
-          <SidebarRight size={17} />
+          <SidebarRight size={22} />
+        </IconButton>
+
+        <div className="mx-1 h-4 w-px bg-border" aria-hidden />
+
+        <IconButton
+          label="Settings"
+          active={settingsOpen}
+          size="lg"
+          onClick={() => setSettingsOpen((o) => !o)}
+          buttonRef={settingsBtnRef}
+        >
+          <GearSix size={22} weight={settingsOpen ? "fill" : "duotone"} />
         </IconButton>
       </div>
+
+      <SettingsPopover
+        vaultId={vaultId}
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        theme={theme}
+        onToggleTheme={onToggleTheme}
+        exportUrl={exportUrl}
+        anchorRef={settingsBtnRef}
+      />
     </header>
   );
 }

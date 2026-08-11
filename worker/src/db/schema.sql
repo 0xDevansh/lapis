@@ -15,6 +15,28 @@ CREATE TABLE IF NOT EXISTS vaults (
 
 CREATE INDEX IF NOT EXISTS idx_vaults_owner ON vaults (owner_id);
 
+-- Multi-user membership (ADR 0009)
+CREATE TABLE IF NOT EXISTS vault_members (
+  vault_id   TEXT NOT NULL,
+  user_id    TEXT NOT NULL,
+  role       TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (vault_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_members_user ON vault_members (user_id);
+
+CREATE TABLE IF NOT EXISTS vault_invites (
+  id         TEXT PRIMARY KEY,
+  vault_id   TEXT NOT NULL,
+  email      TEXT NOT NULL,
+  role       TEXT NOT NULL CHECK (role IN ('editor', 'viewer')),
+  token      TEXT NOT NULL UNIQUE,
+  invited_by TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 -- ── Search + backlinks + tags indexes (Slice 06) ──────────────────────────────
 
 -- FTS virtual table for full-text search over Vault Content.

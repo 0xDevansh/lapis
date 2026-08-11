@@ -57,8 +57,8 @@ export default function SnapshotsPanel({ vaultId }: SnapshotsPanelProps) {
           size={12}
           className={`transition-transform ${open ? "rotate-90" : ""}`}
         />
-        <ClockCounterClockwise size={13} />
-        Sealed History
+        <ClockCounterClockwise size={22} />
+        Version Control
       </button>
 
       {open && (
@@ -67,7 +67,7 @@ export default function SnapshotsPanel({ vaultId }: SnapshotsPanelProps) {
           {error && <div className="px-2 py-1.5 text-xs text-danger">{error}</div>}
           {!loading && !error && snapshots.length === 0 && (
             <div className="px-2 py-1.5 text-xs leading-relaxed text-faint">
-              No sealed commits yet. Commits are created automatically after writes.
+              No GitHub commits yet. Connect a GitHub remote under Settings → GitHub to enable history.
             </div>
           )}
           {!loading &&

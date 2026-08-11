@@ -11,6 +11,8 @@ import {
   PencilSimple,
   Trash,
   ArrowSquareOut,
+  FilePlus,
+  FolderPlus,
 } from "@phosphor-icons/react";
 
 // ── Tree building ─────────────────────────────────────────────────────────────
@@ -31,13 +33,18 @@ interface TreeFolder {
 
 type TreeNode = TreeFile | TreeFolder;
 
+const HIDDEN_NAMES = new Set([".keep", ".gitkeep"]);
+
 export function buildTree(entries: ManifestEntry[]): TreeNode[] {
   const root: TreeFolder = { type: "folder", name: "", path: "", children: [] };
 
   for (const entry of entries) {
     const parts = entry.path.split("/");
-    let current = root;
+    const leaf = parts[parts.length - 1];
+    // Keep folder structure from placeholder files, but hide the placeholders themselves.
+    const hideLeaf = HIDDEN_NAMES.has(leaf);
 
+    let current = root;
     for (let i = 0; i < parts.length - 1; i++) {
       const folderName = parts[i];
       const folderPath = parts.slice(0, i + 1).join("/");
@@ -52,8 +59,9 @@ export function buildTree(entries: ManifestEntry[]): TreeNode[] {
       current = child;
     }
 
-    const fileName = parts[parts.length - 1];
-    current.children.push({ type: "file", name: fileName, path: entry.path, entry });
+    if (!hideLeaf) {
+      current.children.push({ type: "file", name: leaf, path: entry.path, entry });
+    }
   }
 
   sortTree(root.children);
@@ -94,7 +102,6 @@ function flatten(
 }
 
 function initialOpen(nodes: TreeNode[]): Set<string> {
-  // Auto-expand the top two levels (mirrors previous depth < 2 behaviour).
   const set = new Set<string>();
   const walk = (ns: TreeNode[], depth: number) => {
     for (const n of ns) {
@@ -114,10 +121,19 @@ const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", 
 
 function FileGlyph({ name }: { name: string }) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "md") return <FileText size={15} weight="regular" className="shrink-0 text-accent-soft" />;
-  if (IMAGE_EXTS.has(ext)) return <FileImage size={15} weight="regular" className="shrink-0 text-muted" />;
-  if (ext === "pdf") return <FilePdf size={15} weight="regular" className="shrink-0 text-muted" />;
-  return <FileIcon size={15} weight="regular" className="shrink-0 text-muted" />;
+  if (ext === "md") return <FileText size={22} weight="regular" className="shrink-0 text-accent-soft" />;
+  if (IMAGE_EXTS.has(ext)) return <FileImage size={22} weight="regular" className="shrink-0 text-muted" />;
+  if (ext === "pdf") return <FilePdf size={22} weight="regular" className="shrink-0 text-muted" />;
+  return <FileIcon size={22} weight="regular" className="shrink-0 text-muted" />;
+}
+
+function parentDir(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
+function joinPath(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name;
 }
 
 // ── Component ───────────────────────────────────────────────────────────────--
@@ -125,16 +141,21 @@ function FileGlyph({ name }: { name: string }) {
 interface FolderTreeProps {
   nodes: TreeNode[];
   selectedPath: string | null;
+  /** Path of the folder used as create target (may equal selectedPath for folders). */
+  focusedFolder?: string | null;
   onSelect: (path: string) => void;
+  onSelectFolder?: (path: string) => void;
   onRename?: (path: string) => void;
   onDelete?: (path: string) => void;
-  /** Deprecated; retained for API compatibility. The tree now manages its own depth. */
+  onNewNote?: (parentFolder: string) => void;
+  onNewFolder?: (parentFolder: string) => void;
+  onMove?: (sourcePath: string, destFolder: string) => void;
   depth?: number;
 }
 
 interface MenuState {
   path: string;
-  type: "file" | "folder";
+  type: "file" | "folder" | "root";
   x: number;
   y: number;
 }
@@ -143,17 +164,22 @@ export function FolderTree({
   nodes,
   selectedPath,
   onSelect,
+  onSelectFolder,
   onRename,
   onDelete,
+  onNewNote,
+  onNewFolder,
+  onMove,
 }: FolderTreeProps) {
   const [open, setOpen] = useState<Set<string>>(() => initialOpen(nodes));
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
 
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const typeaheadRef = useRef({ str: "", t: 0 });
 
-  // Reveal the selected file by opening its ancestor folders.
   useEffect(() => {
     if (!selectedPath) return;
     const parts = selectedPath.split("/");
@@ -252,8 +278,10 @@ export function FolderTree({
       case "Enter":
       case " ":
         e.preventDefault();
-        if (node.type === "folder") toggleOpen(node.path);
-        else onSelect(node.path);
+        if (node.type === "folder") {
+          toggleOpen(node.path);
+          onSelectFolder?.(node.path);
+        } else onSelect(node.path);
         break;
       case "Home":
         e.preventDefault();
@@ -283,7 +311,6 @@ export function FolderTree({
     }
   };
 
-  // Close the context menu on outside interaction / Escape.
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
@@ -300,12 +327,47 @@ export function FolderTree({
     };
   }, [menu]);
 
+  const canDropOn = (destFolder: string, sourcePath: string) => {
+    if (!sourcePath) return false;
+    if (destFolder === sourcePath) return false;
+    if (destFolder.startsWith(sourcePath + "/")) return false;
+    if (parentDir(sourcePath) === destFolder) return false;
+    return true;
+  };
+
+  const finishDrop = (destFolder: string) => {
+    if (!dragging || !onMove) return;
+    if (!canDropOn(destFolder, dragging)) return;
+    onMove(dragging, destFolder);
+  };
+
+  const menuParent =
+    menu?.type === "folder" ? menu.path : menu?.type === "file" ? parentDir(menu.path) : "";
+
   return (
     <div
       role="tree"
       aria-label="Vault files"
       className="select-none px-1 text-[13px] outline-none"
       onKeyDown={handleKeyDown}
+      onContextMenu={(e) => {
+        // Empty area → root context menu
+        if ((e.target as HTMLElement).closest("[data-treepath]")) return;
+        e.preventDefault();
+        setMenu({ path: "", type: "root", x: e.clientX, y: e.clientY });
+      }}
+      onDragOver={(e) => {
+        if (!dragging || !onMove) return;
+        e.preventDefault();
+        setDragOver("");
+      }}
+      onDragLeave={() => setDragOver(null)}
+      onDrop={(e) => {
+        e.preventDefault();
+        finishDrop("");
+        setDragOver(null);
+        setDragging(null);
+      }}
     >
       {rows.map((row) => {
         const { node } = row;
@@ -313,6 +375,8 @@ export function FolderTree({
         const isOpen = isFolder && open.has(node.path);
         const isSelected = node.path === selectedPath;
         const isTabbable = node.path === tabbablePath;
+        const isDropTarget =
+          dragOver === node.path || (isFolder && dragOver === node.path);
 
         return (
           <div
@@ -325,18 +389,52 @@ export function FolderTree({
             aria-expanded={isFolder ? isOpen : undefined}
             tabIndex={isTabbable ? 0 : -1}
             title={node.path}
+            draggable={!!onMove && !isFolder}
+            onDragStart={(e) => {
+              if (isFolder || !onMove) return;
+              e.dataTransfer.setData("text/plain", node.path);
+              e.dataTransfer.effectAllowed = "move";
+              setDragging(node.path);
+            }}
+            onDragEnd={() => {
+              setDragging(null);
+              setDragOver(null);
+            }}
+            onDragOver={(e) => {
+              if (!dragging || !onMove) return;
+              const dest = isFolder ? node.path : parentDir(node.path);
+              if (!canDropOn(dest, dragging)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOver(dest);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const dest = isFolder ? node.path : parentDir(node.path);
+              finishDrop(dest);
+              setDragOver(null);
+              setDragging(null);
+            }}
             onClick={() => {
               setFocusedPath(node.path);
-              if (isFolder) toggleOpen(node.path);
-              else onSelect(node.path);
+              if (isFolder) {
+                toggleOpen(node.path);
+                onSelectFolder?.(node.path);
+              } else onSelect(node.path);
             }}
             onContextMenu={(e) => {
               e.preventDefault();
+              e.stopPropagation();
               setFocusedPath(node.path);
               setMenu({ path: node.path, type: node.type, x: e.clientX, y: e.clientY });
             }}
             className={`group relative flex h-7 cursor-pointer items-center gap-1.5 rounded-sm pr-1.5 outline-none transition-colors ${
               isSelected ? "text-ink" : "text-muted hover:bg-hover hover:text-ink"
+            } ${dragging === node.path ? "opacity-40" : ""} ${
+              isDropTarget && isFolder
+                ? "ring-1 ring-inset ring-accent-soft/60 bg-accent/10"
+                : ""
             }`}
             style={{
               paddingLeft: 6 + row.depth * 12,
@@ -345,7 +443,6 @@ export function FolderTree({
                 : undefined,
             }}
           >
-            {/* indent guides */}
             {Array.from({ length: row.depth }).map((_, i) => (
               <span
                 key={i}
@@ -369,49 +466,24 @@ export function FolderTree({
 
             {isFolder ? (
               isOpen ? (
-                <FolderOpen size={15} weight="fill" className="shrink-0 text-accent-soft/70" />
+                <FolderOpen size={22} weight="fill" className="shrink-0 text-accent-soft/70" />
               ) : (
-                <FolderIcon size={15} weight="fill" className="shrink-0 text-accent-soft/70" />
+                <FolderIcon size={22} weight="fill" className="shrink-0 text-accent-soft/70" />
               )
             ) : (
               <FileGlyph name={node.name} />
             )}
 
             <span className="min-w-0 flex-1 truncate">{node.name}</span>
-
-            {(onRename || onDelete) && (
-              <div className="flex shrink-0 items-center opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-                {node.type === "file" && onRename && (
-                  <button
-                    tabIndex={-1}
-                    title="Rename (F2)"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRename(node.path);
-                    }}
-                    className="flex h-5 w-5 items-center justify-center rounded-sm text-faint hover:bg-elevated hover:text-ink"
-                  >
-                    <PencilSimple size={13} />
-                  </button>
-                )}
-                {node.type === "file" && onDelete && (
-                  <button
-                    tabIndex={-1}
-                    title="Delete"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDelete(node.path);
-                    }}
-                    className="flex h-5 w-5 items-center justify-center rounded-sm text-faint hover:bg-elevated hover:text-danger"
-                  >
-                    <Trash size={13} />
-                  </button>
-                )}
-              </div>
-            )}
           </div>
         );
       })}
+
+      {dragOver === "" && dragging && (
+        <div className="mx-1 mt-1 rounded border border-dashed border-accent-soft/50 px-2 py-1 text-[11px] text-accent-soft">
+          Move to vault root
+        </div>
+      )}
 
       {menu && (
         <div
@@ -424,48 +496,47 @@ export function FolderTree({
         >
           <div
             role="menu"
-            className="absolute min-w-44 rounded-lg border border-border bg-elevated py-1 shadow-2xl"
-            style={{ left: menu.x, top: menu.y }}
+            className="absolute min-w-48 rounded-lg border border-border bg-elevated py-1 shadow-2xl"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 200),
+              top: Math.min(menu.y, window.innerHeight - 280),
+            }}
             onClick={(e) => e.stopPropagation()}
           >
-            {menu.type === "file" ? (
-              <>
-                <MenuItem
-                  icon={<ArrowSquareOut size={15} />}
-                  label="Open"
-                  onClick={() => {
-                    onSelect(menu.path);
-                    setMenu(null);
-                  }}
-                />
-                {onRename && (
-                  <MenuItem
-                    icon={<PencilSimple size={15} />}
-                    label="Rename"
-                    shortcut="F2"
-                    onClick={() => {
-                      onRename(menu.path);
-                      setMenu(null);
-                    }}
-                  />
-                )}
-                {onDelete && (
-                  <MenuItem
-                    icon={<Trash size={15} />}
-                    label="Delete"
-                    danger
-                    onClick={() => {
-                      onDelete(menu.path);
-                      setMenu(null);
-                    }}
-                  />
-                )}
-              </>
-            ) : (
+            {onNewNote && (
               <MenuItem
-                icon={
-                  open.has(menu.path) ? <FolderOpen size={15} /> : <FolderIcon size={15} />
-                }
+                icon={<FilePlus size={22} />}
+                label="New note"
+                onClick={() => {
+                  onNewNote(menuParent);
+                  setMenu(null);
+                }}
+              />
+            )}
+            {onNewFolder && (
+              <MenuItem
+                icon={<FolderPlus size={22} />}
+                label="New folder"
+                onClick={() => {
+                  onNewFolder(menuParent);
+                  setMenu(null);
+                }}
+              />
+            )}
+            {(onNewNote || onNewFolder) && menu.type !== "root" && <MenuSep />}
+            {menu.type === "file" && (
+              <MenuItem
+                icon={<ArrowSquareOut size={22} />}
+                label="Open"
+                onClick={() => {
+                  onSelect(menu.path);
+                  setMenu(null);
+                }}
+              />
+            )}
+            {menu.type === "folder" && (
+              <MenuItem
+                icon={open.has(menu.path) ? <FolderOpen size={22} /> : <FolderIcon size={22} />}
                 label={open.has(menu.path) ? "Collapse" : "Expand"}
                 onClick={() => {
                   toggleOpen(menu.path);
@@ -473,11 +544,40 @@ export function FolderTree({
                 }}
               />
             )}
+            {menu.type === "file" && onRename && (
+              <MenuItem
+                icon={<PencilSimple size={22} />}
+                label="Rename"
+                shortcut="F2"
+                onClick={() => {
+                  onRename(menu.path);
+                  setMenu(null);
+                }}
+              />
+            )}
+            {menu.type === "file" && onDelete && (
+              <>
+                <MenuSep />
+                <MenuItem
+                  icon={<Trash size={22} />}
+                  label="Delete"
+                  danger
+                  onClick={() => {
+                    onDelete(menu.path);
+                    setMenu(null);
+                  }}
+                />
+              </>
+            )}
           </div>
         </div>
       )}
     </div>
   );
+}
+
+function MenuSep() {
+  return <div className="my-1 border-t border-border" role="separator" />;
 }
 
 function MenuItem({
@@ -507,3 +607,5 @@ function MenuItem({
     </button>
   );
 }
+
+export { joinPath, parentDir };

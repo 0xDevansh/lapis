@@ -18,9 +18,6 @@ export interface ChangeNotification {
   type: "change";
   path: string;
   kind: "put" | "rename" | "delete";
-  baseRevision?: number;
-  revision?: number;
-  patch?: string;
   newPath?: string;
   author?: string;
   ts: string;

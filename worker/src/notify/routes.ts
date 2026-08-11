@@ -32,7 +32,7 @@ async function resolveVaultOwner(
   userId: string
 ): Promise<boolean> {
   const row = await db
-    .prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`)
+    .prepare(`SELECT vault_id AS id FROM vault_members WHERE vault_id = ? AND user_id = ?`)
     .bind(vaultId, userId)
     .first<{ id: string }>();
   return !!row;

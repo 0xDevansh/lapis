@@ -16,12 +16,12 @@ function basename(path: string): string {
 
 function TabIcon({ path, contentType }: { path: string; contentType?: string }) {
   if (contentType?.startsWith("image/")) {
-    return <ImageIcon size={14} weight="duotone" className="shrink-0 text-accent-soft" />;
+    return <ImageIcon size={22} weight="duotone" className="shrink-0 text-accent-soft" />;
   }
   if (contentType?.startsWith("text/") || path.toLowerCase().endsWith(".md")) {
-    return <FileText size={14} weight="duotone" className="shrink-0 text-accent-soft" />;
+    return <FileText size={22} weight="duotone" className="shrink-0 text-accent-soft" />;
   }
-  return <File size={14} weight="duotone" className="shrink-0 text-muted" />;
+  return <File size={22} weight="duotone" className="shrink-0 text-muted" />;
 }
 
 export default function TabBar({ contentTypeFor, onCloseTab }: TabBarProps) {
@@ -107,7 +107,7 @@ export default function TabBar({ contentTypeFor, onCloseTab }: TabBarProps) {
                   onCloseTab(tab.id);
                 }}
               >
-                <X size={12} weight="bold" />
+                <X size={18} weight="bold" />
               </button>
             )}
           </div>

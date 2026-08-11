@@ -9,6 +9,9 @@ import { deviceRoutes } from "./device/routes";
 import { syncRoutes } from "./sync/routes";
 import { notifyRoutes } from "./notify/routes";
 import { gitRoutes } from "./git/routes";
+import { memberRoutes, inviteAcceptRoutes } from "./vault/members";
+import { mcpRoutes } from "./mcp/routes";
+import { handleVaultMcp } from "./mcp/server";
 
 export { VaultCoordinator } from "./vault/coordinator";
 
@@ -30,13 +33,20 @@ app.all("/api/auth/*", (c): any => {
   return auth.handler(c.req.raw);
 });
 
+// ── MCP (stateless streamable HTTP) — before other /api catch-alls ───────────
+app.all("/api/mcp/:vaultId", (c) => handleVaultMcp(c.req.raw, c.env, c.executionCtx));
+app.all("/api/mcp/:vaultId/*", (c) => handleVaultMcp(c.req.raw, c.env, c.executionCtx));
+
 // ── API routes ───────────────────────────────────────────────────────────────
 app.route("/api/vaults", vaultRoutes);
+app.route("/api/vaults", memberRoutes);
+app.route("/api/vaults", mcpRoutes);
 app.route("/api/vaults", searchRoutes);
 app.route("/api", deviceRoutes);
 app.route("/api/sync", syncRoutes);
 app.route("/api", notifyRoutes);
 app.route("/api", gitRoutes);
+app.route("/api", inviteAcceptRoutes);
 
 // ── SPA fallback ─────────────────────────────────────────────────────────────
 app.get("*", async (c) => {

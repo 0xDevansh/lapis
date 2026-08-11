@@ -41,6 +41,10 @@ export class LapisSettingTab extends PluginSettingTab {
     containerEl.addClass("lapis-settings");
 
     containerEl.createEl("h2", { text: "Lapis sync" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Collaborative vault sync via Yjs. Text lives in the cloud Durable Object; binaries use R2. Use Sync now after offline or external edits.",
+    });
 
     if (this.plugin.settings.syncToken) {
       this.renderConnectedState(containerEl);
@@ -54,7 +58,7 @@ export class LapisSettingTab extends PluginSettingTab {
   private renderDisconnectedState(containerEl: HTMLElement): void {
     const intro = containerEl.createDiv({ cls: "lapis-settings-intro" });
     intro.createEl("p", {
-      text: "Paste the vault link from your browser, then approve this device on the web.",
+      text: "Paste the vault link from your browser, then approve this device on the web. Sync uses Yjs CRDTs over a live WebSocket — edits merge without revision conflicts.",
     });
 
     const status = containerEl.createDiv({ cls: "lapis-settings-status lapis-settings-status--idle" });
@@ -194,7 +198,7 @@ export class LapisSettingTab extends PluginSettingTab {
 
     new Setting(details)
       .setName("Debug logging")
-      .setDesc("Log sync activity to the developer console (Ctrl+Shift+I).")
+      .setDesc("Log Yjs bridge and reconcile activity to the developer console (Ctrl+Shift+I).")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.debugLogging)

@@ -141,7 +141,7 @@ export default function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-[90] flex items-start justify-center bg-black/50 pt-[12vh]"
+      className="fixed inset-0 z-[90] flex items-start justify-center bg-scrim pt-[12vh]"
       onMouseDown={onClose}
     >
       <div

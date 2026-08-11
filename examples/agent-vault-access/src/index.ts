@@ -34,26 +34,18 @@ export interface Env {
 export class VaultAgent extends Think<Env> {
   // ── Sync API (agent device token) ─────────────────────────────────────────
 
-  private syncHeaders(): HeadersInit {
-    return {
-      Authorization: `Bearer ${this.env.LAPIS_AGENT_TOKEN}`,
-      "Content-Type": "application/json",
-    };
-  }
-
   private async syncGet(path: string): Promise<Response> {
     return fetch(`${this.env.LAPIS_URL}${path}`, {
       headers: { Authorization: `Bearer ${this.env.LAPIS_AGENT_TOKEN}` },
     });
   }
 
-  private async syncPut(path: string, body: BodyInit, contentType: string, baseRevision?: number): Promise<Response> {
+  private async syncPut(path: string, body: BodyInit, contentType: string): Promise<Response> {
     return fetch(`${this.env.LAPIS_URL}${path}`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${this.env.LAPIS_AGENT_TOKEN}`,
         "Content-Type": contentType,
-        ...(baseRevision !== undefined ? { "X-Base-Revision": String(baseRevision) } : {}),
       },
       body,
     });
@@ -76,8 +68,7 @@ You have tools available:
 - vault_search: full-text search across all notes with highlighted snippets
 - vault_get_backlinks: find all notes that link to a given note via [[wikilinks]]
 - vault_get_tags: list all tags used in the vault with occurrence counts
-- vault_write_file: write or update a text file in the vault (agent-attributed)
-- vault_apply_patch: apply a unified diff patch to an existing note
+- vault_write_file: write or update a text file in the vault (agent-attributed; whole-file replace into the vault CRDT)
 
 Use these tools to answer the user's questions about their vault content.
 When reading notes, render wikilinks like [[Note Name]] as plain references to the target note.
@@ -254,53 +245,24 @@ If you need context from a linked note, use vault_read_file to fetch it.`;
 
       vault_write_file: tool({
         description:
-          "Write or replace a text file in the vault. Changes are attributed to this agent device.",
+          "Write or replace a text file in the vault. Content is stored in the vault CRDT (Yjs).",
         inputSchema: z.object({
           path: z.string().describe("Vault-relative path, e.g. 'notes/summary.md'"),
           content: z.string().describe("Full file content"),
-          baseRevision: z.number().optional().describe("Revision the edit is based on (for updates)"),
         }),
-        execute: async ({ path, content, baseRevision }) => {
+        execute: async ({ path, content }) => {
           const encodedPath = path.split("/").map(encodeURIComponent).join("/");
           const res = await this.syncPut(
             `/api/sync/${vaultId}/files/${encodedPath}`,
             new TextEncoder().encode(content),
             "text/markdown",
-            baseRevision,
           );
           if (!res.ok) {
             const body = await res.json().catch(() => ({})) as { error?: string };
             return { error: body.error ?? `Write failed (${res.status})` };
           }
-          const entry = await res.json() as { revision: number; conflictNote?: string };
-          return { path, revision: entry.revision, conflictNote: entry.conflictNote };
-        },
-      }),
-
-      vault_apply_patch: tool({
-        description:
-          "Apply a unified diff patch to an existing note via the sync API.",
-        inputSchema: z.object({
-          path: z.string().describe("Vault-relative path of the file to patch"),
-          patch: z.string().describe("Unified diff patch string"),
-          baseRevision: z.number().describe("Revision the patch applies against"),
-        }),
-        execute: async ({ path, patch, baseRevision }) => {
-          const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-          const res = await fetch(
-            `${this.env.LAPIS_URL}/api/sync/${vaultId}/files/${encodedPath}/patch`,
-            {
-              method: "POST",
-              headers: this.syncHeaders(),
-              body: JSON.stringify({ patch, baseRevision }),
-            },
-          );
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({})) as { error?: string };
-            return { error: body.error ?? `Patch failed (${res.status})` };
-          }
-          const entry = await res.json() as { revision: number; conflictNote?: string };
-          return { path, revision: entry.revision, conflictNote: entry.conflictNote };
+          const entry = await res.json() as { path: string };
+          return { path: entry.path ?? path, ok: true };
         },
       }),
     };

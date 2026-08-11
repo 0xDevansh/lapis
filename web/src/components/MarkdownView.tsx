@@ -10,6 +10,8 @@ interface MarkdownViewProps {
   vaultId: string;
   /** Path of the note being previewed (for relative image resolution). */
   currentPath?: string;
+  /** Display title shown as an inline H1 (Obsidian-style), not part of the file. */
+  title?: string;
   /** All canonical vault paths for wikilink resolution */
   vaultPaths: string[];
   /** Manifest entries for embedded image metadata */
@@ -23,6 +25,7 @@ export default function MarkdownView({
   source,
   vaultId,
   currentPath,
+  title,
   vaultPaths,
   manifestEntries,
   onCreateNote,
@@ -109,6 +112,7 @@ export default function MarkdownView({
 
   return (
     <div className="markdown-preview w-full px-8 py-6">
+      {title && <h1 className="note-inline-title">{title}</h1>}
       {hasFrontmatter && <FrontmatterPanel data={data} tags={tags} />}
       <div
         ref={containerRef}

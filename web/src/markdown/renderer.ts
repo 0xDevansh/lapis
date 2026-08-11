@@ -1,10 +1,12 @@
 /**
  * Lapis Markdown renderer.
  *
- * Uses `marked` with a custom extension for wikilinks and callouts.
+ * Uses `marked` with extensions for wikilinks, callouts, highlights, comments,
+ * and KaTeX math — aligned with Obsidian Flavored Markdown basics.
  * Output is sanitized with DOMPurify before insertion into the DOM.
  */
-import { marked, type MarkedExtension, type Token } from "marked";
+import { Marked, type MarkedExtension, type Token } from "marked";
+import markedKatex from "marked-katex-extension";
 import DOMPurify from "dompurify";
 import { fileUrl } from "../api";
 import type { ManifestEntry } from "../api";
@@ -42,8 +44,10 @@ function renderImageFigure(options: {
   alt: string;
   entry?: ManifestEntry;
   broken?: boolean;
+  width?: number;
+  height?: number;
 }): string {
-  const { vaultId, path, alt, entry, broken } = options;
+  const { vaultId, path, alt, entry, broken, width, height } = options;
   const name = path.split("/").pop() ?? path;
   const src = broken ? "" : vaultImageSrc(vaultId, path, entry);
   const metaParts: string[] = [];
@@ -62,27 +66,34 @@ function renderImageFigure(options: {
       : "";
 
   const figcaption = `<figcaption class="vault-image-meta">${captionHtml}<span class="vault-image-name">${escapeHtml(name)}</span>${detailsHtml}</figcaption>`;
+  const sizeAttr =
+    width != null
+      ? ` width="${width}"${height != null ? ` height="${height}"` : ""} style="width:${width}px;${height != null ? `height:${height}px;` : "height:auto;"}"`
+      : "";
 
   if (broken) {
     return `<figure class="vault-image-embed vault-image-broken"><div class="vault-image-placeholder">Missing: ${escapeHtml(name)}</div>${figcaption}</figure>`;
   }
 
-  return `<figure class="vault-image-embed"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt || name)}" class="vault-embed-image" loading="lazy" />${figcaption}</figure>`;
+  return `<figure class="vault-image-embed"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt || name)}" class="vault-embed-image"${sizeAttr} loading="lazy" />${figcaption}</figure>`;
 }
 
-// ── Wikilink extension ────────────────────────────────────────────────────────
+/** Parse Obsidian-style image size from alias: `alt|640x480` or `alt|100`. */
+function parseSizeAlias(alias: string): { alt: string; width?: number; height?: number } {
+  const m = /^(.*?)\|(\d+)(?:x(\d+))?$/.exec(alias);
+  if (!m) return { alt: alias };
+  return {
+    alt: m[1].trim(),
+    width: Number(m[2]),
+    height: m[3] ? Number(m[3]) : undefined,
+  };
+}
 
-/**
- * Build a marked extension that:
- *   - Replaces [[wikilink]] tokens with <a> tags (resolved or broken)
- *   - Replaces ![[embed]] tokens with image figures or file links
- */
 function wikilinkExtension(options: {
   vaultId: string;
   pathByLower: Map<string, string>;
   currentPath?: string;
   manifestEntries?: Record<string, ManifestEntry>;
-  onCreateNote?: (path: string) => void;
 }): MarkedExtension {
   return {
     extensions: [
@@ -126,20 +137,25 @@ function wikilinkExtension(options: {
           });
 
           if (isEmbed) {
+            const sized = parseSizeAlias(displayText);
             if (!resolvedPath) {
               return renderImageFigure({
                 vaultId: options.vaultId,
                 path: target,
-                alt: displayText,
+                alt: sized.alt,
                 broken: true,
+                width: sized.width,
+                height: sized.height,
               });
             }
             if (isImagePath(resolvedPath)) {
               return renderImageFigure({
                 vaultId: options.vaultId,
                 path: resolvedPath,
-                alt: displayText,
+                alt: sized.alt || displayText,
                 entry: manifestEntry(resolvedPath, options.manifestEntries),
+                width: sized.width,
+                height: sized.height,
               });
             }
             const href = `/vault/${options.vaultId}/file/${encodeVaultPath(resolvedPath)}`;
@@ -165,7 +181,38 @@ function wikilinkExtension(options: {
   };
 }
 
-// ── Callout post-processing ────────────────────────────────────────────────────
+/** Obsidian ==highlight== */
+function highlightExtension(): MarkedExtension {
+  return {
+    extensions: [
+      {
+        name: "highlight",
+        level: "inline",
+        start(src: string) {
+          return src.indexOf("==");
+        },
+        tokenizer(src: string) {
+          const match = /^==([^=]+?)==/.exec(src);
+          if (!match) return undefined;
+          return {
+            type: "highlight",
+            raw: match[0],
+            text: match[1],
+            tokens: this.lexer.inlineTokens(match[1]),
+          };
+        },
+        renderer(token: Token & { tokens?: Token[] }) {
+          return `<mark>${this.parser.parseInline(token.tokens ?? [])}</mark>`;
+        },
+      },
+    ],
+  };
+}
+
+/** Strip Obsidian %%comments%% (hidden in reading view). */
+function stripComments(source: string): string {
+  return source.replace(/%%[\s\S]*?%%/g, "");
+}
 
 const CALLOUT_TYPES = new Set([
   "note", "tip", "important", "warning", "caution", "danger", "error",
@@ -224,7 +271,6 @@ function resolveMarkdownImageSrc(
   return { path: null, src: trimmed };
 }
 
-/** Upgrade bare <img> tags from standard markdown ![](...) into vault image figures. */
 function processMarkdownImages(
   html: string,
   options: {
@@ -236,47 +282,51 @@ function processMarkdownImages(
 ): string {
   return html.replace(
     /<img([^>]*)\ssrc="([^"]*)"([^>]*)>/gi,
-    (match, _before, src, _after) => {
+    (match, _before, src) => {
       if (match.includes("vault-embed-image")) return match;
 
       const altMatch = match.match(/\salt="([^"]*)"/i);
-      const alt = altMatch?.[1] ?? "";
+      const rawAlt = altMatch?.[1] ?? "";
+      const sized = parseSizeAlias(rawAlt);
       const { path, src: resolvedSrc, entry } = resolveMarkdownImageSrc(src, options);
 
       if (!path) {
-        if (resolvedSrc === src) return match;
-        return `<img src="${escapeHtml(resolvedSrc)}" alt="${escapeHtml(alt)}" class="vault-embed-image" loading="lazy" />`;
+        if (resolvedSrc === src && sized.width == null) return match;
+        const sizeAttr =
+          sized.width != null
+            ? ` width="${sized.width}"${sized.height != null ? ` height="${sized.height}"` : ""} style="width:${sized.width}px;${sized.height != null ? `height:${sized.height}px;` : "height:auto;"}"`
+            : "";
+        return `<img src="${escapeHtml(resolvedSrc)}" alt="${escapeHtml(sized.alt)}" class="vault-embed-image"${sizeAttr} loading="lazy" />`;
       }
 
       return renderImageFigure({
         vaultId: options.vaultId,
         path,
-        alt,
+        alt: sized.alt,
         entry,
+        width: sized.width,
+        height: sized.height,
       });
     }
   );
 }
 
-// ── Public render API ─────────────────────────────────────────────────────────
-
 export interface RenderOptions {
   vaultId: string;
-  /** All vault paths (canonical casing). Used for wikilink resolution. */
   vaultPaths: string[];
-  /** Path of the note being rendered (for relative image/link resolution). */
   currentPath?: string;
-  /** Manifest entries keyed by lower-cased path (for image metadata). */
   manifestEntries?: Record<string, ManifestEntry>;
   onCreateNote?: (path: string) => void;
 }
 
 /**
  * Render Markdown source to sanitized HTML.
- * Wikilinks and callouts are processed.
+ * Wikilinks, callouts, highlights, and KaTeX math are processed.
  */
 export function renderMarkdown(source: string, options: RenderOptions): string {
-  const pathByLower = new Map(options.vaultPaths.map((p) => [p.toLowerCase(), p]));
+  const pathByLower = new Map(
+    (options.vaultPaths ?? []).map((p) => [p.toLowerCase(), p])
+  );
   const imageOpts = {
     vaultId: options.vaultId,
     pathByLower,
@@ -284,10 +334,21 @@ export function renderMarkdown(source: string, options: RenderOptions): string {
     manifestEntries: options.manifestEntries,
   };
 
-  marked.use(wikilinkExtension({ ...imageOpts, onCreateNote: options.onCreateNote }));
-  marked.use({ breaks: false, gfm: true });
+  const cleaned = stripComments(source);
 
-  const raw = marked.parse(source, { async: false }) as string;
+  // Fresh Marked instance per render so vault-scoped extensions don't stack.
+  const md = new Marked();
+  md.use(
+    markedKatex({
+      throwOnError: false,
+      nonStandard: true,
+    })
+  );
+  md.use(highlightExtension());
+  md.use(wikilinkExtension(imageOpts));
+  md.use({ breaks: false, gfm: true });
+
+  const raw = md.parse(cleaned, { async: false }) as string;
   const withImages = processMarkdownImages(processCallouts(raw), imageOpts);
 
   return DOMPurify.sanitize(withImages, {
@@ -301,11 +362,20 @@ export function renderMarkdown(source: string, options: RenderOptions): string {
       "div", "span",
       "figure", "figcaption",
       "time",
+      "mark",
+      "input",
+      "sup", "sub",
+      "annotation", "semantics", "math", "mrow", "mi", "mo", "mn",
+      "msup", "msub", "mfrac", "msqrt", "mroot", "mtable", "mtr", "mtd",
+      "mspace", "mtext", "mover", "munder", "munderover",
     ],
     ALLOWED_ATTR: [
       "href", "title", "src", "alt", "class", "id",
       "data-create-path", "loading", "datetime",
       "colspan", "rowspan",
+      "width", "height", "style",
+      "type", "checked", "disabled",
+      "aria-hidden", "xmlns",
     ],
     ALLOW_DATA_ATTR: true,
   });

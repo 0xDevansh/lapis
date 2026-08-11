@@ -1,5 +1,5 @@
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 
 /**
@@ -15,9 +15,9 @@ export const editorTheme = EditorView.theme(
       fontSize: "15px",
     },
     ".cm-scroller": {
-      fontFamily: "var(--font-mono, ui-monospace, monospace)",
+      fontFamily: "var(--font-sans, system-ui, sans-serif)",
       lineHeight: "1.7",
-      padding: "20px 0",
+      padding: "8px 0 20px",
     },
     ".cm-content": {
       caretColor: "var(--accent-soft)",
@@ -63,14 +63,15 @@ export const editorTheme = EditorView.theme(
       color: "var(--accent-soft)",
       cursor: "pointer",
       textDecoration: "none",
-      borderBottom: "1px solid color-mix(in srgb, var(--accent-soft) 40%, transparent)",
+      borderBottom:
+        "1px solid color-mix(in srgb, var(--accent-soft) 40%, transparent)",
     },
     ".cm-wikilink:hover": {
       color: "var(--accent)",
       borderBottomColor: "var(--accent)",
     },
     ".cm-wikilink-broken": {
-      color: "#d8729e",
+      color: "var(--broken)",
       borderBottomStyle: "dotted",
     },
     ".cm-embed-image-wrap": { padding: "6px 0" },
@@ -79,6 +80,17 @@ export const editorTheme = EditorView.theme(
       borderRadius: "8px",
       display: "block",
     },
+    ".cm-math": {
+      fontFamily: "KaTeX_Main, 'Times New Roman', serif",
+      color: "var(--ink)",
+      padding: "0 0.15em",
+    },
+    ".cm-math-block": {
+      display: "block",
+      textAlign: "center",
+      padding: "0.6em 0",
+      overflowX: "auto",
+    },
   },
   { dark: true }
 );
@@ -86,16 +98,22 @@ export const editorTheme = EditorView.theme(
 /** Syntax highlighting for fenced code blocks and markdown tokens. */
 export const editorHighlight = syntaxHighlighting(
   HighlightStyle.define([
-    { tag: t.keyword, color: "#c792ea" },
-    { tag: [t.name, t.deleted, t.character, t.propertyName], color: "#82aaff" },
-    { tag: [t.function(t.variableName), t.labelName], color: "#82aaff" },
-    { tag: [t.string, t.inserted], color: "#c3e88d" },
-    { tag: [t.number, t.bool, t.null], color: "#f78c6c" },
+    { tag: t.keyword, color: "var(--syntax-keyword)" },
+    {
+      tag: [t.name, t.deleted, t.character, t.propertyName],
+      color: "var(--syntax-name)",
+    },
+    {
+      tag: [t.function(t.variableName), t.labelName],
+      color: "var(--syntax-name)",
+    },
+    { tag: [t.string, t.inserted], color: "var(--syntax-string)" },
+    { tag: [t.number, t.bool, t.null], color: "var(--syntax-number)" },
     { tag: [t.comment, t.meta], color: "var(--faint)", fontStyle: "italic" },
-    { tag: [t.typeName, t.className], color: "#ffcb6b" },
+    { tag: [t.typeName, t.className], color: "var(--syntax-type)" },
     { tag: [t.operator, t.punctuation], color: "var(--muted)" },
-    { tag: t.tagName, color: "#f07178" },
-    { tag: t.attributeName, color: "#c792ea" },
+    { tag: t.tagName, color: "var(--syntax-tag)" },
+    { tag: t.attributeName, color: "var(--syntax-attr)" },
     { tag: t.invalid, color: "var(--danger)" },
   ])
 );

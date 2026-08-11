@@ -52,7 +52,7 @@ export default function RightPanel({ vaultId, activePath, activeSource, onNaviga
                 selected ? "text-ink" : "text-muted hover:text-ink"
               }`}
             >
-              <Icon size={14} weight={selected ? "fill" : "regular"} />
+              <Icon size={22} weight={selected ? "fill" : "regular"} />
               {tab.label}
             </button>
           );

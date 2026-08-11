@@ -1,5 +1,6 @@
-import React, { useState } from "react";
-import { CubeTransparent } from "@phosphor-icons/react";
+import React, { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { BrandLockup } from "../components/BrandLockup";
 
 interface AuthPageProps {
   onSignIn: (email: string, password: string) => Promise<void>;
@@ -14,11 +15,18 @@ export default function AuthPage({
   error,
   loading,
 }: AuthPageProps) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [params] = useSearchParams();
+  const [mode, setMode] = useState<"signin" | "signup">(
+    params.get("mode") === "signup" ? "signup" : "signin"
+  );
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMode(params.get("mode") === "signup" ? "signup" : "signin");
+  }, [params]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -38,16 +46,22 @@ export default function AuthPage({
 
   const tabBase =
     "flex-1 rounded px-3 py-2 text-sm font-medium transition-colors";
-  const tabActive = "bg-accent text-white";
+  const tabActive = "bg-accent text-on-accent";
   const tabIdle = "bg-surface text-muted hover:text-ink hover:bg-elevated";
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-canvas p-4">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-secondary p-8 shadow-2xl shadow-black/40">
-        <div className="mb-1 flex items-center gap-2">
-          <CubeTransparent size={28} weight="duotone" className="text-accent" />
-          <h1 className="text-2xl font-bold text-ink">Lapis</h1>
-        </div>
+    <div className="flex min-h-screen flex-col items-center justify-center bg-canvas p-4">
+      <div className="mb-4 w-full max-w-sm">
+        <Link to="/" className="text-sm text-muted transition-colors hover:text-ink">
+          ← Back
+        </Link>
+      </div>
+      <div className="w-full max-w-sm rounded-lg border border-border bg-secondary p-8 shadow-[0_24px_60px_var(--shadow)]">
+        <BrandLockup
+          size={28}
+          className="mb-1"
+          textClassName="text-2xl font-bold tracking-wide text-ink"
+        />
         <p className="mb-6 text-sm text-muted">Your Obsidian vault, anywhere.</p>
 
         <div className="mb-5 flex gap-1" role="tablist">
@@ -106,17 +120,38 @@ export default function AuthPage({
             <p className="m-0 text-sm text-danger">{displayError}</p>
           )}
           <button
-            className="mt-1 rounded bg-accent px-3 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-soft disabled:opacity-60"
+            className="mt-1 rounded bg-accent px-3 py-2.5 text-sm font-semibold text-on-accent transition-colors hover:bg-accent-soft disabled:opacity-60"
             type="submit"
             disabled={loading}
           >
             {loading
               ? "..."
               : mode === "signin"
-              ? "Sign in"
-              : "Create account"}
+                ? "Sign in"
+                : "Create account"}
           </button>
         </form>
+
+        <div className="my-4 flex items-center gap-3 text-xs text-muted">
+          <div className="h-px flex-1 bg-border" />
+          or
+          <div className="h-px flex-1 bg-border" />
+        </div>
+
+        <button
+          type="button"
+          className="w-full rounded border border-border bg-surface px-3 py-2.5 text-sm font-medium text-ink transition-colors hover:bg-elevated"
+          onClick={() => {
+            void import("../lib/auth-client").then(({ authClient }) =>
+              authClient.signIn.social({
+                provider: "google",
+                callbackURL: "/",
+              })
+            );
+          }}
+        >
+          Continue with Google
+        </button>
       </div>
     </div>
   );
