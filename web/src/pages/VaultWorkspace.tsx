@@ -1180,7 +1180,6 @@ function EditorArea({
         <FileToolbar
           dirty={false}
           saving={false}
-          onRename={() => onRename(activeTab.path)}
           onDelete={() => onDelete(activeTab.path)}
         />
         <div className="custom-scroll flex-1 overflow-auto p-6">
@@ -1201,7 +1200,6 @@ function EditorArea({
         <FileToolbar
           dirty={false}
           saving={false}
-          onRename={() => onRename(activeTab.path)}
           onDelete={() => onDelete(activeTab.path)}
         />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted">
@@ -1234,7 +1232,6 @@ function EditorArea({
         saving={saving}
         onSave={onSave}
         onRevert={onRevert}
-        onRename={() => onRename(activeTab.path)}
         onDelete={() => onDelete(activeTab.path)}
       />
       {previewMode ? (
@@ -1284,7 +1281,6 @@ function FileToolbar({
   saving,
   onSave,
   onRevert,
-  onRename,
   onDelete,
 }: {
   mode?: "live" | "preview";
@@ -1293,20 +1289,19 @@ function FileToolbar({
   saving: boolean;
   onSave?: () => void;
   onRevert?: () => void;
-  onRename: () => void;
   onDelete: () => void;
 }) {
   return (
-    <div className="flex h-11 shrink-0 items-center justify-end gap-0.5 border-b border-border bg-secondary px-2">
+    <div className="flex h-10 shrink-0 items-center justify-end gap-0.5 border-b border-border bg-canvas px-2">
       {onRevert && (
         <button
           onClick={onRevert}
           disabled={!dirty || saving}
           title="Revert to vault version"
           aria-label="Revert"
-          className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-8 w-8 items-center justify-center rounded text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <ArrowCounterClockwise size={22} weight="bold" />
+          <ArrowCounterClockwise size={16} weight="bold" />
         </button>
       )}
       {onSave && (
@@ -1315,27 +1310,19 @@ function FileToolbar({
           disabled={!dirty || saving}
           title={saving ? "Saving…" : "Save"}
           aria-label="Save"
-          className="flex h-9 items-center gap-1.5 rounded px-2 text-[13px] font-medium text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-8 items-center gap-1.5 rounded px-2 text-[13px] font-medium text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <FloppyDisk size={22} weight="bold" />
+          <FloppyDisk size={16} weight="bold" />
           {saving ? "Saving…" : dirty ? "Save" : ""}
         </button>
       )}
       <button
-        onClick={onRename}
-        title="Rename"
-        aria-label="Rename"
-        className="flex h-9 w-9 items-center justify-center rounded text-ink hover:bg-hover"
-      >
-        <PencilSimple size={22} weight="bold" />
-      </button>
-      <button
         onClick={onDelete}
         title="Delete"
         aria-label="Delete"
-        className="flex h-9 w-9 items-center justify-center rounded text-ink hover:bg-hover hover:text-danger"
+        className="flex h-8 w-8 items-center justify-center rounded text-ink hover:bg-hover hover:text-danger"
       >
-        <Trash size={22} weight="bold" />
+        <Trash size={16} weight="bold" />
       </button>
       {onToggleMode && mode && (
         <>
@@ -1344,12 +1331,12 @@ function FileToolbar({
             onClick={onToggleMode}
             title={mode === "preview" ? "Switch to edit" : "Switch to preview"}
             aria-label={mode === "preview" ? "Preview mode, switch to edit" : "Edit mode, switch to preview"}
-            className="flex h-9 items-center gap-1.5 rounded-md px-2 text-ink transition-colors hover:bg-hover"
+            className="flex h-8 items-center gap-1.5 rounded-md px-2 text-ink transition-colors hover:bg-hover"
           >
             {mode === "preview" ? (
-              <Eye size={22} weight="bold" />
+              <Eye size={16} weight="bold" />
             ) : (
-              <PencilSimple size={22} weight="bold" />
+              <PencilSimple size={16} weight="bold" />
             )}
             {/* Both labels occupy the same cell so width never shifts. */}
             <span className="grid text-[13px] font-medium leading-none">
