@@ -19,7 +19,8 @@ import {
   type SealedCommit,
 } from "../artifacts/sealer";
 import { conflictNotePath, renderConflictNote, type ConflictContext } from "./conflict";
-import type { ConflictPolicy } from "../devices/types";
+import { listVaultDevices } from "../devices/record";
+import { identityFromRecord, type ConflictPolicy } from "../devices/types";
 import { ArtifactsRemote } from "../git/artifacts-remote";
 import { createGitHubRemote } from "../git/github-remote";
 import { getGitRemote, updateGitRemoteState } from "../git/store";
@@ -225,6 +226,36 @@ export class VaultCoordinator extends DurableObject<Env> {
       : R2_TEXT_STORAGE_VERSION;
   }
 
+  async recordAcks(
+    vaultId: string,
+    deviceKey: string,
+    request: AckRequest
+  ): Promise<{ accepted: number }> {
+    await this.ensureManifestLoaded(vaultId);
+    let accepted = 0;
+    const touched = new Set<string>();
+
+    for (const ack of request.acks ?? []) {
+      const entry = this.getEntry(ack.path);
+      if (!entry || !isTextContentType(entry.contentType)) continue;
+      if (!Number.isInteger(ack.revision) || ack.revision < 0 || ack.revision > entry.revision) {
+        throw Object.assign(new Error(`Invalid ack revision for ${ack.path}`), {
+          status: 400,
+        });
+      }
+      if (this.textStore.setAck(deviceKey, entry.path, ack.revision)) {
+        accepted += 1;
+        touched.add(entry.path);
+      }
+    }
+
+    const retainedDeviceKeys = await this.retainedAckDeviceKeys(vaultId, deviceKey);
+    for (const path of touched) {
+      this.advanceCheckpointFromAcks(path, retainedDeviceKeys);
+    }
+    return { accepted };
+  }
+
   async getMeta(): Promise<VaultMeta | null> {
     const row = this.sql.exec<VaultMetaRow>(
       `SELECT id, owner_id AS ownerId, name, created_at AS createdAt,
@@ -325,7 +356,20 @@ export class VaultCoordinator extends DurableObject<Env> {
     }
 
     const baseText = await this.resolveBaseText(vaultId, path, entry, baseRevision);
-    const resolvedBase = baseText ?? (await this.headText(vaultId, entry.path));
+    if (baseText === null) {
+      return this.recordTextConflict(
+        vaultId,
+        path,
+        entry,
+        baseRevision,
+        undefined,
+        author,
+        conflictPolicy,
+        undefined,
+        patch
+      );
+    }
+    const resolvedBase = baseText;
     const theirs = applyPatch(resolvedBase, patch);
     if (theirs === null) {
       return this.recordTextConflict(vaultId, path, entry, baseRevision, resolvedBase, author, conflictPolicy, undefined, patch);
@@ -639,6 +683,8 @@ export class VaultCoordinator extends DurableObject<Env> {
     const flushDeadline = this.numberState("flush_deadline");
     const sealDeadline = this.numberState("seal_deadline");
 
+    await this.advanceAllCheckpointsFromAcks(meta.id, now);
+
     if (flushDeadline !== null && flushDeadline <= now) {
       await this.flushToR2(meta.id);
     }
@@ -765,7 +811,20 @@ export class VaultCoordinator extends DurableObject<Env> {
       }
       const modified = decodeUtf8(body);
       const baseText = await this.resolveBaseText(vaultId, path, existing, baseRevision);
-      const resolvedBase = baseText ?? (await this.headText(vaultId, existing.path));
+      if (baseText === null) {
+        return this.recordTextConflict(
+          vaultId,
+          path,
+          existing,
+          baseRevision,
+          undefined,
+          author,
+          conflictPolicy,
+          undefined,
+          modified
+        );
+      }
+      const resolvedBase = baseText;
       return this.handleStaleTextWrite(vaultId, path, existing, baseRevision, modified, author, conflictPolicy, resolvedBase);
     }
 
@@ -821,6 +880,21 @@ export class VaultCoordinator extends DurableObject<Env> {
         updatedAt: now,
         text: modified,
       });
+      if (existing && isTextContentType(existing.contentType)) {
+        this.textStore.appendUpdate({
+          path,
+          fromRevision: previousRevision,
+          toRevision: nextRevision,
+          patch,
+        });
+      } else {
+        this.textStore.writeCheckpoint({
+          path,
+          revision: nextRevision,
+          text: modified,
+          createdAt: now,
+        });
+      }
     }
     this.upsertEntry(
       entry,
@@ -1120,6 +1194,9 @@ export class VaultCoordinator extends DurableObject<Env> {
     baseRevision: number
   ): Promise<string | null> {
     if (baseRevision > entry.revision) return null;
+    if (this.usesSqliteText()) {
+      return this.textStore.reconstruct(path, baseRevision);
+    }
     if (baseRevision < entry.r2Revision) return null;
 
     let text: string;
@@ -1161,7 +1238,8 @@ export class VaultCoordinator extends DurableObject<Env> {
     patch?: string
   ): Promise<WriteResult> {
     const ours = await this.headText(vaultId, entry.path);
-    const effectivePatch = patch ?? createLinePatch(entry.path, ours, merged);
+    const storagePatch = createLinePatch(entry.path, ours, merged);
+    const effectivePatch = patch ?? storagePatch;
     const encoded = new TextEncoder().encode(merged);
     const next = this.bumpEntry(entry.path, encoded.byteLength, entry.contentType);
     if (this.usesSqliteText()) {
@@ -1171,6 +1249,12 @@ export class VaultCoordinator extends DurableObject<Env> {
         contentType: next.contentType,
         updatedAt: next.updatedAt,
         text: merged,
+      });
+      this.textStore.appendUpdate({
+        path: next.path,
+        fromRevision: entry.revision,
+        toRevision: next.revision,
+        patch: storagePatch,
       });
     }
     this.headContent.set(lowerPath(entry.path), merged);
@@ -1198,6 +1282,54 @@ export class VaultCoordinator extends DurableObject<Env> {
     return next;
   }
 
+  private advanceCheckpointFromAcks(
+    path: string,
+    retainedDeviceKeys: ReadonlySet<string>,
+    now = Date.now()
+  ): void {
+    const entry = this.getEntry(path);
+    if (!entry || !isTextContentType(entry.contentType)) return;
+    const minAck =
+      this.textStore.minAckRevision(entry.path, retainedDeviceKeys, now) ??
+      entry.revision;
+    this.textStore.advanceCheckpoint(entry.path, Math.min(minAck, entry.revision));
+  }
+
+  private async advanceAllCheckpointsFromAcks(
+    vaultId: string,
+    now = Date.now()
+  ): Promise<void> {
+    const retainedDeviceKeys = await this.retainedAckDeviceKeys(vaultId);
+    const manifest = this.manifestFromSql(vaultId);
+    for (const entry of Object.values(manifest.entries)) {
+      if (isTextContentType(entry.contentType)) {
+        this.advanceCheckpointFromAcks(entry.path, retainedDeviceKeys, now);
+      }
+    }
+  }
+
+  private async retainedAckDeviceKeys(
+    vaultId: string,
+    currentDeviceKey?: string
+  ): Promise<Set<string>> {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const retained = new Set<string>();
+    for (const device of await listVaultDevices(this.env.DB, vaultId)) {
+      const lastSeenAt = device.lastSeenAt ? Date.parse(device.lastSeenAt) : NaN;
+      if (
+        device.capabilities.bidirectional &&
+        Number.isFinite(lastSeenAt) &&
+        lastSeenAt >= cutoff
+      ) {
+        retained.add(identityFromRecord(device).author);
+      }
+    }
+    if (currentDeviceKey && !currentDeviceKey.startsWith("web:")) {
+      retained.add(currentDeviceKey);
+    }
+    return retained;
+  }
+
   private async handleStaleTextWrite(
     vaultId: string,
     path: string,
@@ -1223,7 +1355,7 @@ export class VaultCoordinator extends DurableObject<Env> {
     path: string,
     entry: ManifestEntry & { r2Revision: number },
     baseRevision: number,
-    baseContent: string,
+    baseContent: string | undefined,
     author: string,
     _conflictPolicy: ConflictPolicy,
     serverContent?: string,

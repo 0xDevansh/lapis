@@ -64,6 +64,31 @@ syncRoutes.get("/:vaultId/manifest", requireDevice, async (c) => {
   return c.json(await stubFor(c.env, vaultId).getManifest(vaultId));
 });
 
+syncRoutes.post("/:vaultId/acks", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+
+  let body: { acks?: Array<{ path?: string; revision?: number }> };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  const acks = (body.acks ?? []).filter(
+    (ack): ack is { path: string; revision: number } =>
+      typeof ack.path === "string" && typeof ack.revision === "number"
+  );
+  try {
+    return c.json(
+      await stubFor(c.env, vaultId).recordAcks(vaultId, device.author, { acks })
+    );
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
+  }
+});
+
 syncRoutes.get("/:vaultId/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();

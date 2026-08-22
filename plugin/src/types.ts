@@ -17,6 +17,10 @@ export interface ManifestEntry {
   revision: number;
 }
 
+export interface WriteResult extends ManifestEntry {
+  conflictNote?: string;
+}
+
 export interface VaultManifest {
   version: 1;
   vaultId: string;
@@ -67,7 +71,7 @@ export interface BatchOpResult {
   status: "accepted" | "stale" | "error";
   error?: string;
   headRevision?: number;
-  entry?: ManifestEntry;
+  entry?: WriteResult;
 }
 
 export interface BatchSyncResponse {

@@ -1,6 +1,8 @@
 import type { TextChunk, TextFileMetadata } from "./contracts";
+import { applyPatch } from "./patch";
 
 export const TEXT_CHUNK_SIZE = 512 * 1024;
+export const WEB_ACK_TTL_MS = 24 * 60 * 60 * 1000;
 
 type TextFileRow = Record<string, SqlStorageValue> & {
   pathLower: SqlStorageValue;
@@ -15,6 +17,24 @@ type TextFileRow = Record<string, SqlStorageValue> & {
 type TextChunkRow = Record<string, SqlStorageValue> & {
   chunkIndex: SqlStorageValue;
   data: SqlStorageValue;
+};
+
+type TextCheckpointRow = Record<string, SqlStorageValue> & {
+  revision: SqlStorageValue;
+  size: SqlStorageValue;
+  chunkCount: SqlStorageValue;
+};
+
+type TextUpdateRow = Record<string, SqlStorageValue> & {
+  fromRev: SqlStorageValue;
+  toRev: SqlStorageValue;
+  patch: SqlStorageValue;
+};
+
+type DeviceAckRow = Record<string, SqlStorageValue> & {
+  deviceKey: SqlStorageValue;
+  revision: SqlStorageValue;
+  updatedAt: SqlStorageValue;
 };
 
 export function initializeTextStoreSchema(sql: SqlStorage): void {
@@ -199,6 +219,171 @@ export class TextStore {
     });
   }
 
+  readCheckpoint(path: string): { revision: number; text: string } | null {
+    const pathLower = lowerPath(path);
+    const row = this.storage.sql.exec<TextCheckpointRow>(
+      `SELECT revision, size, chunk_count AS chunkCount
+       FROM text_checkpoints WHERE path_lower = ?`,
+      pathLower
+    ).toArray()[0];
+    if (!row) return null;
+
+    return {
+      revision: Number(row.revision),
+      text: this.readChunkedText(
+        "text_checkpoint_chunks",
+        pathLower,
+        Number(row.size),
+        Number(row.chunkCount)
+      ),
+    };
+  }
+
+  appendUpdate(input: {
+    path: string;
+    fromRevision: number;
+    toRevision: number;
+    patch: string;
+  }): void {
+    const pathLower = lowerPath(input.path);
+    const chunks = chunkUtf8(input.patch);
+    const chunked =
+      chunks.reduce((total, chunk) => total + chunk.data.byteLength, 0) >
+      TEXT_CHUNK_SIZE;
+    this.storage.transactionSync(() => {
+      this.storage.sql.exec(
+        `DELETE FROM text_update_chunks WHERE path_lower = ? AND to_rev = ?`,
+        pathLower,
+        input.toRevision
+      );
+      if (chunked) {
+        for (const chunk of chunks) {
+          this.storage.sql.exec(
+            `INSERT INTO text_update_chunks
+             (path_lower, to_rev, chunk_idx, data) VALUES (?, ?, ?, ?)`,
+            pathLower,
+            input.toRevision,
+            chunk.index,
+            chunk.data
+          );
+        }
+      }
+      this.storage.sql.exec(
+        `INSERT OR REPLACE INTO text_updates (path_lower, from_rev, to_rev, patch)
+         VALUES (?, ?, ?, ?)`,
+        pathLower,
+        input.fromRevision,
+        input.toRevision,
+        chunked ? "" : input.patch
+      );
+    });
+  }
+
+  reconstruct(path: string, targetRevision: number): string | null {
+    const head = this.readFile(path);
+    if (!head || targetRevision > head.metadata.revision) return null;
+    if (targetRevision === head.metadata.revision) return head.text;
+
+    const checkpoint = this.readCheckpoint(path);
+    if (!checkpoint || targetRevision < checkpoint.revision) return null;
+    if (targetRevision === checkpoint.revision) return checkpoint.text;
+
+    let text = checkpoint.text;
+    let expectedFrom = checkpoint.revision;
+    const updates = this.storage.sql.exec<TextUpdateRow>(
+      `SELECT from_rev AS fromRev, to_rev AS toRev, patch
+       FROM text_updates
+       WHERE path_lower = ? AND to_rev > ? AND to_rev <= ?
+       ORDER BY to_rev`,
+      lowerPath(path),
+      checkpoint.revision,
+      targetRevision
+    ).toArray();
+
+    for (const update of updates) {
+      const fromRev = Number(update.fromRev);
+      const toRev = Number(update.toRev);
+      if (fromRev !== expectedFrom || toRev !== expectedFrom + 1) return null;
+      const patch = this.readUpdatePatch(
+        lowerPath(path),
+        toRev,
+        String(update.patch)
+      );
+      const next = applyPatch(text, patch);
+      if (next === null) return null;
+      text = next;
+      expectedFrom = toRev;
+    }
+
+    return expectedFrom === targetRevision ? text : null;
+  }
+
+  setAck(deviceKey: string, path: string, revision: number): boolean {
+    const pathLower = lowerPath(path);
+    const existing = this.storage.sql.exec<Record<string, SqlStorageValue>>(
+      `SELECT revision FROM device_acks WHERE device_key = ? AND path_lower = ?`,
+      deviceKey,
+      pathLower
+    ).toArray()[0];
+    if (existing && Number(existing.revision) >= revision) return false;
+
+    this.storage.sql.exec(
+      `INSERT OR REPLACE INTO device_acks (device_key, path_lower, revision, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      deviceKey,
+      pathLower,
+      revision,
+      new Date().toISOString()
+    );
+    return true;
+  }
+
+  minAckRevision(
+    path: string,
+    retainedDeviceKeys: ReadonlySet<string>,
+    now = Date.now()
+  ): number | null {
+    const rows = this.storage.sql.exec<DeviceAckRow>(
+      `SELECT device_key AS deviceKey, revision, updated_at AS updatedAt
+       FROM device_acks WHERE path_lower = ?`,
+      lowerPath(path)
+    ).toArray();
+    let minimum: number | null = null;
+
+    for (const row of rows) {
+      const deviceKey = String(row.deviceKey);
+      const retained = deviceKey.startsWith("web:")
+        ? isRecentTimestamp(String(row.updatedAt), now - WEB_ACK_TTL_MS)
+        : retainedDeviceKeys.has(deviceKey);
+      if (!retained) continue;
+
+      const revision = Number(row.revision);
+      minimum = minimum === null ? revision : Math.min(minimum, revision);
+    }
+    return minimum;
+  }
+
+  advanceCheckpoint(path: string, revision: number): boolean {
+    const current = this.readCheckpoint(path);
+    if (current && current.revision >= revision) return false;
+    const text = this.reconstruct(path, revision);
+    if (text === null) return false;
+    this.writeCheckpoint({ path, revision, text });
+    this.storage.transactionSync(() => {
+      this.storage.sql.exec(
+        `DELETE FROM text_update_chunks WHERE path_lower = ? AND to_rev <= ?`,
+        lowerPath(path),
+        revision
+      );
+      this.storage.sql.exec(
+        `DELETE FROM text_updates WHERE path_lower = ? AND to_rev <= ?`,
+        lowerPath(path),
+        revision
+      );
+    });
+    return true;
+  }
+
   readFile(path: string): { metadata: TextFileMetadata; text: string } | null {
     const pathLower = lowerPath(path);
     const row = this.storage.sql.exec<TextFileRow>(
@@ -317,6 +502,86 @@ export class TextStore {
       }
     });
   }
+
+  private readChunkedText(
+    table: "text_chunks" | "text_checkpoint_chunks",
+    pathLower: string,
+    size: number,
+    chunkCount: number
+  ): string {
+    const rows = this.storage.sql.exec<TextChunkRow>(
+      `SELECT chunk_idx AS chunkIndex, data
+       FROM ${table} WHERE path_lower = ? ORDER BY chunk_idx`,
+      pathLower
+    ).toArray();
+
+    if (rows.length !== chunkCount) {
+      throw new Error(`Text chunk count mismatch for ${pathLower}`);
+    }
+
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (let index = 0; index < rows.length; index++) {
+      const rowIndex = Number(rows[index].chunkIndex);
+      const data = rows[index].data;
+      if (rowIndex !== index || !(data instanceof ArrayBuffer)) {
+        throw new Error(`Invalid text chunk ${index} for ${pathLower}`);
+      }
+      const chunk = new Uint8Array(data);
+      if (offset + chunk.byteLength > bytes.byteLength) {
+        throw new Error(`Text chunks exceed declared size for ${pathLower}`);
+      }
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    if (offset !== size) {
+      throw new Error(`Text size mismatch for ${pathLower}`);
+    }
+
+    return new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
+  }
+
+  private readUpdatePatch(
+    pathLower: string,
+    toRevision: number,
+    inlinePatch: string
+  ): string {
+    if (inlinePatch !== "") return inlinePatch;
+    const rows = this.storage.sql.exec<TextChunkRow>(
+      `SELECT chunk_idx AS chunkIndex, data
+       FROM text_update_chunks
+       WHERE path_lower = ? AND to_rev = ?
+       ORDER BY chunk_idx`,
+      pathLower,
+      toRevision
+    ).toArray();
+    if (rows.length === 0) return "";
+
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (let index = 0; index < rows.length; index++) {
+      const data = rows[index].data;
+      if (Number(rows[index].chunkIndex) !== index || !(data instanceof ArrayBuffer)) {
+        throw new Error(`Invalid update chunk ${index} for ${pathLower}`);
+      }
+      const chunk = new Uint8Array(data);
+      chunks.push(chunk);
+      size += chunk.byteLength;
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
+  }
 }
 
 function metadataFromRow(row: TextFileRow): TextFileMetadata {
@@ -337,4 +602,9 @@ function isUtf8ContinuationByte(byte: number): boolean {
 
 function lowerPath(path: string): string {
   return path.toLowerCase();
+}
+
+function isRecentTimestamp(value: string, cutoff: number): boolean {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp >= cutoff;
 }

@@ -1,8 +1,14 @@
 import { Notice, TFile } from "obsidian";
 import type { App, Vault } from "obsidian";
-import { LapisClient, StaleWriteError } from "../net/client";
-import type { LapisSettings, ManifestEntry, SyncJournal, VaultManifest } from "../types";
-import { applyPatch, createPatch } from "./diff";
+import { LapisClient } from "../net/client";
+import type {
+  LapisSettings,
+  ManifestEntry,
+  SyncJournal,
+  VaultManifest,
+  WriteResult,
+} from "../types";
+import { applyPatch } from "./diff";
 import { base64ToBytes, bytesToBase64, sha256Hex } from "./hash";
 import { appendPendingOp, emptyJournal, removeEntry, setEntry } from "./journal";
 import { isVaultInternal, lowerPath, shouldSyncPath } from "./paths";
@@ -94,10 +100,12 @@ export class SyncEngine {
       return (journal.fileRevisions[key] ?? -1) < entry.revision;
     });
     let pulled = 0;
+    const applied: ManifestEntry[] = [];
     for (const entry of changedEntries) {
       const key = lowerPath(entry.path);
       if ((journal.fileRevisions[key] ?? -1) < entry.revision) {
         await this.pullEntry(entry, journal);
+        applied.push(entry);
         pulled += 1;
         this.reportProgress(
           "pulling",
@@ -108,6 +116,9 @@ export class SyncEngine {
       }
     }
     await this.options.setJournal(journal);
+    for (const entry of applied) {
+      await this.ackEntry(entry);
+    }
   }
 
   async replayPending(): Promise<void> {
@@ -143,6 +154,9 @@ export class SyncEngine {
       }
       journal.pendingOps.shift();
       await this.options.setJournal(journal);
+      if (result.entry && !result.entry.conflictNote) {
+        await this.ackEntry(result.entry);
+      }
       this.reportProgress(
         "replaying",
         completed + 1,
@@ -249,31 +263,28 @@ export class SyncEngine {
 
     const contentType = contentTypeFromPath(path);
     const baseRevision = journal.fileRevisions[key] ?? -1;
+    let result: WriteResult;
 
-    if (isTextContentType(contentType) && baseRevision >= 0) {
-      const server = await this.client.getFileWithRevision(
-        this.vaultId,
-        path,
-        this.token
-      );
-      const serverText = new TextDecoder().decode(server.content);
-      const clientText = new TextDecoder().decode(content);
-      const patch = createPatch(path, serverText, clientText);
-      const result = await this.applyTextPatchWithRebase(
-        path,
-        patch,
-        server.revision,
-        clientText
-      );
-      setEntry(journal, result, hash);
-    } else {
-      const result = isTextContentType(contentType)
-        ? await this.putTextWithRebase(path, content, contentType, baseRevision)
-        : await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
-      setEntry(journal, result, hash);
+    result = await this.client.putFileWithBaseRevision(
+      this.vaultId,
+      path,
+      content,
+      contentType,
+      baseRevision,
+      this.token
+    );
+    let appliedHash = hash;
+    if (!result.conflictNote && result.revision > baseRevision + 1) {
+      const merged = await this.client.getFile(this.vaultId, result.path, this.token);
+      await this.writeLocal(result.path, merged, result.contentType);
+      appliedHash = await sha256Hex(merged);
     }
+    setEntry(journal, result, appliedHash);
 
     await this.options.setJournal(journal);
+    if (!result.conflictNote) {
+      await this.ackEntry(result);
+    }
   }
 
   async pushRename(oldPath: string, newPath: string): Promise<void> {
@@ -286,6 +297,7 @@ export class SyncEngine {
     removeEntry(journal, oldPath);
     setEntry(journal, entry, oldHash);
     await this.options.setJournal(journal);
+    await this.ackEntry(entry);
   }
 
   async pushDelete(path: string): Promise<void> {
@@ -356,6 +368,13 @@ export class SyncEngine {
             revision,
           }, await sha256Hex(bytes));
           await this.options.setJournal(journal);
+          await this.ackEntry({
+            path,
+            size: bytes.byteLength,
+            contentType: contentTypeFromPath(path),
+            updatedAt: new Date().toISOString(),
+            revision,
+          });
           return;
         }
       }
@@ -366,6 +385,7 @@ export class SyncEngine {
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
     await this.pullEntry(entry, journal);
     await this.options.setJournal(journal);
+    await this.ackEntry(entry);
   }
 
   async applyRemoteRename(oldPath: string, newPath: string): Promise<void> {
@@ -415,6 +435,7 @@ export class SyncEngine {
         // Persist each accepted upload so a failed or slow initial seal does
         // not make the next sync start the entire seed again.
         await this.options.setJournal(journal);
+        await this.ackEntry(entry);
       }
       this.reportProgress(
         "seeding",
@@ -450,9 +471,9 @@ export class SyncEngine {
       if (count === 1 || count % 20 === 0 || count === entries.length) {
         new Notice(`Lapis: pulling ${count} / ${entries.length} files`);
       }
-      const content = await this.client.getFile(this.vaultId, entry.path, this.token);
-      await this.writeLocal(entry.path, content, entry.contentType);
-      setEntry(journal, entry, await sha256Hex(content));
+      await this.pullEntry(entry, journal);
+      await this.options.setJournal(journal);
+      await this.ackEntry(entry);
       this.reportProgress(
         "pulling",
         count,
@@ -484,12 +505,16 @@ export class SyncEngine {
       if (local && !server) {
         const entry = await this.client.putFile(this.vaultId, local.path, local.content, local.contentType, this.token);
         setEntry(journal, entry, local.hash);
+        await this.options.setJournal(journal);
+        await this.ackEntry(entry);
         this.reportReconcileProgress(count, keys.size);
         continue;
       }
 
       if (!local && server) {
         await this.pullEntry(server, journal);
+        await this.options.setJournal(journal);
+        await this.ackEntry(server);
         this.reportReconcileProgress(count, keys.size);
         continue;
       }
@@ -498,11 +523,31 @@ export class SyncEngine {
         const serverHash = await this.hashServerFile(server);
         if (serverHash === local.hash) {
           setEntry(journal, server, local.hash);
+          await this.ackEntry(server);
         } else {
-          const result = isTextContentType(local.contentType)
-            ? await this.putTextWithRebase(local.path, local.content, local.contentType, server.revision)
-            : await this.client.putFileWithBaseRevision(this.vaultId, local.path, local.content, local.contentType, server.revision, this.token);
-          setEntry(journal, result, local.hash);
+          const result = await this.client.putFileWithBaseRevision(
+            this.vaultId,
+            local.path,
+            local.content,
+            local.contentType,
+            server.revision,
+            this.token
+          );
+          let appliedHash = local.hash;
+          if (!result.conflictNote && result.revision > server.revision + 1) {
+            const merged = await this.client.getFile(
+              this.vaultId,
+              result.path,
+              this.token
+            );
+            await this.writeLocal(result.path, merged, result.contentType);
+            appliedHash = await sha256Hex(merged);
+          }
+          setEntry(journal, result, appliedHash);
+          await this.options.setJournal(journal);
+          if (!result.conflictNote) {
+            await this.ackEntry(result);
+          }
         }
       }
       this.reportReconcileProgress(count, keys.size);
@@ -518,49 +563,12 @@ export class SyncEngine {
     setEntry(journal, entry, await sha256Hex(content));
   }
 
-  private async applyTextPatchWithRebase(path: string, patch: string, baseRevision: number, clientText: string): Promise<ManifestEntry> {
-    try {
-      return await this.client.applyPatch(this.vaultId, path, patch, baseRevision, this.token);
-    } catch (error) {
-      if (!(error instanceof StaleWriteError)) throw error;
-      const server = await this.client.getFileWithRevision(
-        this.vaultId,
-        path,
-        this.token
-      );
-      const serverText = new TextDecoder().decode(server.content);
-      const rebasedPatch = createPatch(path, serverText, clientText);
-      return this.client.applyPatch(
-        this.vaultId,
-        path,
-        rebasedPatch,
-        server.revision,
-        this.token
-      );
-    }
-  }
-
-  private async putTextWithRebase(path: string, content: ArrayBuffer, contentType: string, baseRevision: number): Promise<ManifestEntry> {
-    const clientText = new TextDecoder().decode(content);
-    try {
-      return await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
-    } catch (error) {
-      if (!(error instanceof StaleWriteError)) throw error;
-      const server = await this.client.getFileWithRevision(
-        this.vaultId,
-        path,
-        this.token
-      );
-      const serverText = new TextDecoder().decode(server.content);
-      const rebasedPatch = createPatch(path, serverText, clientText);
-      return this.client.applyPatch(
-        this.vaultId,
-        path,
-        rebasedPatch,
-        server.revision,
-        this.token
-      );
-    }
+  private async ackEntry(entry: ManifestEntry): Promise<void> {
+    await this.client.postAcks(
+      this.vaultId,
+      [{ path: entry.path, revision: entry.revision }],
+      this.token
+    );
   }
 
   private async hashServerFile(entry: ManifestEntry): Promise<string> {

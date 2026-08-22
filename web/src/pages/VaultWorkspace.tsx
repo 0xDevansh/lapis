@@ -261,6 +261,11 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           baseContent: content,
           baseRevision: entry.revision,
         });
+        void api.postAcks(vaultId, [
+          { path: entry.path, revision: entry.revision },
+        ]).catch((error) => {
+          console.warn("[lapis] failed to acknowledge loaded revision", error);
+        });
         setLoad(null);
       })
       .catch((e) => {
@@ -319,23 +324,28 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       if (tab.editBuffer === undefined) return;
       setSaving(true);
       try {
-        let result: api.ManifestEntry;
-        try {
-          result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
-            baseRevision: tab.baseRevision ?? 0,
-          });
-        } catch (error) {
-          if (!(error instanceof api.StaleWriteError)) throw error;
-          await api.getFileText(vaultId, tab.path);
-          result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
-            baseRevision: error.headRevision,
-          });
-        }
+        const baseRevision = tab.baseRevision ?? 0;
+        const result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
+          baseRevision,
+        });
         await refreshManifest();
+        if (result.conflictNote) {
+          toast(`Conflict saved to ${result.conflictNote}`, { tone: "error" });
+          return;
+        }
+        const savedContent =
+          result.revision > baseRevision + 1
+            ? await api.getFileText(vaultId, result.path)
+            : tab.editBuffer;
+        void api.postAcks(vaultId, [
+          { path: result.path, revision: result.revision },
+        ]).catch((error) => {
+          console.warn("[lapis] failed to acknowledge saved revision", error);
+        });
         dispatch({
           type: "MARK_TAB_SAVED",
           id: tab.id,
-          content: tab.editBuffer,
+          content: savedContent,
           revision: result.revision,
         });
         toast("Saved", { tone: "success", duration: 1500 });

@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { contentKey } from "../src/vault/manifest";
+import { contentKey, type ManifestEntry } from "../src/vault/manifest";
 import { VaultCoordinator } from "../src/vault/coordinator";
 import { createPatch } from "../src/vault/patch";
 import {
@@ -16,6 +16,23 @@ function coordinator(vaultId: string) {
 }
 
 async function initialize(vaultId: string) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS devices (
+      id TEXT PRIMARY KEY,
+      vault_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      sync_token TEXT NOT NULL UNIQUE,
+      receive_internals INTEGER NOT NULL DEFAULT 0,
+      revoked INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT,
+      kind TEXT NOT NULL DEFAULT 'plugin',
+      capabilities TEXT,
+      conflict_policy TEXT NOT NULL DEFAULT 'rebase',
+      sync_cursor TEXT
+    )`
+  ).run();
   const stub = coordinator(vaultId);
   await stub.initialize({
     id: vaultId,
@@ -84,6 +101,15 @@ describe("SQLite text heads", () => {
           expect(rows[index].chunkIndex).toBe(index);
           expect(() => decoder.decode(rows[index].data)).not.toThrow();
         }
+        const checkpoint = (
+          instance as unknown as {
+            textStore: {
+              readCheckpoint(path: string): { revision: number; text: string } | null;
+            };
+          }
+        ).textStore.readCheckpoint(path);
+        expect(checkpoint?.revision).toBe(entry.revision);
+        expect(checkpoint?.text).toBe(text);
 
         // Simulate eviction of the process-local cache. The next RPC must
         // reconstruct the head solely from persisted SQLite chunks.
@@ -384,4 +410,243 @@ describe("SQLite text heads", () => {
     expect(new TextDecoder().decode(content?.bytes)).toBe(modified);
     expect(await env.VAULT_BUCKET.get(contentKey(vaultId, path))).toBeNull();
   });
+
+  it("reconstructs SQLite ancestors from checkpointed text updates", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "history.md";
+    const revisions = Array.from(
+      { length: 51 },
+      (_, revision) =>
+        `${Array.from({ length: revision + 1 }, (_value, line) => `line ${line}`).join("\n")}\n`
+    );
+    const entries: ManifestEntry[] = [];
+
+    for (const revision of revisions) {
+      entries.push(
+        await stub.syncPutFile(
+          vaultId,
+          path,
+          new TextEncoder().encode(revision).buffer as ArrayBuffer,
+          "text/markdown",
+          entries.at(-1)?.revision
+        )
+      );
+    }
+
+    await runInDurableObject(stub, async (instance: VaultCoordinator) => {
+      const store = (
+        instance as unknown as {
+          textStore: { reconstruct(path: string, revision: number): string | null };
+        }
+      ).textStore;
+
+      for (const [index, entry] of entries.entries()) {
+        expect(store.reconstruct(path, entry.revision)).toBe(revisions[index]);
+      }
+    });
+  });
+
+  it("chunks oversized update patches and reconstructs through them", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "large-update.md";
+    const firstText = `${"a".repeat(TEXT_CHUNK_SIZE + 1)}\n`;
+    const secondText = `${"b".repeat(TEXT_CHUNK_SIZE + 1)}\n`;
+    const first = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode(firstText).buffer as ArrayBuffer,
+      "text/markdown"
+    );
+    const second = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode(secondText).buffer as ArrayBuffer,
+      "text/markdown",
+      first.revision
+    );
+    await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode(`${secondText}tail\n`).buffer as ArrayBuffer,
+      "text/markdown",
+      second.revision
+    );
+
+    await runInDurableObject(stub, async (instance: VaultCoordinator, state) => {
+      const chunks = state.storage.sql
+        .exec(
+          `SELECT chunk_idx FROM text_update_chunks
+           WHERE path_lower = ? AND to_rev = ?`,
+          path.toLowerCase(),
+          second.revision
+        )
+        .toArray();
+      expect(chunks.length).toBeGreaterThan(1);
+      const store = (
+        instance as unknown as {
+          textStore: { reconstruct(path: string, revision: number): string | null };
+        }
+      ).textStore;
+      expect(store.reconstruct(path, second.revision)).toBe(secondText);
+    });
+  });
+
+  it("advances checkpoints when a device acks the current head", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "acked.md";
+    const first = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("first").buffer as ArrayBuffer,
+      "text/markdown"
+    );
+    const second = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("second").buffer as ArrayBuffer,
+      "text/markdown",
+      first.revision
+    );
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(
+        state.storage.sql
+          .exec(`SELECT to_rev FROM text_updates WHERE path_lower = ?`, path.toLowerCase())
+          .toArray()
+      ).toHaveLength(1);
+    });
+
+    await stub.recordAcks(vaultId, "plugin:test", {
+      acks: [{ path, revision: second.revision }],
+    });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const checkpoint = state.storage.sql
+        .exec<{ revision: number }>(
+          `SELECT revision FROM text_checkpoints WHERE path_lower = ?`,
+          path.toLowerCase()
+        )
+        .toArray()[0];
+      expect(checkpoint.revision).toBe(second.revision);
+      expect(
+        state.storage.sql
+          .exec(`SELECT to_rev FROM text_updates WHERE path_lower = ?`, path.toLowerCase())
+          .toArray()
+      ).toHaveLength(0);
+    });
+  });
+
+  it("keeps history at the slowest retained device and expires web acks", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "retention.md";
+    const entries: ManifestEntry[] = [];
+    for (const text of ["one", "two", "three"]) {
+      entries.push(
+        await stub.syncPutFile(
+          vaultId,
+          path,
+          new TextEncoder().encode(text).buffer as ArrayBuffer,
+          "text/markdown",
+          entries.at(-1)?.revision
+        )
+      );
+    }
+
+    const now = new Date().toISOString();
+    for (const name of ["slow", "fast"]) {
+      const id = `${vaultId}-${name}`;
+      await env.DB.prepare(
+        `INSERT INTO devices
+         (id, vault_id, owner_id, device_name, sync_token, created_at, last_seen_at)
+         VALUES (?, ?, 'owner-1', ?, ?, ?, ?)`
+      )
+        .bind(id, vaultId, name, `${vaultId}-${name}`, now, now)
+        .run();
+    }
+
+    await stub.recordAcks(vaultId, `plugin:${vaultId}-slow`, {
+      acks: [{ path, revision: entries[0].revision }],
+    });
+    await stub.recordAcks(vaultId, `plugin:${vaultId}-fast`, {
+      acks: [{ path, revision: entries[2].revision }],
+    });
+    await stub.recordAcks(vaultId, "web:expired", {
+      acks: [{ path, revision: entries[1].revision }],
+    });
+    await runInDurableObject(stub, async (_instance, state) => {
+      const checkpoint = state.storage.sql
+        .exec<{ revision: number }>(
+          `SELECT revision FROM text_checkpoints WHERE path_lower = ?`,
+          path.toLowerCase()
+        )
+        .one();
+      expect(checkpoint.revision).toBe(entries[0].revision);
+      state.storage.sql.exec(
+        `UPDATE device_acks SET updated_at = ?
+         WHERE device_key = 'web:expired' AND path_lower = ?`,
+        new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        path.toLowerCase()
+      );
+    });
+
+    await stub.recordAcks(vaultId, `plugin:${vaultId}-slow`, {
+      acks: [{ path, revision: entries[2].revision }],
+    });
+    await runInDurableObject(stub, async (_instance, state) => {
+      const checkpoint = state.storage.sql
+        .exec<{ revision: number }>(
+          `SELECT revision FROM text_checkpoints WHERE path_lower = ?`,
+          path.toLowerCase()
+        )
+        .one();
+      expect(checkpoint.revision).toBe(entries[2].revision);
+      expect(
+        state.storage.sql
+          .exec(`SELECT to_rev FROM text_updates WHERE path_lower = ?`, path.toLowerCase())
+          .toArray()
+      ).toHaveLength(0);
+    });
+  });
+
+  it("creates a conflict note when the client's base was garbage-collected", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "gc-conflict.md";
+    const first = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("base").buffer as ArrayBuffer,
+      "text/markdown"
+    );
+    const second = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("server").buffer as ArrayBuffer,
+      "text/markdown",
+      first.revision
+    );
+    await stub.recordAcks(vaultId, "plugin:test", {
+      acks: [{ path, revision: second.revision }],
+    });
+
+    const result = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("client").buffer as ArrayBuffer,
+      "text/markdown",
+      first.revision,
+      "plugin:test"
+    );
+
+    expect(result.conflictNote).toMatch(/^\.sync-conflicts\//);
+    const head = await stub.getContent(vaultId, path);
+    expect(new TextDecoder().decode(head?.bytes)).toBe("server");
+    const note = await stub.getContent(vaultId, result.conflictNote!);
+    expect(new TextDecoder().decode(note?.bytes)).toContain("Client Version (not applied)");
+  });
+
 });

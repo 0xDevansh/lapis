@@ -95,6 +95,36 @@ vaultRoutes.get("/:id/manifest", requireSession, async (c) => {
   return c.json(manifest);
 });
 
+vaultRoutes.post("/:id/acks", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  let body: { acks?: Array<{ path?: string; revision?: number }> };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  const acks = (body.acks ?? []).filter(
+    (ack): ack is { path: string; revision: number } =>
+      typeof ack.path === "string" && typeof ack.revision === "number"
+  );
+
+  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
+  const stub = c.env.VAULT_COORDINATOR.get(doId);
+  try {
+    return c.json(
+      await stub.recordAcks(id, deviceAuthor("web", session.sessionId), { acks })
+    );
+  } catch (e: unknown) {
+    const err = e as { status?: number; message?: string };
+    return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
+  }
+});
+
 // ── File content ───────────────────────────────────────────────────────────
 
 /**

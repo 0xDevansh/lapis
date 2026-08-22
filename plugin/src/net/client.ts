@@ -11,6 +11,7 @@ import type {
   StaleWriteResponse,
   SeedCompleteResult,
   VaultManifest,
+  WriteResult,
 } from "../types";
 
 export class StaleWriteError extends Error {
@@ -180,8 +181,8 @@ export class LapisClient {
     contentType: string,
     baseRevision: number,
     token: string
-  ): Promise<ManifestEntry> {
-    const response = await this.request<ManifestEntry | StaleWriteResponse>({
+  ): Promise<WriteResult> {
+    const response = await this.request<WriteResult | StaleWriteResponse>({
       method: "PUT",
       path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
       body: content,
@@ -264,6 +265,24 @@ export class LapisClient {
       throw new Error(response.text || `Batch sync failed (${response.status})`);
     }
     return response.data;
+  }
+
+  async postAcks(
+    vaultId: string,
+    acks: Array<{ path: string; revision: number }>,
+    token: string
+  ): Promise<void> {
+    if (acks.length === 0) return;
+    const response = await this.request<{ accepted: number }>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/acks`,
+      body: JSON.stringify({ acks }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200) {
+      throw new Error(response.text || `Ack failed (${response.status})`);
+    }
   }
 
   async updateDevice(vaultId: string, token: string, receiveInternals: boolean): Promise<void> {

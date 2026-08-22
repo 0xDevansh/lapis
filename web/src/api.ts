@@ -106,6 +106,10 @@ export interface ManifestEntry {
   revision: number;
 }
 
+export interface WriteResult extends ManifestEntry {
+  conflictNote?: string;
+}
+
 export class StaleWriteError extends Error {
   constructor(message: string, readonly headRevision: number) {
     super(message);
@@ -121,6 +125,17 @@ export interface VaultManifest {
 
 export async function getManifest(vaultId: string): Promise<VaultManifest> {
   return apiFetch<VaultManifest>(`/api/vaults/${vaultId}/manifest`);
+}
+
+export async function postAcks(
+  vaultId: string,
+  acks: Array<{ path: string; revision: number }>
+): Promise<void> {
+  if (acks.length === 0) return;
+  await apiFetch<{ accepted: number }>(`/api/vaults/${vaultId}/acks`, {
+    method: "POST",
+    body: JSON.stringify({ acks }),
+  });
 }
 
 /** Fetch the raw text content of a vault file. */
@@ -144,7 +159,7 @@ export async function putTextFile(
   path: string,
   content: string,
   options?: { baseRevision?: number }
-): Promise<ManifestEntry> {
+): Promise<WriteResult> {
   const res = await fetch(`/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`, {
     method: "PUT",
     credentials: "include",
@@ -154,7 +169,7 @@ export async function putTextFile(
     },
     body: JSON.stringify({ content }),
   });
-  if (res.ok) return res.json() as Promise<ManifestEntry>;
+  if (res.ok) return res.json() as Promise<WriteResult>;
   const body = await res.json().catch(() => ({})) as { error?: string; headRevision?: number; serverRevision?: number };
   if (res.status === 409) {
     throw new StaleWriteError(body.error ?? "Revision conflict", body.headRevision ?? body.serverRevision ?? -1);
