@@ -2,12 +2,20 @@ import { Notice, Plugin, TFile } from "obsidian";
 import { LapisClient } from "./net/client";
 import { NotifyClient, type NotifyMessage } from "./net/notify";
 import { LapisSettingTab, normalizeSettings } from "./settings";
-import type { LapisSettings, PluginData, SyncJournal } from "./types";
+import type {
+  ConflictPayload,
+  ConflictResolutionRequest,
+  LapisSettings,
+  PluginData,
+  SyncJournal,
+} from "./types";
 import { SyncEngine, type SyncProgress } from "./sync/engine";
 import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
+import { ConflictModal } from "./ui/conflict-modal";
 import { countConflicts, LapisStatusBar } from "./ui/status";
 import { deviceAuthor } from "./identity";
+import { PluginDevice } from "./device/plugin-device";
 
 const LOCAL_CHANGE_DEBOUNCE_MS = 5_000;
 
@@ -22,11 +30,15 @@ export default class LapisPlugin extends Plugin {
   private lastPresenceCount = 0;
   private currentOpenPath: string | null = null;
   private syncChain: Promise<void> = Promise.resolve();
+  private conflicts: ConflictPayload[] = [];
 
   async onload() {
     await this.loadSettings();
 
-    this.statusBar = new LapisStatusBar(this.addStatusBarItem());
+    this.statusBar = new LapisStatusBar(
+      this.addStatusBarItem(),
+      () => void this.openConflictResolver()
+    );
     this.updateStatus();
 
     this.addCommand({
@@ -60,6 +72,12 @@ export default class LapisPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "resolve-sync-conflicts",
+      name: "Resolve sync conflicts",
+      callback: () => void this.openConflictResolver(),
+    });
+
+    this.addCommand({
       id: "show-sync-diagnostics",
       name: "Show sync diagnostics",
       callback: () => void this.showSyncDiagnostics(),
@@ -70,6 +88,7 @@ export default class LapisPlugin extends Plugin {
     this.registerWatcher();
     this.registerEditorChangeFallback();
     this.startNotify();
+    this.refreshConflictsQuietly();
     this.registerInterval(window.setInterval(() => void this.pullChanged(), 5 * 60 * 1000));
     this.registerInterval(window.setInterval(() => this.reportOpenFile(), 2000));
   }
@@ -143,6 +162,7 @@ export default class LapisPlugin extends Plugin {
     this.settings.deviceId = "";
     this.settings.lastConnectedAt = null;
     this.journal = null;
+    this.conflicts = [];
     this.notifyClient?.close();
     this.notifyClient = null;
     await this.saveSettings();
@@ -204,6 +224,7 @@ export default class LapisPlugin extends Plugin {
         } else {
           await engine.firstSync();
         }
+        await this.refreshConflicts();
         this.updateStatus();
       } catch (error) {
         this.updateStatus("error");
@@ -270,6 +291,83 @@ export default class LapisPlugin extends Plugin {
     }
   }
 
+  private async openConflictResolver(): Promise<void> {
+    if (!this.settings.syncToken) {
+      new Notice("Lapis: connect before resolving conflicts");
+      return;
+    }
+    try {
+      await this.refreshConflicts();
+      if (this.conflicts.length === 0) {
+        new Notice("Lapis: no unresolved sync conflicts");
+        return;
+      }
+      new ConflictModal(this.app, {
+        conflicts: this.conflicts,
+        onResolve: (request) => this.resolveConflict(request),
+        onOpenNote: (path) => this.openConflictNote(path),
+      }).open();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not load conflicts";
+      new Notice(`Lapis: ${message}`);
+    }
+  }
+
+  private async openConflictNote(path: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      new Notice("Lapis: conflict note is not available locally");
+      return;
+    }
+    await this.app.workspace.getLeaf(false).openFile(file);
+  }
+
+  private async resolveConflict(
+    request: ConflictResolutionRequest
+  ): Promise<void> {
+    await this.enqueueSync(async () => {
+      const previousSuppress = this.suppressWatcher;
+      this.suppressWatcher = true;
+      try {
+        const device = new PluginDevice({
+          app: this.app,
+          settings: this.settings,
+          getJournal: () => this.journal,
+          setJournal: (journal) => this.saveJournal(journal),
+          notifyClient: this.notifyClient,
+        });
+        await device.resolveConflict(request);
+        this.conflicts = this.conflicts.filter(
+          (conflict) => conflict.conflictNote !== request.conflictNote
+        );
+        this.updateStatus();
+      } finally {
+        this.suppressWatcher = previousSuppress;
+      }
+    }, true);
+  }
+
+  private async refreshConflicts(): Promise<void> {
+    if (!this.settings.syncToken || !this.settings.vaultId) {
+      this.conflicts = [];
+      this.updateStatus();
+      return;
+    }
+    const client = new LapisClient(this.settings.serverUrl);
+    this.conflicts = await client.getConflicts(
+      this.settings.vaultId,
+      this.settings.syncToken
+    );
+    this.updateStatus();
+  }
+
+  private refreshConflictsQuietly(): void {
+    void this.refreshConflicts().catch((error) => {
+      console.warn("[lapis] could not refresh conflicts", error);
+    });
+  }
+
   private async showSyncDiagnostics() {
     const engine = new SyncEngine({
       app: this.app,
@@ -304,7 +402,10 @@ export default class LapisPlugin extends Plugin {
   private conflictCount(): number {
     const journalPaths = this.journal ? Object.keys(this.journal.fileRevisions) : [];
     const localPaths = this.app.vault.getFiles().map((file) => file.path);
-    return countConflicts([...journalPaths, ...localPaths]);
+    return Math.max(
+      this.conflicts.length,
+      countConflicts([...journalPaths, ...localPaths])
+    );
   }
 
   private startNotify() {
@@ -319,6 +420,7 @@ export default class LapisPlugin extends Plugin {
         this.updateStatus();
         if (reconnected) this.debug("notify reconnected");
         this.reportOpenFile(true);
+        this.refreshConflictsQuietly();
       },
       onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount()),
       onMessage: (message) => this.handleNotifyMessage(message),
@@ -357,6 +459,33 @@ export default class LapisPlugin extends Plugin {
 
     if (message.type === "same_file_warning") {
       new Notice(`Lapis: another session is editing ${message.path}`);
+      return;
+    }
+
+    if (message.type === "conflict") {
+      const index = this.conflicts.findIndex(
+        (conflict) =>
+          conflict.conflictNote === message.conflict.conflictNote
+      );
+      if (index >= 0) {
+        this.conflicts[index] = message.conflict;
+      } else {
+        this.conflicts.push(message.conflict);
+      }
+      this.updateStatus();
+      new Notice(
+        `Lapis: sync conflict in ${message.conflict.path}. Use “Resolve sync conflicts” to review it.`,
+        8_000
+      );
+      return;
+    }
+
+    if (message.type === "conflict_resolved") {
+      this.conflicts = this.conflicts.filter(
+        (conflict) => conflict.conflictNote !== message.conflictNote
+      );
+      this.updateStatus();
+      new Notice(`Lapis: conflict resolved for ${message.path}`);
     }
   }
 

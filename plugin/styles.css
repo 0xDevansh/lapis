@@ -148,4 +148,82 @@
 
 .lapis-status-conflicts {
   color: var(--text-warning);
+  cursor: pointer;
+}
+
+/* ── Conflict resolver ────────────────────────────────────────────────────── */
+
+.lapis-conflict-modal {
+  width: min(960px, 92vw);
+}
+
+.lapis-conflict-muted,
+.lapis-conflict-revisions {
+  color: var(--text-muted);
+}
+
+.lapis-conflict-select {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.lapis-conflict-versions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.lapis-conflict-version {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary-alt);
+}
+
+.lapis-conflict-version h3 {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: 0.8em;
+}
+
+.lapis-conflict-version pre {
+  min-height: 160px;
+  max-height: 320px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8em;
+}
+
+.lapis-conflict-version-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.lapis-conflict-merge-editor {
+  width: 100%;
+  min-height: 260px;
+  margin: 8px 0 12px;
+  padding: 10px;
+  resize: vertical;
+  font-family: var(--font-monospace);
+}
+
+.lapis-conflict-warning,
+.lapis-conflict-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+@media (max-width: 700px) {
+  .lapis-conflict-versions {
+    grid-template-columns: 1fr;
+  }
 }

@@ -7,6 +7,7 @@ import type {
   LapisResponse,
   ManifestEntry,
   BatchSyncResponse,
+  ConflictPayload,
   ConflictResolutionRequest,
   ConflictResolutionResult,
   PatchResponse,
@@ -305,6 +306,22 @@ export class LapisClient {
       );
     }
     return response.data;
+  }
+
+  async getConflicts(
+    vaultId: string,
+    token: string
+  ): Promise<ConflictPayload[]> {
+    const response = await this.request<{ conflicts: ConflictPayload[] }>({
+      path: `/api/sync/${encodeURIComponent(vaultId)}/conflicts`,
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(
+        response.text || `Conflict list failed (${response.status})`
+      );
+    }
+    return response.data.conflicts;
   }
 
   async updateDevice(vaultId: string, token: string, receiveInternals: boolean): Promise<void> {

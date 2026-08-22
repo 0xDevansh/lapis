@@ -2,7 +2,18 @@ import type { LapisSettings } from "../types";
 import { serverHostname, shortVaultId } from "../vault-link";
 
 export class LapisStatusBar {
-  constructor(private readonly element: HTMLElement) {}
+  constructor(
+    private readonly element: HTMLElement,
+    onClick?: () => void
+  ) {
+    if (onClick) {
+      this.element.addEventListener("click", onClick);
+      this.element.setAttribute(
+        "aria-label",
+        "Lapis sync status; click to review conflicts"
+      );
+    }
+  }
 
   update(settings: LapisSettings, state: "idle" | "connecting" | "syncing" | "error" = "idle", conflictCount = 0) {
     this.element.toggleClass("lapis-status-conflicts", conflictCount > 0);
