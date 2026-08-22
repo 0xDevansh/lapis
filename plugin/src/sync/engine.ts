@@ -179,11 +179,20 @@ export class SyncEngine {
     const baseRevision = journal.fileRevisions[key] ?? -1;
 
     if (isTextContentType(contentType) && baseRevision >= 0) {
-      const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
-      const serverText = new TextDecoder().decode(serverBytes);
+      const server = await this.client.getFileWithRevision(
+        this.vaultId,
+        path,
+        this.token
+      );
+      const serverText = new TextDecoder().decode(server.content);
       const clientText = new TextDecoder().decode(content);
       const patch = createPatch(path, serverText, clientText);
-      const result = await this.applyTextPatchWithRebase(path, patch, baseRevision, clientText);
+      const result = await this.applyTextPatchWithRebase(
+        path,
+        patch,
+        server.revision,
+        clientText
+      );
       setEntry(journal, result, hash);
     } else {
       const result = isTextContentType(contentType)
@@ -405,10 +414,20 @@ export class SyncEngine {
       return await this.client.applyPatch(this.vaultId, path, patch, baseRevision, this.token);
     } catch (error) {
       if (!(error instanceof StaleWriteError)) throw error;
-      const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
-      const serverText = new TextDecoder().decode(serverBytes);
+      const server = await this.client.getFileWithRevision(
+        this.vaultId,
+        path,
+        this.token
+      );
+      const serverText = new TextDecoder().decode(server.content);
       const rebasedPatch = createPatch(path, serverText, clientText);
-      return this.client.applyPatch(this.vaultId, path, rebasedPatch, error.headRevision, this.token);
+      return this.client.applyPatch(
+        this.vaultId,
+        path,
+        rebasedPatch,
+        server.revision,
+        this.token
+      );
     }
   }
 
@@ -418,10 +437,20 @@ export class SyncEngine {
       return await this.client.putFileWithBaseRevision(this.vaultId, path, content, contentType, baseRevision, this.token);
     } catch (error) {
       if (!(error instanceof StaleWriteError)) throw error;
-      const serverBytes = await this.client.getFile(this.vaultId, path, this.token);
-      const serverText = new TextDecoder().decode(serverBytes);
+      const server = await this.client.getFileWithRevision(
+        this.vaultId,
+        path,
+        this.token
+      );
+      const serverText = new TextDecoder().decode(server.content);
       const rebasedPatch = createPatch(path, serverText, clientText);
-      return this.client.applyPatch(this.vaultId, path, rebasedPatch, error.headRevision, this.token);
+      return this.client.applyPatch(
+        this.vaultId,
+        path,
+        rebasedPatch,
+        server.revision,
+        this.token
+      );
     }
   }
 

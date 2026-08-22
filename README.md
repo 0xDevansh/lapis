@@ -178,12 +178,12 @@ worker/   Cloudflare Worker — Hono API, Durable Objects, sync, search
 web/      React SPA — vault browser, Markdown renderer, CodeMirror editor
 plugin/   Obsidian plugin — device-code auth and two-way sync
 examples/ Example scripts and agent integrations
-docs/     Build slices, ADRs, PRD, self-hosting guide
+docs/     Architecture, PRDs, ADRs, self-hosting (see docs/README.md)
 ```
 
 ## Self-hosting notes
 
-See [`docs/self-hosting.md`](docs/self-hosting.md) for guidance on Cloudflare service configuration, Artifacts setup, storage limits, and operational recovery.
+See [`docs/ops/self-hosting.md`](docs/ops/self-hosting.md) for Cloudflare setup, Artifacts, limits, and recovery. For how sync works, start at [`docs/architecture.md`](docs/architecture.md).
 
 ## License
 

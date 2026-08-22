@@ -8,9 +8,9 @@ The missing piece is a locally-installed companion that watches the Local Vault,
 
 ## Solution
 
-An Obsidian community plugin that acts as a sync agent between the Local Vault and the Web Vault. The plugin connects once via a device-code flow (no pasting long secrets), then runs silently in the background: watching for local file changes, patching or uploading them to the server, pulling remote changes down, queuing work offline and replaying it on reconnect, and surfacing any merge conflicts as Conflict Notes inside the vault.
+An Obsidian community plugin that acts as a sync agent between the Local Vault and the Web Vault. The plugin connects once via a device-code flow (no pasting long secrets), then runs silently in the background: watching for local file changes, patching or uploading them to the server, pulling remote changes down, queuing work offline and replaying it on reconnect, and surfacing merge conflicts as Conflict Notes with explicit resolve actions (keep server / keep mine / manual merge — see [ADR 0010](../adr/0010-do-sqlite-text-and-conflict-resolve.md); web ships first, then plugin).
 
-The server already implements the full sync protocol. The plugin is a client that speaks it.
+The server already implements the sync protocol. The plugin is a client that speaks it.
 
 ## User Stories
 
@@ -71,14 +71,17 @@ The server already implements the full sync protocol. The plugin is a client tha
 44. As a Vault Owner, I want Conflict Notes created by the server to appear in my Local Vault under `.sync-conflicts/` automatically so that I can inspect and resolve them inside Obsidian.
 45. As a Vault Owner, I want the status bar to show a count of unresolved Conflict Notes so that I notice them without having to browse for them.
 46. As a Vault Owner, I want a command that opens the `.sync-conflicts/` folder in the Obsidian file explorer so that I can navigate to conflicts quickly.
-47. As a Vault Owner, I want the plugin to remove a Conflict Note from the conflict count in the status bar once I delete it so that resolving a conflict is as simple as deleting the note.
+47. As a Vault Owner, I want resolve actions in the plugin (keep server, keep mine, open for manual merge) so that I do not rely only on deleting notes by hand.
+48. As a Vault Owner, I want a resolved Conflict Note deleted automatically (and the status-bar count to drop) so that the conflicts folder stays clean.
 
 ### Vault Internals
-48. As a Vault Owner, I want the `receiveInternals` opt-in to be stored per-device on the server so that different devices can have different Vault Internals policies without affecting each other.
-49. As a Vault Owner, I want the plugin to notify the server of the `receiveInternals` setting when connecting or changing the toggle so that the server-side device record stays in sync.
-50. As a Vault Owner, I want the plugin to write received Vault Internals files to the local `.obsidian/` directory via the vault adapter so that the Obsidian configuration is updated correctly.
+49. As a Vault Owner, I want the `receiveInternals` opt-in to be stored per-device on the server so that different devices can have different Vault Internals policies without affecting each other.
+50. As a Vault Owner, I want the plugin to notify the server of the `receiveInternals` setting when connecting or changing the toggle so that the server-side device record stays in sync.
+51. As a Vault Owner, I want the plugin to write received Vault Internals files to the local `.obsidian/` directory via the vault adapter so that the Obsidian configuration is updated correctly.
 
 ## Implementation Decisions
+
+Related plan: [`../proposals/sqlite-text-and-conflict-ux.md`](../proposals/sqlite-text-and-conflict-ux.md) (conflict UX after web; `Device.resolveConflict` must be real).
 
 ### Package
 - New `plugin/` package inside the existing pnpm workspace. Manages its own `package.json`, `esbuild.config.mjs`, `tsconfig.json`, and `manifest.json`.

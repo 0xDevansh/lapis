@@ -1,3 +1,5 @@
 # Cloudflare-Native Storage And Sync
 
-Lapis uses Cloudflare Workers, Durable Objects, R2, Artifacts, and D1 as its first-slice architecture because the product needs a self-deployable web vault with serialized sync writes, fast latest-file reads, sealed Git history, and simple keyword search. R2 is the latest Vault Content mirror, Artifacts is the Git-backed version-history store, Durable Objects coordinate each vault, and D1 FTS indexes searchable Vault Content.
+**Status:** Accepted — current (revision/patch sync; not Yjs).
+
+Lapis uses Cloudflare Workers, Durable Objects, R2, Artifacts, and D1 because the product needs serialized sync writes, durable latest content, sealed Git history, and keyword search. Durable Objects coordinate each vault and hold the live manifest (and, under [ADR 0010](0010-do-sqlite-text-and-conflict-resolve.md), durable **text** bodies in DO SQLite). **R2 holds binaries** (and today still holds text until that migration ships). Artifacts is the Git-backed version-history store; D1 FTS indexes searchable content. Implementation plan: [`../proposals/sqlite-text-and-conflict-ux.md`](../proposals/sqlite-text-and-conflict-ux.md).

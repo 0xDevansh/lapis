@@ -24,6 +24,24 @@ import { ArtifactsRemote } from "../git/artifacts-remote";
 import { createGitHubRemote } from "../git/github-remote";
 import { getGitRemote, updateGitRemoteState } from "../git/store";
 import { reconcileInbound } from "../git/reconcile";
+import {
+  CURRENT_STORAGE_VERSION,
+  R2_TEXT_STORAGE_VERSION,
+  SQLITE_TEXT_STORAGE_VERSION,
+  STORAGE_VERSION_STATE_KEY,
+  isTextContentType,
+  type AckRequest,
+  type ConflictPayload,
+  type ResolveConflictRequest,
+  type StorageVersion,
+} from "./contracts";
+import { initializeTextStoreSchema, TextStore } from "./text-store";
+
+export type {
+  AckRequest,
+  ConflictPayload,
+  ResolveConflictRequest,
+} from "./contracts";
 
 export interface VaultMeta {
   id: string;
@@ -124,12 +142,14 @@ const DEFAULT_FLUSH_MAX_PENDING = 250;
 
 export class VaultCoordinator extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  private readonly textStore: TextStore;
   private readonly presence = new Map<WebSocket, PresenceEntry>();
   private readonly headContent = new Map<string, string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.textStore = new TextStore(ctx.storage);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS vault_meta (
         id                TEXT PRIMARY KEY,
@@ -177,9 +197,11 @@ export class VaultCoordinator extends DurableObject<Env> {
         value TEXT NOT NULL
       );
     `);
+    initializeTextStoreSchema(this.sql);
   }
 
   async initialize(meta: VaultMeta): Promise<void> {
+    const isNewVault = (await this.getMeta()) === null;
     this.sql.exec(
       `INSERT OR IGNORE INTO vault_meta (id, owner_id, name, created_at)
        VALUES (?, ?, ?, ?)`,
@@ -188,8 +210,18 @@ export class VaultCoordinator extends DurableObject<Env> {
       meta.name,
       meta.createdAt
     );
+    if (isNewVault && this.numberState(STORAGE_VERSION_STATE_KEY) === null) {
+      await this.setState(STORAGE_VERSION_STATE_KEY, String(CURRENT_STORAGE_VERSION));
+    }
     await this.ensureManifestLoaded(meta.id);
     await this.ensureSealScheduled();
+  }
+
+  getStorageVersion(): StorageVersion {
+    const version = this.numberState(STORAGE_VERSION_STATE_KEY);
+    return version !== null && Number.isInteger(version) && version >= 1
+      ? version
+      : R2_TEXT_STORAGE_VERSION;
   }
 
   async getMeta(): Promise<VaultMeta | null> {
@@ -313,8 +345,18 @@ export class VaultCoordinator extends DurableObject<Env> {
       throw Object.assign(new Error("Case conflict at destination"), { status: 409 });
     }
 
-    // Fold any existing text changes first so the deferred rename has a stable R2 source.
-    await this.flushPathToR2(vaultId, oldEntry.path);
+    const sqliteText =
+      this.usesSqliteText() && isTextContentType(oldEntry.contentType);
+    if (sqliteText) {
+      this.textStore.renameFile(oldEntry.path, newPath);
+      this.sql.exec(
+        `DELETE FROM pending_ops WHERE path_lower = ?`,
+        lowerPath(oldEntry.path)
+      );
+    } else {
+      // Fold legacy text changes first so the deferred rename has a stable R2 source.
+      await this.flushPathToR2(vaultId, oldEntry.path);
+    }
 
     const next: ManifestEntry = {
       ...oldEntry,
@@ -325,7 +367,11 @@ export class VaultCoordinator extends DurableObject<Env> {
     };
     this.deleteEntry(oldEntry.path);
     this.upsertEntry(next, oldEntry.revision);
+    const cachedText = this.headContent.get(lowerPath(oldEntry.path));
     this.headContent.delete(lowerPath(oldEntry.path));
+    if (cachedText !== undefined && sqliteText) {
+      this.headContent.set(lowerPath(newPath), cachedText);
+    }
     this.appendPending({
       path: newPath,
       kind: "rename",
@@ -362,7 +408,11 @@ export class VaultCoordinator extends DurableObject<Env> {
 
     const entry = this.getEntry(path);
     if (!entry) return;
-    await this.flushPathToR2(vaultId, entry.path);
+    if (this.usesSqliteText() && isTextContentType(entry.contentType)) {
+      this.textStore.deleteFile(entry.path);
+    } else {
+      await this.flushPathToR2(vaultId, entry.path);
+    }
 
     this.deleteEntry(entry.path);
     this.headContent.delete(lowerPath(entry.path));
@@ -409,15 +459,19 @@ export class VaultCoordinator extends DurableObject<Env> {
       const last = keyRows[keyRows.length - 1];
       const kind = String(last.kind);
       const path = String(last.path);
+      const textOp = isTextContentType(String(last.contentType ?? ""));
+      const sqliteText = this.usesSqliteText() && textOp;
 
       if (kind === "delete") {
-        await this.env.VAULT_BUCKET.delete(contentKey(id, path));
+        if (!sqliteText) {
+          await this.env.VAULT_BUCKET.delete(contentKey(id, path));
+        }
         removeFromIndex(this.env.DB, id, path).catch(() => {});
         continue;
       }
 
       const rename = keyRows.find((row) => String(row.kind) === "rename");
-      if (rename) {
+      if (rename && !sqliteText) {
         const oldPath = String(rename.oldPath);
         const newPath = String(rename.newPath);
         const oldObj = await this.env.VAULT_BUCKET.get(contentKey(id, oldPath));
@@ -434,11 +488,13 @@ export class VaultCoordinator extends DurableObject<Env> {
       if (!entry) continue;
       if (isTextContentType(entry.contentType)) {
         const text = await this.headText(id, entry.path);
-        const bytes = new TextEncoder().encode(text);
-        await this.env.VAULT_BUCKET.put(contentKey(id, entry.path), bytes, {
-          httpMetadata: { contentType: entry.contentType },
-        });
-        this.setR2Revision(entry.path, entry.revision);
+        if (!this.usesSqliteText()) {
+          const bytes = new TextEncoder().encode(text);
+          await this.env.VAULT_BUCKET.put(contentKey(id, entry.path), bytes, {
+            httpMetadata: { contentType: entry.contentType },
+          });
+          this.setR2Revision(entry.path, entry.revision);
+        }
         const manifest = this.manifestFromSql(id);
         indexFile(this.env.DB, {
           vaultId: id,
@@ -531,8 +587,8 @@ export class VaultCoordinator extends DurableObject<Env> {
           meta.id,
           changes,
           async (path) => {
-            const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
-            return obj ? obj.arrayBuffer() : null;
+            const content = await this.getContent(meta.id, path);
+            return content?.bytes ?? null;
           },
           label
         );
@@ -548,8 +604,8 @@ export class VaultCoordinator extends DurableObject<Env> {
           meta.id,
           changes,
           async (path) => {
-            const obj = await this.env.VAULT_BUCKET.get(contentKey(meta.id, path));
-            return obj ? obj.arrayBuffer() : null;
+            const content = await this.getContent(meta.id, path);
+            return content?.bytes ?? null;
           },
           label
         );
@@ -706,7 +762,7 @@ export class VaultCoordinator extends DurableObject<Env> {
       if (!isTextContentType(contentType)) {
         return this.recordBinaryConflict(vaultId, path, existing, baseRevision, author);
       }
-      const modified = new TextDecoder().decode(body);
+      const modified = decodeUtf8(body);
       const baseText = await this.resolveBaseText(vaultId, path, existing, baseRevision);
       const resolvedBase = baseText ?? (await this.headText(vaultId, existing.path));
       return this.handleStaleTextWrite(vaultId, path, existing, baseRevision, modified, author, conflictPolicy, resolvedBase);
@@ -730,6 +786,14 @@ export class VaultCoordinator extends DurableObject<Env> {
 
     if (!isTextContentType(contentType)) {
       await this.env.VAULT_BUCKET.put(contentKey(vaultId, path), body, { httpMetadata: { contentType } });
+      if (
+        this.usesSqliteText() &&
+        existing &&
+        isTextContentType(existing.contentType)
+      ) {
+        this.textStore.deleteFile(existing.path);
+        this.headContent.delete(lowerPath(existing.path));
+      }
       this.upsertEntry(entry, nextRevision);
       this.markDirty(path, false);
       await this.scheduleFlush();
@@ -737,10 +801,30 @@ export class VaultCoordinator extends DurableObject<Env> {
       return entry;
     }
 
-    const original = existing ? await this.headText(vaultId, existing.path) : "";
-    const modified = new TextDecoder().decode(body);
+    let original = "";
+    if (existing) {
+      if (isTextContentType(existing.contentType)) {
+        original = await this.headText(vaultId, existing.path);
+      } else {
+        const object = await this.env.VAULT_BUCKET.get(contentKey(vaultId, existing.path));
+        original = object ? await object.text() : "";
+      }
+    }
+    const modified = decodeUtf8(body);
     const patch = createLinePatch(path, original, modified);
-    this.upsertEntry(entry, existing?.r2Revision ?? 0);
+    if (this.usesSqliteText()) {
+      this.textStore.writeFile({
+        path,
+        revision: nextRevision,
+        contentType,
+        updatedAt: now,
+        text: modified,
+      });
+    }
+    this.upsertEntry(
+      entry,
+      this.usesSqliteText() ? 0 : (existing?.r2Revision ?? 0)
+    );
     this.headContent.set(lowerPath(path), modified);
     this.appendPending({
       path,
@@ -871,7 +955,18 @@ export class VaultCoordinator extends DurableObject<Env> {
     const key = lowerPath(path);
     const cached = this.headContent.get(key);
     if (cached !== undefined) return cached;
-    const text = await this.materializeText(vaultId, path);
+    let text: string;
+    if (this.usesSqliteText()) {
+      const stored = this.textStore.readFile(path);
+      if (!stored) {
+        throw Object.assign(new Error(`SQLite text head missing for ${path}`), {
+          status: 500,
+        });
+      }
+      text = stored.text;
+    } else {
+      text = await this.materializeText(vaultId, path);
+    }
     this.headContent.set(key, text);
     return text;
   }
@@ -905,6 +1000,7 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   private async flushPathToR2(vaultId: string, path: string): Promise<void> {
+    if (this.usesSqliteText()) return;
     const rows = this.sql.exec<PendingOpRow>(
       pendingSelect(`WHERE path_lower = ? ORDER BY seq`),
       lowerPath(path)
@@ -957,13 +1053,22 @@ export class VaultCoordinator extends DurableObject<Env> {
     if (baseRevision > entry.revision) return null;
     if (baseRevision < entry.r2Revision) return null;
 
-    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, this.r2BasePathFor(path)));
-    let text = obj ? await obj.text() : "";
-
-    for (const row of this.sql.exec<PendingOpRow>(
+    let text: string;
+    const rows = this.sql.exec<PendingOpRow>(
       pendingSelect(`WHERE path_lower = ? ORDER BY seq`),
       lowerPath(path)
-    ).toArray()) {
+    ).toArray();
+    if (this.usesSqliteText()) {
+      if (rows.length === 0 || Number(rows[0].baseRevision ?? -1) !== 0) {
+        return null;
+      }
+      text = "";
+    } else {
+      const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, this.r2BasePathFor(path)));
+      text = obj ? await obj.text() : "";
+    }
+
+    for (const row of rows) {
       const newRev = Number(row.newRevision ?? 0);
       if (newRev > baseRevision) break;
       const kind = String(row.kind);
@@ -990,6 +1095,15 @@ export class VaultCoordinator extends DurableObject<Env> {
     const effectivePatch = patch ?? createLinePatch(entry.path, ours, merged);
     const encoded = new TextEncoder().encode(merged);
     const next = this.bumpEntry(entry.path, encoded.byteLength, entry.contentType);
+    if (this.usesSqliteText()) {
+      this.textStore.writeFile({
+        path: next.path,
+        revision: next.revision,
+        contentType: next.contentType,
+        updatedAt: next.updatedAt,
+        text: merged,
+      });
+    }
     this.headContent.set(lowerPath(entry.path), merged);
     this.appendPending({
       path: entry.path,
@@ -1147,6 +1261,10 @@ export class VaultCoordinator extends DurableObject<Env> {
     return Number.isFinite(value) ? value : null;
   }
 
+  private usesSqliteText(): boolean {
+    return this.getStorageVersion() >= SQLITE_TEXT_STORAGE_VERSION;
+  }
+
   private presenceSnapshot(): PresenceNotification {
     const sessions: PresenceNotification["sessions"] = [];
     for (const ws of this.ctx.getWebSockets()) {
@@ -1206,8 +1324,11 @@ function lowerPath(path: string): string {
   return path.toLowerCase();
 }
 
-function isTextContentType(contentType: string): boolean {
-  return contentType.startsWith("text/") || contentType.includes("json") || contentType.includes("xml") || contentType.includes("svg");
+function decodeUtf8(bytes: ArrayBuffer): string {
+  return new TextDecoder("utf-8", {
+    fatal: false,
+    ignoreBOM: true,
+  }).decode(bytes);
 }
 
 function splitLines(value: string): string[] {

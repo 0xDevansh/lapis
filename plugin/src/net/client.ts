@@ -101,6 +101,14 @@ export class LapisClient {
   }
 
   async getFile(vaultId: string, path: string, token: string): Promise<ArrayBuffer> {
+    return (await this.getFileWithRevision(vaultId, path, token)).content;
+  }
+
+  async getFileWithRevision(
+    vaultId: string,
+    path: string,
+    token: string
+  ): Promise<{ content: ArrayBuffer; revision: number }> {
     const response = await requestUrl({
       url: this.url(`/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`),
       method: "GET",
@@ -110,7 +118,14 @@ export class LapisClient {
     if (response.status !== 200) {
       throw new Error(response.text || `File request failed (${response.status})`);
     }
-    return response.arrayBuffer;
+    const revisionHeader = Object.entries(response.headers).find(
+      ([name]) => name.toLowerCase() === "x-revision"
+    )?.[1];
+    const revision = Number(revisionHeader);
+    if (!Number.isInteger(revision) || revision < 0) {
+      throw new Error("File response is missing a valid X-Revision header");
+    }
+    return { content: response.arrayBuffer, revision };
   }
 
   async seedFile(vaultId: string, path: string, content: ArrayBuffer, contentType: string, token: string): Promise<ManifestEntry | null> {

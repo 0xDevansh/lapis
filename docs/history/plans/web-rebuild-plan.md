@@ -7,7 +7,7 @@ features must keep working; `src/api.ts` is the contract and stays unchanged.
 
 ## Locked decisions
 
-1. **Theme**: dark-first using the Obsidian palette from `docs/design.md`.
+1. **Theme**: dark-first using the Obsidian palette from `docs/product/design.md`.
    Keep a light toggle. Drop sepia.
 2. **Editor**: CodeMirror 6 live preview — raw Markdown shown on the active
    line/block, rendered preview elsewhere (Obsidian Live Preview behaviour).

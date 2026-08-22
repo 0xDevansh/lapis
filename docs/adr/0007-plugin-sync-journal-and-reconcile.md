@@ -1,5 +1,7 @@
 # ADR 0007 — Plugin sync journal and first-connect reconcile
 
+**Status:** Accepted — current (revision/patch sync; not Yjs).
+
 ## Status
 Accepted
 
