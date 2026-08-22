@@ -17,8 +17,20 @@ export interface ManifestEntry {
   revision: number;
 }
 
+export interface ConflictPayload {
+  path: string;
+  conflictNote: string;
+  serverRevision: number;
+  clientBaseRevision: number;
+  serverContent?: string;
+  clientContent?: string;
+  baseContent?: string;
+  isBinary?: boolean;
+}
+
 export interface WriteResult extends ManifestEntry {
   conflictNote?: string;
+  conflict?: ConflictPayload;
 }
 
 export interface VaultManifest {
@@ -104,6 +116,23 @@ export interface SameFileWarning {
   type: "same_file_warning";
   path: string;
   others: string[];
+}
+
+export interface ConflictNotification {
+  type: "conflict";
+  conflict: ConflictPayload;
+  author: string;
+  ts: string;
+}
+
+export interface ConflictResolvedNotification {
+  type: "conflict_resolved";
+  path: string;
+  conflictNote: string;
+  action: "keep-server" | "keep-client" | "use-merged";
+  revision: number;
+  author: string;
+  ts: string;
 }
 
 export interface PluginData {

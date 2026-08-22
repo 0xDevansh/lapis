@@ -3,6 +3,7 @@ import type { Env } from "../types";
 import { requireDevice } from "../middleware/syncAuth";
 import { isOsJunk, isValidVaultPath, isVaultInternal } from "../vault/path";
 import { contentKey } from "../vault/manifest";
+import type { ResolveConflictRequest } from "../vault/contracts";
 import type { BatchOpResult, BatchSyncRequest, BatchSyncResponse } from "./journal";
 
 const syncRoutes = new Hono<{ Bindings: Env }>();
@@ -86,6 +87,45 @@ syncRoutes.post("/:vaultId/acks", requireDevice, async (c) => {
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
+  }
+});
+
+syncRoutes.post("/:vaultId/conflicts/resolve", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+
+  let body: Partial<ResolveConflictRequest>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  if (
+    typeof body.path !== "string" ||
+    typeof body.conflictNote !== "string" ||
+    (body.action !== "keep-server" &&
+      body.action !== "keep-client" &&
+      body.action !== "use-merged") ||
+    (body.action !== "keep-server" && typeof body.content !== "string")
+  ) {
+    return c.json({ error: "Invalid conflict resolution request" }, 400);
+  }
+
+  try {
+    return c.json(
+      await stubFor(c.env, vaultId).resolveConflict(
+        vaultId,
+        body as ResolveConflictRequest,
+        device.author
+      )
+    );
+  } catch (error: unknown) {
+    const err = error as { status?: number; message?: string };
+    return c.json(
+      { error: err.message ?? "Failed" },
+      (err.status ?? 500) as 400 | 404 | 500
+    );
   }
 });
 

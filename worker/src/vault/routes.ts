@@ -4,6 +4,7 @@ import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
 import { deviceAuthor } from "./identity";
 import { buildZip, type ZipEntry } from "./zip";
+import type { ResolveConflictRequest } from "./contracts";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
 
@@ -122,6 +123,49 @@ vaultRoutes.post("/:id/acks", requireSession, async (c) => {
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
     return c.json({ error: err.message ?? "Failed" }, (err.status ?? 500) as 400 | 500);
+  }
+});
+
+vaultRoutes.post("/:id/conflicts/resolve", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+
+  let body: Partial<ResolveConflictRequest>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  if (
+    typeof body.path !== "string" ||
+    typeof body.conflictNote !== "string" ||
+    (body.action !== "keep-server" &&
+      body.action !== "keep-client" &&
+      body.action !== "use-merged") ||
+    (body.action !== "keep-server" && typeof body.content !== "string")
+  ) {
+    return c.json({ error: "Invalid conflict resolution request" }, 400);
+  }
+
+  const stub = c.env.VAULT_COORDINATOR.get(
+    c.env.VAULT_COORDINATOR.idFromName(id)
+  );
+  try {
+    return c.json(
+      await stub.resolveConflict(
+        id,
+        body as ResolveConflictRequest,
+        deviceAuthor("web", session.sessionId)
+      )
+    );
+  } catch (error: unknown) {
+    const err = error as { status?: number; message?: string };
+    return c.json(
+      { error: err.message ?? "Failed" },
+      (err.status ?? 500) as 400 | 404 | 500
+    );
   }
 });
 

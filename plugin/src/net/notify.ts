@@ -1,6 +1,17 @@
-import type { ChangeNotification, PresenceNotification, SameFileWarning } from "../types";
+import type {
+  ChangeNotification,
+  ConflictNotification,
+  ConflictResolvedNotification,
+  PresenceNotification,
+  SameFileWarning,
+} from "../types";
 
-export type NotifyMessage = ChangeNotification | PresenceNotification | SameFileWarning;
+export type NotifyMessage =
+  | ChangeNotification
+  | PresenceNotification
+  | SameFileWarning
+  | ConflictNotification
+  | ConflictResolvedNotification;
 
 export interface NotifyClientOptions {
   serverUrl: string;

@@ -8,7 +8,11 @@ import { describe, it, expect } from "vitest";
 import worker from "../src/index";
 import { applyPatch, createPatch, merge3 } from "../src/vault/patch";
 import { deviceAuthor } from "../src/vault/identity";
-import { conflictNotePath, renderConflictNote } from "../src/vault/conflict";
+import {
+	conflictNotePath,
+	parseConflictNoteMetadata,
+	renderConflictNote,
+} from "../src/vault/conflict";
 import { encryptPat, decryptPat, patLast4 } from "../src/git/crypto";
 
 // For now, you'll need to do something like this to get a correctly-typed
@@ -99,6 +103,12 @@ describe("Lapis worker", () => {
 		expect(body).toContain("type: sync-conflict");
 		expect(body).toContain("server");
 		expect(body).toContain("client");
+		expect(parseConflictNoteMetadata(body)).toEqual({
+			path: "notes/foo.md",
+			serverRevision: 3,
+			clientBaseRevision: 1,
+			isBinary: false,
+		});
 	});
 
 	it("encrypts PATs without exposing plaintext in ciphertext", async () => {

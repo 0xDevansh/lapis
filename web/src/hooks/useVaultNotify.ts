@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import type { ConflictPayload } from "../api";
 
 export interface ChangeNotification {
   type: "change";
@@ -42,10 +43,34 @@ export interface SameFileWarning {
   others: string[];
 }
 
-type ServerMessage = ChangeNotification | PresenceNotification | SameFileWarning;
+export interface ConflictNotification {
+  type: "conflict";
+  conflict: ConflictPayload;
+  author: string;
+  ts: string;
+}
+
+export interface ConflictResolvedNotification {
+  type: "conflict_resolved";
+  path: string;
+  conflictNote: string;
+  action: "keep-server" | "keep-client" | "use-merged";
+  revision: number;
+  author: string;
+  ts: string;
+}
+
+type ServerMessage =
+  | ChangeNotification
+  | PresenceNotification
+  | SameFileWarning
+  | ConflictNotification
+  | ConflictResolvedNotification;
 
 export interface UseVaultNotifyOptions {
   onChange?: (msg: ChangeNotification) => void;
+  onConflict?: (msg: ConflictNotification) => void;
+  onConflictResolved?: (msg: ConflictResolvedNotification) => void;
   onReconnect?: () => void;
 }
 
@@ -115,6 +140,10 @@ export function useVaultNotify(
 
       if (msg.type === "change") {
         optionsRef.current.onChange?.(msg);
+      } else if (msg.type === "conflict") {
+        optionsRef.current.onConflict?.(msg);
+      } else if (msg.type === "conflict_resolved") {
+        optionsRef.current.onConflictResolved?.(msg);
       } else if (msg.type === "presence") {
         setPresence(msg.sessions);
       } else if (msg.type === "same_file_warning") {

@@ -60,6 +60,18 @@ export interface ResolveConflictRequest {
   content?: string;
 }
 
+export interface ConflictResolutionResult {
+  entry: {
+    path: string;
+    size: number;
+    contentType: string;
+    updatedAt: string;
+    revision: number;
+  };
+  conflictNote: string;
+  action: ConflictResolutionAction;
+}
+
 export function isTextContentType(contentType: string): boolean {
   const normalized = contentType.toLowerCase();
   return (

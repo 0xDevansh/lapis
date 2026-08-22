@@ -154,7 +154,7 @@ export class SyncEngine {
       }
       journal.pendingOps.shift();
       await this.options.setJournal(journal);
-      if (result.entry && !result.entry.conflictNote) {
+      if (result.entry && !isConflictResult(result.entry)) {
         await this.ackEntry(result.entry);
       }
       this.reportProgress(
@@ -274,7 +274,7 @@ export class SyncEngine {
       this.token
     );
     let appliedHash = hash;
-    if (!result.conflictNote && result.revision > baseRevision + 1) {
+    if (!isConflictResult(result) && result.revision > baseRevision + 1) {
       const merged = await this.client.getFile(this.vaultId, result.path, this.token);
       await this.writeLocal(result.path, merged, result.contentType);
       appliedHash = await sha256Hex(merged);
@@ -282,7 +282,7 @@ export class SyncEngine {
     setEntry(journal, result, appliedHash);
 
     await this.options.setJournal(journal);
-    if (!result.conflictNote) {
+    if (!isConflictResult(result)) {
       await this.ackEntry(result);
     }
   }
@@ -534,7 +534,7 @@ export class SyncEngine {
             this.token
           );
           let appliedHash = local.hash;
-          if (!result.conflictNote && result.revision > server.revision + 1) {
+          if (!isConflictResult(result) && result.revision > server.revision + 1) {
             const merged = await this.client.getFile(
               this.vaultId,
               result.path,
@@ -545,7 +545,7 @@ export class SyncEngine {
           }
           setEntry(journal, result, appliedHash);
           await this.options.setJournal(journal);
-          if (!result.conflictNote) {
+          if (!isConflictResult(result)) {
             await this.ackEntry(result);
           }
         }
@@ -712,4 +712,8 @@ function contentTypeFromPath(path: string): string {
 
 function isTextContentType(contentType: string): boolean {
   return contentType.startsWith("text/") || contentType.includes("json") || contentType.includes("xml") || contentType.includes("svg");
+}
+
+function isConflictResult(result: WriteResult): boolean {
+  return result.conflict !== undefined || result.conflictNote !== undefined;
 }

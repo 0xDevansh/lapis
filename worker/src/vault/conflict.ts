@@ -34,6 +34,13 @@ export interface ConflictContext {
   isBinary?: boolean;
 }
 
+export interface ConflictNoteMetadata {
+  path: string;
+  serverRevision: number;
+  clientBaseRevision: number;
+  isBinary: boolean;
+}
+
 /**
  * Compute the vault-relative path for the Conflict Note.
  * The path is stable given the same inputs so callers can look it up.
@@ -62,11 +69,11 @@ export function renderConflictNote(ctx: ConflictContext): string {
   // Frontmatter for easy programmatic detection
   lines.push("---");
   lines.push("type: sync-conflict");
-  lines.push(`path: "${ctx.path}"`);
+  lines.push(`path: ${JSON.stringify(ctx.path)}`);
   lines.push(`server_revision: ${ctx.serverRevision}`);
   lines.push(`client_base_revision: ${ctx.clientBaseRevision}`);
-  lines.push(`device: "${ctx.deviceName}"`);
-  lines.push(`timestamp: "${ctx.timestamp}"`);
+  lines.push(`device: ${JSON.stringify(ctx.deviceName)}`);
+  lines.push(`timestamp: ${JSON.stringify(ctx.timestamp)}`);
   lines.push(`binary: ${ctx.isBinary ? "true" : "false"}`);
   lines.push("---");
   lines.push("");
@@ -133,4 +140,45 @@ export function renderConflictNote(ctx: ConflictContext): string {
   lines.push("");
 
   return lines.join("\n");
+}
+
+export function parseConflictNoteMetadata(
+  note: string
+): ConflictNoteMetadata | null {
+  const match = note.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) return null;
+  const fields = new Map<string, string>();
+  for (const line of match[1].split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator < 0) continue;
+    fields.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+  }
+  if (fields.get("type") !== "sync-conflict") return null;
+
+  const path = parseQuotedValue(fields.get("path"));
+  const serverRevision = Number(fields.get("server_revision"));
+  const clientBaseRevision = Number(fields.get("client_base_revision"));
+  if (
+    path === null ||
+    !Number.isInteger(serverRevision) ||
+    !Number.isInteger(clientBaseRevision)
+  ) {
+    return null;
+  }
+  return {
+    path,
+    serverRevision,
+    clientBaseRevision,
+    isBinary: fields.get("binary") === "true",
+  };
+}
+
+function parseQuotedValue(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
 }

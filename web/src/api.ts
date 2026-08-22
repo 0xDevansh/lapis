@@ -106,8 +106,20 @@ export interface ManifestEntry {
   revision: number;
 }
 
+export interface ConflictPayload {
+  path: string;
+  conflictNote: string;
+  serverRevision: number;
+  clientBaseRevision: number;
+  serverContent?: string;
+  clientContent?: string;
+  baseContent?: string;
+  isBinary?: boolean;
+}
+
 export interface WriteResult extends ManifestEntry {
   conflictNote?: string;
+  conflict?: ConflictPayload;
 }
 
 export class StaleWriteError extends Error {

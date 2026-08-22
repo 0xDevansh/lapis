@@ -18,7 +18,12 @@ import {
   type IncrementalSealChange,
   type SealedCommit,
 } from "../artifacts/sealer";
-import { conflictNotePath, renderConflictNote, type ConflictContext } from "./conflict";
+import {
+  conflictNotePath,
+  parseConflictNoteMetadata,
+  renderConflictNote,
+  type ConflictContext,
+} from "./conflict";
 import { listVaultDevices } from "../devices/record";
 import { identityFromRecord, type ConflictPolicy } from "../devices/types";
 import { ArtifactsRemote } from "../git/artifacts-remote";
@@ -34,6 +39,8 @@ import {
   isTextContentType,
   type AckRequest,
   type ConflictPayload,
+  type ConflictResolutionAction,
+  type ConflictResolutionResult,
   type ResolveConflictRequest,
   type StorageVersion,
 } from "./contracts";
@@ -42,6 +49,7 @@ import { initializeTextStoreSchema, TextStore } from "./text-store";
 export type {
   AckRequest,
   ConflictPayload,
+  ConflictResolutionResult,
   ResolveConflictRequest,
 } from "./contracts";
 
@@ -92,6 +100,14 @@ type DirtyRow = Record<string, SqlStorageValue> & {
   deleted: SqlStorageValue;
 };
 
+type ConflictRow = Record<string, SqlStorageValue> & {
+  conflictNote: SqlStorageValue;
+  path: SqlStorageValue;
+  serverRevision: SqlStorageValue;
+  clientBaseRevision: SqlStorageValue;
+  isBinary: SqlStorageValue;
+};
+
 export interface ChangeNotification {
   type: "change";
   path: string;
@@ -117,6 +133,24 @@ export interface SameFileWarning {
 
 export interface WriteResult extends ManifestEntry {
   conflictNote?: string;
+  conflict?: ConflictPayload;
+}
+
+export interface ConflictNotification {
+  type: "conflict";
+  conflict: ConflictPayload;
+  author: string;
+  ts: string;
+}
+
+export interface ConflictResolvedNotification {
+  type: "conflict_resolved";
+  path: string;
+  conflictNote: string;
+  action: ConflictResolutionAction;
+  revision: number;
+  author: string;
+  ts: string;
 }
 
 export interface VaultContentResult {
@@ -126,7 +160,12 @@ export interface VaultContentResult {
   bytes: ArrayBuffer;
 }
 
-type ServerMessage = ChangeNotification | PresenceNotification | SameFileWarning;
+type ServerMessage =
+  | ChangeNotification
+  | PresenceNotification
+  | SameFileWarning
+  | ConflictNotification
+  | ConflictResolvedNotification;
 
 interface PresenceEntry {
   identity: string;
@@ -198,6 +237,23 @@ export class VaultCoordinator extends DurableObject<Env> {
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS conflicts (
+        conflict_note_lower TEXT PRIMARY KEY,
+        conflict_note       TEXT NOT NULL,
+        path_lower          TEXT NOT NULL,
+        path                TEXT NOT NULL,
+        server_revision     INTEGER NOT NULL,
+        client_base_revision INTEGER NOT NULL,
+        is_binary           INTEGER NOT NULL DEFAULT 0,
+        created_at          TEXT NOT NULL,
+        resolved_at         TEXT,
+        resolution_action   TEXT,
+        delete_pending      INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_conflicts_open
+        ON conflicts(path_lower, resolved_at);
     `);
     initializeTextStoreSchema(this.sql);
   }
@@ -254,6 +310,140 @@ export class VaultCoordinator extends DurableObject<Env> {
       this.advanceCheckpointFromAcks(path, retainedDeviceKeys);
     }
     return { accepted };
+  }
+
+  async resolveConflict(
+    vaultId: string,
+    request: ResolveConflictRequest,
+    author = "web"
+  ): Promise<ConflictResolutionResult> {
+    await this.ensureManifestLoaded(vaultId);
+    if (!isValidVaultPath(request.path)) {
+      throw Object.assign(new Error("Invalid conflict path"), { status: 400 });
+    }
+    if (
+      !isValidVaultPath(request.conflictNote) ||
+      !lowerPath(request.conflictNote).startsWith(".sync-conflicts/")
+    ) {
+      throw Object.assign(new Error("Invalid conflict note"), { status: 400 });
+    }
+    if (
+      request.action !== "keep-server" &&
+      request.action !== "keep-client" &&
+      request.action !== "use-merged"
+    ) {
+      throw Object.assign(new Error("Invalid conflict action"), { status: 400 });
+    }
+
+    let conflict = this.sql.exec<ConflictRow>(
+      `SELECT conflict_note AS conflictNote, path,
+              server_revision AS serverRevision,
+              client_base_revision AS clientBaseRevision,
+              is_binary AS isBinary
+       FROM conflicts
+       WHERE conflict_note_lower = ? AND path_lower = ? AND resolved_at IS NULL`,
+      lowerPath(request.conflictNote),
+      lowerPath(request.path)
+    ).toArray()[0];
+    const noteEntry = this.getEntry(request.conflictNote);
+    if (!noteEntry) {
+      throw Object.assign(new Error("Conflict not found"), { status: 404 });
+    }
+    if (!conflict) {
+      const metadata = parseConflictNoteMetadata(
+        await this.headText(vaultId, noteEntry.path)
+      );
+      if (!metadata || lowerPath(metadata.path) !== lowerPath(request.path)) {
+        throw Object.assign(new Error("Conflict not found"), { status: 404 });
+      }
+      this.sql.exec(
+        `INSERT OR IGNORE INTO conflicts
+         (conflict_note_lower, conflict_note, path_lower, path,
+          server_revision, client_base_revision, is_binary, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        lowerPath(request.conflictNote),
+        request.conflictNote,
+        lowerPath(metadata.path),
+        metadata.path,
+        metadata.serverRevision,
+        metadata.clientBaseRevision,
+        metadata.isBinary ? 1 : 0,
+        noteEntry.updatedAt
+      );
+      conflict = {
+        conflictNote: request.conflictNote,
+        path: metadata.path,
+        serverRevision: metadata.serverRevision,
+        clientBaseRevision: metadata.clientBaseRevision,
+        isBinary: metadata.isBinary ? 1 : 0,
+      };
+    }
+
+    const current = this.getEntry(request.path);
+    if (!current) {
+      throw Object.assign(new Error("Conflicted file not found"), { status: 404 });
+    }
+    if (Number(conflict.isBinary) === 1 && request.action !== "keep-server") {
+      throw Object.assign(
+        new Error("Binary conflicts only support keep-server through this endpoint"),
+        { status: 400 }
+      );
+    }
+
+    let entry: ManifestEntry = current;
+    if (request.action !== "keep-server") {
+      if (typeof request.content !== "string") {
+        throw Object.assign(new Error("content is required for this action"), {
+          status: 400,
+        });
+      }
+      entry = await this.applyPut(
+        vaultId,
+        current.path,
+        new TextEncoder().encode(request.content).buffer as ArrayBuffer,
+        current.contentType,
+        current.revision,
+        author,
+        "rebase"
+      );
+    }
+
+    const resolvedAt = new Date().toISOString();
+    this.sql.exec(
+      `UPDATE conflicts
+       SET resolved_at = ?, resolution_action = ?, delete_pending = 1
+       WHERE conflict_note_lower = ? AND resolved_at IS NULL`,
+      resolvedAt,
+      request.action,
+      lowerPath(request.conflictNote)
+    );
+    try {
+      await this.deleteFile(vaultId, request.conflictNote, author);
+      this.sql.exec(
+        `UPDATE conflicts SET delete_pending = 0 WHERE conflict_note_lower = ?`,
+        lowerPath(request.conflictNote)
+      );
+    } catch (error) {
+      console.error(
+        `[lapis] Conflict note cleanup deferred for ${request.conflictNote}`,
+        error
+      );
+    }
+
+    this.broadcast({
+      type: "conflict_resolved",
+      path: current.path,
+      conflictNote: request.conflictNote,
+      action: request.action,
+      revision: entry.revision,
+      author,
+      ts: resolvedAt,
+    });
+    return {
+      entry,
+      conflictNote: request.conflictNote,
+      action: request.action,
+    };
   }
 
   async getMeta(): Promise<VaultMeta | null> {
@@ -684,6 +874,7 @@ export class VaultCoordinator extends DurableObject<Env> {
     const sealDeadline = this.numberState("seal_deadline");
 
     await this.advanceAllCheckpointsFromAcks(meta.id, now);
+    await this.retryResolvedConflictDeletes(meta.id);
 
     if (flushDeadline !== null && flushDeadline <= now) {
       await this.flushToR2(meta.id);
@@ -1330,6 +1521,29 @@ export class VaultCoordinator extends DurableObject<Env> {
     return retained;
   }
 
+  private async retryResolvedConflictDeletes(vaultId: string): Promise<void> {
+    const rows = this.sql.exec<Record<string, SqlStorageValue>>(
+      `SELECT conflict_note AS conflictNote
+       FROM conflicts
+       WHERE resolved_at IS NOT NULL AND delete_pending = 1`
+    ).toArray();
+    for (const row of rows) {
+      const conflictNote = String(row.conflictNote);
+      try {
+        await this.deleteFile(vaultId, conflictNote, "system:conflict-cleanup");
+        this.sql.exec(
+          `UPDATE conflicts SET delete_pending = 0 WHERE conflict_note_lower = ?`,
+          lowerPath(conflictNote)
+        );
+      } catch (error) {
+        console.error(
+          `[lapis] Conflict note cleanup retry failed for ${conflictNote}`,
+          error
+        );
+      }
+    }
+  }
+
   private async handleStaleTextWrite(
     vaultId: string,
     path: string,
@@ -1373,7 +1587,8 @@ export class VaultCoordinator extends DurableObject<Env> {
       timestamp: new Date().toISOString(),
     };
     const notePath = await this.writeConflictNote(vaultId, ctx, author);
-    return { ...entry, conflictNote: notePath };
+    const conflict = this.openConflict(ctx, notePath, author);
+    return { ...entry, conflictNote: notePath, conflict };
   }
 
   private async recordBinaryConflict(
@@ -1392,7 +1607,47 @@ export class VaultCoordinator extends DurableObject<Env> {
       isBinary: true,
     };
     const notePath = await this.writeConflictNote(vaultId, ctx, author);
-    return { ...entry, conflictNote: notePath };
+    const conflict = this.openConflict(ctx, notePath, author);
+    return { ...entry, conflictNote: notePath, conflict };
+  }
+
+  private openConflict(
+    ctx: ConflictContext,
+    conflictNote: string,
+    author: string
+  ): ConflictPayload {
+    const conflict: ConflictPayload = {
+      path: ctx.path,
+      conflictNote,
+      serverRevision: ctx.serverRevision,
+      clientBaseRevision: ctx.clientBaseRevision,
+      serverContent: ctx.serverContent,
+      clientContent: ctx.clientContent,
+      baseContent: ctx.baseContent,
+      isBinary: ctx.isBinary,
+    };
+    this.sql.exec(
+      `INSERT OR REPLACE INTO conflicts
+       (conflict_note_lower, conflict_note, path_lower, path,
+        server_revision, client_base_revision, is_binary, created_at,
+        resolved_at, resolution_action, delete_pending)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)`,
+      lowerPath(conflictNote),
+      conflictNote,
+      lowerPath(ctx.path),
+      ctx.path,
+      ctx.serverRevision,
+      ctx.clientBaseRevision,
+      ctx.isBinary ? 1 : 0,
+      ctx.timestamp
+    );
+    this.broadcast({
+      type: "conflict",
+      conflict,
+      author,
+      ts: ctx.timestamp,
+    });
+    return conflict;
   }
 
   private async writeConflictNote(vaultId: string, ctx: ConflictContext, author: string): Promise<string> {

@@ -643,10 +643,84 @@ describe("SQLite text heads", () => {
     );
 
     expect(result.conflictNote).toMatch(/^\.sync-conflicts\//);
+    expect(result.conflict).toMatchObject({
+      path,
+      conflictNote: result.conflictNote,
+      serverRevision: second.revision,
+      clientBaseRevision: first.revision,
+      serverContent: "server",
+      clientContent: "client",
+    });
     const head = await stub.getContent(vaultId, path);
     expect(new TextDecoder().decode(head?.bytes)).toBe("server");
     const note = await stub.getContent(vaultId, result.conflictNote!);
     expect(new TextDecoder().decode(note?.bytes)).toContain("Client Version (not applied)");
+
+    const resolution = await stub.resolveConflict(
+      vaultId,
+      {
+        path,
+        conflictNote: result.conflictNote!,
+        action: "keep-server",
+      },
+      "web:test"
+    );
+    expect(resolution.entry.revision).toBe(second.revision);
+    expect(await stub.getContent(vaultId, result.conflictNote!)).toBeNull();
+    await expect(
+      stub.resolveConflict(vaultId, {
+        path,
+        conflictNote: result.conflictNote!,
+        action: "keep-server",
+      })
+    ).rejects.toThrow("Conflict not found");
+  });
+
+  it("commits keep-client and manual-merge conflict resolutions", async () => {
+    for (const action of ["keep-client", "use-merged"] as const) {
+      const vaultId = crypto.randomUUID();
+      const stub = await initialize(vaultId);
+      const path = `${action}.md`;
+      const first = await stub.syncPutFile(
+        vaultId,
+        path,
+        new TextEncoder().encode("base").buffer as ArrayBuffer,
+        "text/markdown"
+      );
+      const server = await stub.syncPutFile(
+        vaultId,
+        path,
+        new TextEncoder().encode("server").buffer as ArrayBuffer,
+        "text/markdown",
+        first.revision
+      );
+      await stub.recordAcks(vaultId, "plugin:test", {
+        acks: [{ path, revision: server.revision }],
+      });
+      const conflict = await stub.syncPutFile(
+        vaultId,
+        path,
+        new TextEncoder().encode("client").buffer as ArrayBuffer,
+        "text/markdown",
+        first.revision,
+        "plugin:test"
+      );
+      expect(conflict.conflict).toBeDefined();
+
+      const content = action === "keep-client" ? "client" : "manually merged";
+      const resolution = await stub.resolveConflict(vaultId, {
+        path,
+        conflictNote: conflict.conflict!.conflictNote,
+        action,
+        content,
+      });
+      expect(resolution.action).toBe(action);
+      const head = await stub.getContent(vaultId, path);
+      expect(new TextDecoder().decode(head?.bytes)).toBe(content);
+      expect(
+        await stub.getContent(vaultId, conflict.conflict!.conflictNote)
+      ).toBeNull();
+    }
   });
 
 });

@@ -329,6 +329,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           baseRevision,
         });
         await refreshManifest();
+        if (result.conflict) {
+          toast(`Conflict saved to ${result.conflict.conflictNote}`, {
+            tone: "error",
+          });
+          return;
+        }
         if (result.conflictNote) {
           toast(`Conflict saved to ${result.conflictNote}`, { tone: "error" });
           return;
