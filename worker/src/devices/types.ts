@@ -55,6 +55,18 @@ export interface ConflictContext {
   isBinary?: boolean;
 }
 
+export type ConflictResolutionAction =
+  | "keep-server"
+  | "keep-client"
+  | "use-merged";
+
+export interface ConflictResolutionRequest {
+  path: string;
+  conflictNote: string;
+  action: ConflictResolutionAction;
+  content?: string;
+}
+
 export type Resolution = { kind: "merged"; revision: number } | { kind: "conflict-note"; notePath: string };
 
 export interface SendResult {
@@ -68,7 +80,7 @@ export interface Device {
   readonly conflictPolicy: ConflictPolicy;
   sendEdit(op: EditOp): Promise<SendResult>;
   receiveEdit(change: ChangeNotification): Promise<void>;
-  resolveConflict(ctx: ConflictContext): Promise<Resolution>;
+  resolveConflict(request: ConflictResolutionRequest): Promise<Resolution>;
   getCursor(path: string): number | string | null;
   setCursor(path: string, cursor: number | string): Promise<void>;
   reportPresence(openPath: string | null): void;

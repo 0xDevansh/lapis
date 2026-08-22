@@ -10,7 +10,7 @@ import { NotifyClient } from "../net/notify";
 import { SyncEngine } from "../sync/engine";
 import type {
   ChangeNotification,
-  ConflictContext,
+  ConflictResolutionRequest,
   Device,
   DeviceCapabilities,
   DeviceIdentity,
@@ -81,8 +81,17 @@ export class PluginDevice implements Device {
     }
   }
 
-  async resolveConflict(_ctx: ConflictContext): Promise<Resolution> {
-    return { kind: "merged", revision: 0 };
+  async resolveConflict(
+    request: ConflictResolutionRequest
+  ): Promise<Resolution> {
+    const result = await this.client.resolveConflict(
+      this.options.settings.vaultId,
+      request,
+      this.options.settings.syncToken
+    );
+    await this.engine.applyRemotePut(result.entry.path);
+    await this.engine.applyRemoteDelete(result.conflictNote);
+    return { kind: "merged", revision: result.entry.revision };
   }
 
   getCursor(path: string): number | string | null {

@@ -5,7 +5,7 @@
  * this class documents the contract and cursor semantics.
  */
 
-import type { ConflictPolicy, Device, DeviceCapabilities, DeviceIdentity, EditOp, SendResult, ChangeNotification, ConflictContext, Resolution } from "../devices/types";
+import type { ConflictPolicy, Device, DeviceCapabilities, DeviceIdentity, EditOp, SendResult, ChangeNotification, ConflictResolutionRequest, Resolution } from "../devices/types";
 import { deviceAuthor } from "../vault/identity";
 
 export const DEFAULT_GITHUB_CAPABILITIES: DeviceCapabilities = {
@@ -45,7 +45,7 @@ export class GitHubDevice implements Device {
     // Inbound sync runs via reconcileInbound on seal / webhook.
   }
 
-  async resolveConflict(_ctx: ConflictContext): Promise<Resolution> {
+  async resolveConflict(_request: ConflictResolutionRequest): Promise<Resolution> {
     return { kind: "conflict-note", notePath: "" };
   }
 

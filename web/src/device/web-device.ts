@@ -6,7 +6,7 @@ import * as api from "../api";
 import { deviceAuthor } from "../identity";
 import type {
   ChangeNotification,
-  ConflictContext,
+  ConflictResolutionRequest,
   Device,
   DeviceCapabilities,
   DeviceIdentity,
@@ -54,8 +54,22 @@ export class WebDevice implements Device {
     await this.options.onRemoteChange(change);
   }
 
-  async resolveConflict(_ctx: ConflictContext): Promise<Resolution> {
-    return { kind: "merged", revision: 0 };
+  async resolveConflict(
+    request: ConflictResolutionRequest
+  ): Promise<Resolution> {
+    const result = await api.resolveConflict(this.options.vaultId, request);
+    const content =
+      request.action === "keep-server"
+        ? await api.getFileText(this.options.vaultId, result.entry.path)
+        : request.content;
+    if (content !== undefined) {
+      this.options.setTabContent(
+        result.entry.path,
+        content,
+        result.entry.revision
+      );
+    }
+    return { kind: "merged", revision: result.entry.revision };
   }
 
   getCursor(path: string): number | string | null {

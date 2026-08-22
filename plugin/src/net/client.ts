@@ -7,6 +7,8 @@ import type {
   LapisResponse,
   ManifestEntry,
   BatchSyncResponse,
+  ConflictResolutionRequest,
+  ConflictResolutionResult,
   PatchResponse,
   StaleWriteResponse,
   SeedCompleteResult,
@@ -283,6 +285,26 @@ export class LapisClient {
     if (response.status !== 200) {
       throw new Error(response.text || `Ack failed (${response.status})`);
     }
+  }
+
+  async resolveConflict(
+    vaultId: string,
+    request: ConflictResolutionRequest,
+    token: string
+  ): Promise<ConflictResolutionResult> {
+    const response = await this.request<ConflictResolutionResult>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/conflicts/resolve`,
+      body: JSON.stringify(request),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(
+        response.text || `Conflict resolution failed (${response.status})`
+      );
+    }
+    return response.data;
   }
 
   async updateDevice(vaultId: string, token: string, receiveInternals: boolean): Promise<void> {

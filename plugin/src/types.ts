@@ -28,6 +28,24 @@ export interface ConflictPayload {
   isBinary?: boolean;
 }
 
+export type ConflictResolutionAction =
+  | "keep-server"
+  | "keep-client"
+  | "use-merged";
+
+export interface ConflictResolutionRequest {
+  path: string;
+  conflictNote: string;
+  action: ConflictResolutionAction;
+  content?: string;
+}
+
+export interface ConflictResolutionResult {
+  entry: ManifestEntry;
+  conflictNote: string;
+  action: ConflictResolutionAction;
+}
+
 export interface WriteResult extends ManifestEntry {
   conflictNote?: string;
   conflict?: ConflictPayload;

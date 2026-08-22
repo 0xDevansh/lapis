@@ -122,6 +122,24 @@ export interface WriteResult extends ManifestEntry {
   conflict?: ConflictPayload;
 }
 
+export type ConflictResolutionAction =
+  | "keep-server"
+  | "keep-client"
+  | "use-merged";
+
+export interface ConflictResolutionRequest {
+  path: string;
+  conflictNote: string;
+  action: ConflictResolutionAction;
+  content?: string;
+}
+
+export interface ConflictResolutionResult {
+  entry: ManifestEntry;
+  conflictNote: string;
+  action: ConflictResolutionAction;
+}
+
 export class StaleWriteError extends Error {
   constructor(message: string, readonly headRevision: number) {
     super(message);
@@ -148,6 +166,19 @@ export async function postAcks(
     method: "POST",
     body: JSON.stringify({ acks }),
   });
+}
+
+export async function resolveConflict(
+  vaultId: string,
+  request: ConflictResolutionRequest
+): Promise<ConflictResolutionResult> {
+  return apiFetch<ConflictResolutionResult>(
+    `/api/vaults/${vaultId}/conflicts/resolve`,
+    {
+      method: "POST",
+      body: JSON.stringify(request),
+    }
+  );
 }
 
 /** Fetch the raw text content of a vault file. */
