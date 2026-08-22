@@ -39,6 +39,7 @@ import {
   DeviceMobile,
   House,
   FileMagnifyingGlass,
+  Warning,
 } from "@phosphor-icons/react";
 import { deviceAuthor } from "../identity";
 import { useToast } from "../components/ui/Toast";
@@ -46,6 +47,9 @@ import CommandPalette, {
   type Command,
   type PaletteMode,
 } from "../components/overlays/CommandPalette";
+import ConflictResolutionPanel, {
+  ConflictBanner,
+} from "../components/ConflictResolutionPanel";
 
 // ── Helpers (ported from VaultBrowserPage) ──────────────────────────────────--
 
@@ -150,6 +154,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const [palette, setPalette] = useState<PaletteMode | null>(null);
+  const [conflicts, setConflicts] = useState<api.ConflictPayload[]>([]);
+  const [selectedConflictNote, setSelectedConflictNote] = useState<string | null>(
+    null
+  );
+  const [resolvingConflict, setResolvingConflict] = useState(false);
+  const [conflictError, setConflictError] = useState<string | null>(null);
   const [load, setLoad] = useState<{
     tabId: string;
     status: "loading" | "error";
@@ -184,11 +194,24 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     }
   }, [vaultId]);
 
+  const refreshConflicts = useCallback(async (): Promise<
+    api.ConflictPayload[]
+  > => {
+    try {
+      const next = await api.getConflicts(vaultId);
+      setConflicts(next);
+      return next;
+    } catch {
+      return [];
+    }
+  }, [vaultId]);
+
   useEffect(() => {
     api.getVault(vaultId).then(setVault).catch(() => {});
     api.getSession().then((session) => setSessionId(session?.session?.id ?? null)).catch(() => setSessionId(null));
     refreshManifest();
-  }, [vaultId, refreshManifest]);
+    refreshConflicts();
+  }, [vaultId, refreshManifest, refreshConflicts]);
 
   // ── Open a file in a tab ────────────────────────────────────────────────--
 
@@ -330,7 +353,16 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         });
         await refreshManifest();
         if (result.conflict) {
-          toast(`Conflict saved to ${result.conflict.conflictNote}`, {
+          const conflict = result.conflict;
+          setConflicts((current) => [
+            ...current.filter(
+              (item) => item.conflictNote !== conflict.conflictNote
+            ),
+            conflict,
+          ]);
+          setSelectedConflictNote(conflict.conflictNote);
+          setConflictError(null);
+          toast(`Conflict saved to ${conflict.conflictNote}`, {
             tone: "error",
           });
           return;
@@ -401,6 +433,83 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     [doRevert]
   );
 
+  const selectedConflict =
+    conflicts.find(
+      (conflict) => conflict.conflictNote === selectedConflictNote
+    ) ?? null;
+
+  const reviewConflicts = useCallback(() => {
+    const first = conflicts[0];
+    if (!first) return;
+    setConflictError(null);
+    setSelectedConflictNote(first.conflictNote);
+  }, [conflicts]);
+
+  const resolveSelectedConflict = useCallback(
+    async (
+      action: api.ConflictResolutionAction,
+      content?: string
+    ): Promise<void> => {
+      if (!selectedConflict) return;
+      setResolvingConflict(true);
+      setConflictError(null);
+      try {
+        const result = await api.resolveConflict(vaultId, {
+          path: selectedConflict.path,
+          conflictNote: selectedConflict.conflictNote,
+          action,
+          content,
+        });
+        const resolvedContent = await api.getFileText(
+          vaultId,
+          result.entry.path
+        );
+        const tab = tabsRef.current.find(
+          (candidate) =>
+            candidate.path.toLowerCase() === result.entry.path.toLowerCase()
+        );
+        if (tab) {
+          dispatch({
+            type: "SET_TAB_CONTENT",
+            id: tab.id,
+            editBuffer: resolvedContent,
+            baseContent: resolvedContent,
+            baseRevision: result.entry.revision,
+          });
+        }
+        void api
+          .postAcks(vaultId, [
+            { path: result.entry.path, revision: result.entry.revision },
+          ])
+          .catch((error) => {
+            console.warn(
+              "[lapis] failed to acknowledge resolved revision",
+              error
+            );
+          });
+        const remaining = conflicts.filter(
+          (conflict) => conflict.conflictNote !== result.conflictNote
+        );
+        setConflicts(remaining);
+        setSelectedConflictNote(remaining[0]?.conflictNote ?? null);
+        await refreshManifest();
+        toast("Conflict resolved", { tone: "success", duration: 2000 });
+      } catch (error) {
+        setConflictError((error as Error).message);
+      } finally {
+        setResolvingConflict(false);
+      }
+    },
+    [
+      selectedConflict,
+      vaultId,
+      conflicts,
+      dispatch,
+      refreshManifest,
+      toast,
+    ]
+  );
+
   // ── Remote changes ─────────────────────────────────────────────────────--
 
   const handleRemoteChange = useCallback(
@@ -409,7 +518,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         return;
       }
       if (msg.path.startsWith(".sync-conflicts/")) {
-        toast("Sync conflict recorded — check .sync-conflicts/", { tone: "info", duration: 5000 });
+        void refreshConflicts();
       }
       const next = await refreshManifest();
       const key = msg.path.toLowerCase();
@@ -465,7 +574,42 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         }
       }
     },
-    [refreshManifest, dispatch, vaultId, sessionId, toast]
+    [refreshManifest, refreshConflicts, dispatch, vaultId, sessionId]
+  );
+
+  const handleConflict = useCallback(
+    (msg: import("../hooks/useVaultNotify").ConflictNotification) => {
+      setConflicts((current) => [
+        ...current.filter(
+          (conflict) =>
+            conflict.conflictNote !== msg.conflict.conflictNote
+        ),
+        msg.conflict,
+      ]);
+      setSelectedConflictNote(
+        (current) => current ?? msg.conflict.conflictNote
+      );
+      toast(`Sync conflict: ${msg.conflict.path}`, {
+        tone: "error",
+        duration: 5000,
+      });
+    },
+    [toast]
+  );
+
+  const handleConflictResolved = useCallback(
+    (msg: import("../hooks/useVaultNotify").ConflictResolvedNotification) => {
+      setConflicts((current) =>
+        current.filter(
+          (conflict) => conflict.conflictNote !== msg.conflictNote
+        )
+      );
+      setSelectedConflictNote((current) =>
+        current === msg.conflictNote ? null : current
+      );
+      void refreshManifest();
+    },
+    [refreshManifest]
   );
 
   const { connected, presence, sameFileWarning } = useVaultNotify(
@@ -473,7 +617,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     activeTab?.path ?? null,
     {
       onChange: (msg) => void handleRemoteChange(msg),
-      onReconnect: () => void refreshManifest(),
+      onConflict: handleConflict,
+      onConflictResolved: handleConflictResolved,
+      onReconnect: () => {
+        void refreshManifest();
+        void refreshConflicts();
+      },
     }
   );
 
@@ -697,6 +846,28 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       },
     ];
 
+    if (conflicts.length > 0) {
+      list.push({
+        id: "review-conflicts",
+        title: `Review sync conflicts (${conflicts.length})`,
+        keywords: "resolve merge versions",
+        icon: <Warning size={16} weight="fill" className="text-danger" />,
+        run: reviewConflicts,
+      });
+      for (const conflict of conflicts) {
+        list.push({
+          id: `resolve-${conflict.conflictNote}`,
+          title: `Resolve conflict: ${conflict.path}`,
+          keywords: `${conflict.conflictNote} merge server yours base`,
+          icon: <Warning size={16} className="text-danger" />,
+          run: () => {
+            setConflictError(null);
+            setSelectedConflictNote(conflict.conflictNote);
+          },
+        });
+      }
+    }
+
     if (activeTab) {
       const tab = activeTab;
       const isMd = isMarkdown(
@@ -768,6 +939,8 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     saveTab,
     closeTab,
     guardedNavigate,
+    conflicts,
+    reviewConflicts,
   ]);
 
   // ── Global hotkeys ─────────────────────────────────────────────────────--
@@ -893,6 +1066,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           />
         }
       >
+        {conflicts.length > 0 && (
+          <ConflictBanner count={conflicts.length} onReview={reviewConflicts} />
+        )}
         <EditorArea
           vaultId={vaultId}
           activeTab={activeTab}
@@ -1000,6 +1176,21 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           files={vaultPaths}
           onOpenFile={openFile}
           onClose={() => setPalette(null)}
+        />
+      )}
+
+      {selectedConflict && (
+        <ConflictResolutionPanel
+          conflict={selectedConflict}
+          resolving={resolvingConflict}
+          error={conflictError}
+          onClose={() => {
+            if (!resolvingConflict) {
+              setSelectedConflictNote(null);
+              setConflictError(null);
+            }
+          }}
+          onResolve={resolveSelectedConflict}
         />
       )}
     </>

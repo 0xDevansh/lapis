@@ -126,6 +126,17 @@ vaultRoutes.post("/:id/acks", requireSession, async (c) => {
   }
 });
 
+vaultRoutes.get("/:id/conflicts", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const vault = await resolveVault(c.env.DB, id, session.userId);
+  if (!vault) return c.json({ error: "Not found" }, 404);
+  const stub = c.env.VAULT_COORDINATOR.get(
+    c.env.VAULT_COORDINATOR.idFromName(id)
+  );
+  return c.json({ conflicts: await stub.listConflicts(id) });
+});
+
 vaultRoutes.post("/:id/conflicts/resolve", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();

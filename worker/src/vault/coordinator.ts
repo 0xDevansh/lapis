@@ -44,7 +44,11 @@ import {
   type ResolveConflictRequest,
   type StorageVersion,
 } from "./contracts";
-import { initializeTextStoreSchema, TextStore } from "./text-store";
+import {
+  chunkUtf8,
+  initializeTextStoreSchema,
+  TextStore,
+} from "./text-store";
 
 export type {
   AckRequest,
@@ -254,6 +258,14 @@ export class VaultCoordinator extends DurableObject<Env> {
 
       CREATE INDEX IF NOT EXISTS idx_conflicts_open
         ON conflicts(path_lower, resolved_at);
+
+      CREATE TABLE IF NOT EXISTS conflict_content_chunks (
+        conflict_note_lower TEXT NOT NULL,
+        content_kind        TEXT NOT NULL,
+        chunk_idx           INTEGER NOT NULL,
+        data                BLOB NOT NULL,
+        PRIMARY KEY (conflict_note_lower, content_kind, chunk_idx)
+      );
     `);
     initializeTextStoreSchema(this.sql);
   }
@@ -310,6 +322,47 @@ export class VaultCoordinator extends DurableObject<Env> {
       this.advanceCheckpointFromAcks(path, retainedDeviceKeys);
     }
     return { accepted };
+  }
+
+  async listConflicts(vaultId: string): Promise<ConflictPayload[]> {
+    await this.ensureManifestLoaded(vaultId);
+    const conflicts = this.openConflictRows().map((row) =>
+      this.conflictPayloadFromRow(row)
+    );
+    const knownNotes = new Set(
+      conflicts.map((conflict) => lowerPath(conflict.conflictNote))
+    );
+
+    for (const entry of Object.values(this.manifestFromSql(vaultId).entries)) {
+      if (
+        !lowerPath(entry.path).startsWith(".sync-conflicts/") ||
+        knownNotes.has(lowerPath(entry.path)) ||
+        !isTextContentType(entry.contentType)
+      ) {
+        continue;
+      }
+      const metadata = parseConflictNoteMetadata(
+        await this.headText(vaultId, entry.path)
+      );
+      if (!metadata) continue;
+
+      const original = this.getEntry(metadata.path);
+      const serverContent =
+        original && isTextContentType(original.contentType)
+          ? await this.headText(vaultId, original.path)
+          : undefined;
+      const conflict: ConflictPayload = {
+        path: metadata.path,
+        conflictNote: entry.path,
+        serverRevision: metadata.serverRevision,
+        clientBaseRevision: metadata.clientBaseRevision,
+        serverContent,
+        isBinary: metadata.isBinary,
+      };
+      this.storeOpenConflict(conflict, entry.updatedAt);
+      conflicts.push(conflict);
+    }
+    return conflicts;
   }
 
   async resolveConflict(
@@ -415,6 +468,10 @@ export class VaultCoordinator extends DurableObject<Env> {
        WHERE conflict_note_lower = ? AND resolved_at IS NULL`,
       resolvedAt,
       request.action,
+      lowerPath(request.conflictNote)
+    );
+    this.sql.exec(
+      `DELETE FROM conflict_content_chunks WHERE conflict_note_lower = ?`,
       lowerPath(request.conflictNote)
     );
     try {
@@ -1626,21 +1683,7 @@ export class VaultCoordinator extends DurableObject<Env> {
       baseContent: ctx.baseContent,
       isBinary: ctx.isBinary,
     };
-    this.sql.exec(
-      `INSERT OR REPLACE INTO conflicts
-       (conflict_note_lower, conflict_note, path_lower, path,
-        server_revision, client_base_revision, is_binary, created_at,
-        resolved_at, resolution_action, delete_pending)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)`,
-      lowerPath(conflictNote),
-      conflictNote,
-      lowerPath(ctx.path),
-      ctx.path,
-      ctx.serverRevision,
-      ctx.clientBaseRevision,
-      ctx.isBinary ? 1 : 0,
-      ctx.timestamp
-    );
+    this.storeOpenConflict(conflict, ctx.timestamp);
     this.broadcast({
       type: "conflict",
       conflict,
@@ -1648,6 +1691,126 @@ export class VaultCoordinator extends DurableObject<Env> {
       ts: ctx.timestamp,
     });
     return conflict;
+  }
+
+  private storeOpenConflict(
+    conflict: ConflictPayload,
+    createdAt: string
+  ): void {
+    const noteLower = lowerPath(conflict.conflictNote);
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        `INSERT OR REPLACE INTO conflicts
+         (conflict_note_lower, conflict_note, path_lower, path,
+          server_revision, client_base_revision, is_binary, created_at,
+          resolved_at, resolution_action, delete_pending)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)`,
+        noteLower,
+        conflict.conflictNote,
+        lowerPath(conflict.path),
+        conflict.path,
+        conflict.serverRevision,
+        conflict.clientBaseRevision,
+        conflict.isBinary ? 1 : 0,
+        createdAt
+      );
+      this.sql.exec(
+        `DELETE FROM conflict_content_chunks WHERE conflict_note_lower = ?`,
+        noteLower
+      );
+      this.writeConflictContent(noteLower, "server", conflict.serverContent);
+      this.writeConflictContent(noteLower, "client", conflict.clientContent);
+      this.writeConflictContent(noteLower, "base", conflict.baseContent);
+    });
+  }
+
+  private openConflictRows(): ConflictRow[] {
+    return this.sql.exec<ConflictRow>(
+      `SELECT conflict_note AS conflictNote, path,
+              server_revision AS serverRevision,
+              client_base_revision AS clientBaseRevision,
+              is_binary AS isBinary
+       FROM conflicts
+       WHERE resolved_at IS NULL
+       ORDER BY created_at`
+    ).toArray();
+  }
+
+  private conflictPayloadFromRow(row: ConflictRow): ConflictPayload {
+    const conflictNote = String(row.conflictNote);
+    const noteLower = lowerPath(conflictNote);
+    return {
+      path: String(row.path),
+      conflictNote,
+      serverRevision: Number(row.serverRevision),
+      clientBaseRevision: Number(row.clientBaseRevision),
+      serverContent: this.readConflictContent(noteLower, "server"),
+      clientContent: this.readConflictContent(noteLower, "client"),
+      baseContent: this.readConflictContent(noteLower, "base"),
+      isBinary: Number(row.isBinary) === 1 || undefined,
+    };
+  }
+
+  private writeConflictContent(
+    noteLower: string,
+    kind: "server" | "client" | "base",
+    content: string | undefined
+  ): void {
+    if (content === undefined) return;
+    const chunks = chunkUtf8(content);
+    if (chunks.length === 0) {
+      chunks.push({ index: 0, data: new ArrayBuffer(0) });
+    }
+    for (const chunk of chunks) {
+      this.sql.exec(
+        `INSERT INTO conflict_content_chunks
+         (conflict_note_lower, content_kind, chunk_idx, data)
+         VALUES (?, ?, ?, ?)`,
+        noteLower,
+        kind,
+        chunk.index,
+        chunk.data
+      );
+    }
+  }
+
+  private readConflictContent(
+    noteLower: string,
+    kind: "server" | "client" | "base"
+  ): string | undefined {
+    const rows = this.sql.exec<Record<string, SqlStorageValue>>(
+      `SELECT chunk_idx AS chunkIndex, data
+       FROM conflict_content_chunks
+       WHERE conflict_note_lower = ? AND content_kind = ?
+       ORDER BY chunk_idx`,
+      noteLower,
+      kind
+    ).toArray();
+    if (rows.length === 0) return undefined;
+
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (let index = 0; index < rows.length; index++) {
+      if (
+        Number(rows[index].chunkIndex) !== index ||
+        !(rows[index].data instanceof ArrayBuffer)
+      ) {
+        throw new Error(`Invalid ${kind} conflict content for ${noteLower}`);
+      }
+      const chunk = new Uint8Array(rows[index].data as ArrayBuffer);
+      chunks.push(chunk);
+      size += chunk.byteLength;
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(bytes);
   }
 
   private async writeConflictNote(vaultId: string, ctx: ConflictContext, author: string): Promise<string> {

@@ -181,6 +181,15 @@ export async function resolveConflict(
   );
 }
 
+export async function getConflicts(
+  vaultId: string
+): Promise<ConflictPayload[]> {
+  const result = await apiFetch<{ conflicts: ConflictPayload[] }>(
+    `/api/vaults/${vaultId}/conflicts`
+  );
+  return result.conflicts;
+}
+
 /** Fetch the raw text content of a vault file. */
 export async function getFileText(vaultId: string, path: string): Promise<string> {
   const res = await fetch(

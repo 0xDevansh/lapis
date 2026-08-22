@@ -651,6 +651,7 @@ describe("SQLite text heads", () => {
       serverContent: "server",
       clientContent: "client",
     });
+    expect(await stub.listConflicts(vaultId)).toEqual([result.conflict]);
     const head = await stub.getContent(vaultId, path);
     expect(new TextDecoder().decode(head?.bytes)).toBe("server");
     const note = await stub.getContent(vaultId, result.conflictNote!);
@@ -667,6 +668,7 @@ describe("SQLite text heads", () => {
     );
     expect(resolution.entry.revision).toBe(second.revision);
     expect(await stub.getContent(vaultId, result.conflictNote!)).toBeNull();
+    expect(await stub.listConflicts(vaultId)).toEqual([]);
     await expect(
       stub.resolveConflict(vaultId, {
         path,

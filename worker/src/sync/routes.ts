@@ -90,6 +90,15 @@ syncRoutes.post("/:vaultId/acks", requireDevice, async (c) => {
   }
 });
 
+syncRoutes.get("/:vaultId/conflicts", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  return c.json({
+    conflicts: await stubFor(c.env, vaultId).listConflicts(vaultId),
+  });
+});
+
 syncRoutes.post("/:vaultId/conflicts/resolve", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
