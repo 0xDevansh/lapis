@@ -81,45 +81,72 @@ The server already implements the full sync protocol. The plugin is a client tha
 ## Implementation Decisions
 
 ### Package
-- `plugin/` package in the pnpm workspace. esbuild → `main.js` (CJS). Plugin ID: `lapis-sync`. `isDesktopOnly: true` for v1.
+- New `plugin/` package inside the existing pnpm workspace. Manages its own `package.json`, `esbuild.config.mjs`, `tsconfig.json`, and `manifest.json`.
+- Bundled via esbuild into `main.js` (CJS, `es2021`). `obsidian`, `electron`, all `@codemirror/*` packages, and Node builtins are marked external.
+- `isDesktopOnly: true` for v1. Mobile deferred to a later slice.
+- Plugin ID: `lapis-sync`.
 
 ### Settings and persistence
-- `LapisSettings { serverUrl, vaultId, syncToken, deviceName, receiveInternals, lastConnectedAt }` plus local Yjs state blob / path↔fileId map in plugin `data.json`.
+- `LapisSettings { serverUrl, vaultId, syncToken, deviceName, receiveInternals, lastConnectedAt }` persisted via `this.loadData() / this.saveData()`.
+- The sync journal (`SyncJournal`) is also stored in `data.json` alongside settings (keyed separately) to avoid a second I/O file. Loaded once on `onload`, written after every journal mutation.
 
-### Sync transport
-- Primary: device-authenticated Yjs WebSocket (`/api/sync/:vaultId/yjs?token=…`).
-- Binary upload helper over HTTP when attaching new binaries to R2, then meta update in the Y.Doc.
-- Reconnect with exponential backoff; state-vector sync recovers missed updates.
+### HTTP transport
+- All sync HTTP calls made via `requestUrl` (bypasses CORS, no browser same-origin restriction). Authorization header: `Bearer <syncToken>`. Base URL from `settings.serverUrl`.
+- A thin `LapisClient` class wraps `requestUrl` with typed methods for each sync endpoint. The sync engine only depends on a `SyncClientInterface` so unit tests can inject a mock without loading the Obsidian runtime.
+
+### WebSocket notifications
+- `new WebSocket(url)` with `Authorization` supplied as a query parameter (`?token=<syncToken>`) since the WebSocket API does not support custom headers. Server side extracts this from the query string when the browser WebSocket spec prohibits custom headers.
+- Reconnect with exponential backoff (1 s → 2 → 4 → … → 30 s cap). Missed changes recovered via manifest diff on reconnect.
 
 ### Vault event watcher
-- `vault.on('create' | 'modify' | 'delete' | 'rename')` with per-path debounce on modify.
-- Map events to stable `fileId` ops (rename/delete never recreate `Y.Text` for the same logical file).
-- Echo suppression for remote-origin path ops.
-- Filter Vault Internals / OS junk like the server path rules.
+- `vault.on('create' | 'modify' | 'delete' | 'rename')` registered via `this.registerEvent()`.
+- Modify events debounced per-path (500 ms) to avoid mid-save partial content.
+- All events filtered through client-side mirrors of `isVaultInternal`, `isOsJunk`, and `isValidVaultPath` before generating ops.
+- Vault Internals events only queued if `receiveInternals` is on and only for the direction from server → local (internals are never pushed by the plugin).
 
-### Offline
-- Persist local Yjs updates; merge on reconnect via CRDT. Queue binary uploads until online.
+### Diff and patch
+- Client-side `createPatch(original, modified)` mirrors the LCS-based encoder in the server's `patch.ts`. Produces minimal unified diff. Sent with `baseRevision` and `clientContent` so the server can attempt a three-way merge on stale patches.
+- Binary detection: if `vault.readBinary` returns an ArrayBuffer whose content is not valid UTF-8 (or the file extension is a known binary type: `png jpg jpeg gif webp svg pdf mp3 mp4 wav ogg zip`), use whole-object PUT.
 
-### Testability
-- Sync engine depends on injected vault adapter + Yjs provider interfaces so unit tests avoid the Obsidian runtime.
+### Journal
+- `SyncJournal` shape mirrors `worker/src/sync/journal.ts`. Canonical fields: `version:1`, `vaultId`, `lastSyncAt`, `fileRevisions: Record<lcPath, number>`, `fileHashes: Record<lcPath, hexSHA256>`, `pendingOps: PendingOp[]`.
+- Revision bookkeeping: after every accepted push or pull, update `fileRevisions[lcPath]` to the server's returned revision. Hashes updated for every write.
+- Offline appends are idempotent-safe: if the plugin crashes mid-replay, ops that were already accepted will produce a 409/staleness response; the engine will handle this as a merge attempt rather than a fatal error.
+
+### Reconcile on first connect
+- Fetch server manifest. For each path in the union of local files and server files:
+  - Server only → pull to local.
+  - Local only → push to server (if not Vault Internal or OS junk).
+  - Both, identical hash → no-op; record revision.
+  - Both, different content → send as a patch with `clientContent` + `baseContent` (empty string as base, since no shared history). Server performs a 3-way merge; unsafe merges produce a Conflict Note.
+
+### Testability boundary
+- `SyncEngine` constructor accepts a `SyncClientInterface` (typed mock) and a `VaultAdapter` interface (thin wrapper over the Obsidian `DataAdapter`). This means the engine module is testable without any Obsidian runtime.
 
 ## Testing Decisions
 
-- Concurrent text edits converge; rename+edit commute; soft-delete+offline edit revives.
-- Echo suppression: remote rename does not re-enter the CRDT.
-- Device-code poll resolves on approved/denied/expired.
-- Path classification matches server rules.
+Good tests verify observable sync outcomes, not internal state transitions. The relevant seams are:
+- **`diff.ts`** — given original and modified strings, produces a valid unified diff; round-trips through `applyPatch` (mirrors tests in `worker/src/vault/patch.ts`).
+- **`paths.ts`** — client-side path classification agrees with server-side rules for a table of known-good and known-bad paths.
+- **`journal.ts`** — journal survives a save/load round-trip; ops are appended and replayed in order; a corrupt payload triggers a reset rather than a throw.
+- **`engine.ts`** — given a fixture vault state and server manifest, reconcile produces the correct set of ops; push outcomes (accepted / merged / conflict) are reflected correctly in journal revisions. Uses a mock `SyncClientInterface` and `VaultAdapter`; no Obsidian import.
+- **`device-auth.ts`** — poll loop resolves on `approved`, rejects cleanly on `denied` and `expired`. Uses a mock `requestUrl`.
+
+Prior art in this codebase: the worker's `worker/src/vault/patch.ts` and `worker/src/sync/journal.ts` have the types this module mirrors; use those as the fixture source.
 
 ## Out of Scope
 
-- Mobile support (`isDesktopOnly: true` for v1).
-- Awareness/cursors inside Obsidian.
-- Syncing `.obsidian/` by default (opt-in only).
-- Multi-vault in one plugin instance.
-- Peer-to-peer Local Vault sync without the Web Vault.
-- E2EE; publishing; billing.
+- Mobile support (iOS / Android) — deferred; `isDesktopOnly: true` for v1.
+- Real-time collaborative editing (CRDTs, OT).
+- Running or hosting Obsidian community plugins from the Web Vault.
+- Syncing `.obsidian/` by default (opt-in only, per device).
+- Multi-vault support within a single plugin instance.
+- Sync between two Local Vaults without going through the Web Vault.
+- Plugin-side Markdown rendering or preview.
+- End-to-end encryption of vault content in transit (auth-gated without E2EE, per ADR 0005).
+- Publishing or sharing notes from the plugin.
+- Billing, quotas, or usage enforcement.
 
 ## Further Notes
 
-See ADR 0008 (Yjs + DO text) and ADR 0009 (members). Legacy patch/journal/Conflict Note protocol is retired.
-
+The server protocol is fully implemented and tested. All sync endpoints, the device-code flow, the batch journal replay, the three-way merge, and Conflict Note creation are live in `worker/src/`. The plugin is purely a new client — no server changes are required for slices 15–20. The one exception is the WebSocket auth mechanism: the current notify endpoint accepts a `?identity=` query parameter, and the plugin will use `?token=<syncToken>` instead, which requires a one-line addition to the server's notify route to validate Bearer from query string. This is a small server patch, not a new slice.

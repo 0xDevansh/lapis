@@ -11,7 +11,7 @@ import { deleteGitRemote, getGitRemote, publicGitRemoteMeta, updateGitRemoteStat
 const gitRoutes = new Hono<{ Bindings: Env }>();
 
 async function verifyVaultOwner(db: D1Database, vaultId: string, userId: string): Promise<boolean> {
-  const row = await db.prepare(`SELECT vault_id AS id FROM vault_members WHERE vault_id = ? AND user_id = ?`).bind(vaultId, userId).first();
+  const row = await db.prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`).bind(vaultId, userId).first();
   return !!row;
 }
 

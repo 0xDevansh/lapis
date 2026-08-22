@@ -6,12 +6,20 @@ import type {
   LapisRequestOptions,
   LapisResponse,
   ManifestEntry,
+  BatchSyncResponse,
+  PatchResponse,
+  StaleWriteResponse,
+  SeedCompleteResult,
+  VaultManifest,
 } from "../types";
 
-/**
- * Device HTTP client — auth + binary blob I/O.
- * Text sync goes through the Yjs WebSocket (`YjsFsBridge`), not REST.
- */
+export class StaleWriteError extends Error {
+  constructor(message: string, readonly headRevision: number) {
+    super(message);
+    this.name = "StaleWriteError";
+  }
+}
+
 export class LapisClient {
   constructor(private readonly serverUrl: string) {}
 
@@ -81,7 +89,17 @@ export class LapisClient {
     throw new Error(response.text || `Device token poll failed (${response.status})`);
   }
 
-  /** Fetch a binary (or any) file blob. Prefer Yjs for text. */
+  async getManifest(vaultId: string, token: string): Promise<VaultManifest> {
+    const response = await this.request<VaultManifest>({
+      path: `/api/sync/${encodeURIComponent(vaultId)}/manifest`,
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Manifest request failed (${response.status})`);
+    }
+    return response.data;
+  }
+
   async getFile(vaultId: string, path: string, token: string): Promise<ArrayBuffer> {
     const response = await requestUrl({
       url: this.url(`/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`),
@@ -95,14 +113,38 @@ export class LapisClient {
     return response.arrayBuffer;
   }
 
-  /** Upload a binary into R2 + Yjs meta. */
-  async putFile(
-    vaultId: string,
-    path: string,
-    content: ArrayBuffer,
-    contentType: string,
-    token: string
-  ): Promise<ManifestEntry> {
+  async seedFile(vaultId: string, path: string, content: ArrayBuffer, contentType: string, token: string): Promise<ManifestEntry | null> {
+    const response = await this.request<ManifestEntry>({
+      method: "PUT",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/seed/files/${encodePath(path)}`,
+      body: content,
+      contentType,
+      token,
+    });
+    if (response.status === 204) {
+      return null;
+    }
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Seed upload failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async completeSeed(vaultId: string, token: string): Promise<SeedCompleteResult> {
+    const response = await this.request<SeedCompleteResult>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/seed/complete`,
+      body: JSON.stringify({}),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Seed completion failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async putFile(vaultId: string, path: string, content: ArrayBuffer, contentType: string, token: string): Promise<ManifestEntry> {
     const response = await this.request<ManifestEntry>({
       method: "PUT",
       path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
@@ -112,6 +154,99 @@ export class LapisClient {
     });
     if (response.status !== 200 || !response.data) {
       throw new Error(response.text || `File upload failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async putFileWithBaseRevision(
+    vaultId: string,
+    path: string,
+    content: ArrayBuffer,
+    contentType: string,
+    baseRevision: number,
+    token: string
+  ): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry | StaleWriteResponse>({
+      method: "PUT",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
+      body: content,
+      contentType,
+      token,
+      headers: { "X-Base-Revision": String(baseRevision) },
+    });
+    if (response.status === 200 && isManifestEntry(response.data)) {
+      return response.data;
+    }
+    if (response.status === 409) {
+      throw staleWriteError(staleBody(response.data), response.text);
+    }
+    throw new Error(response.text || `File upload failed (${response.status})`);
+  }
+
+  async applyPatch(
+    vaultId: string,
+    path: string,
+    patch: string,
+    baseRevision: number,
+    token: string
+  ): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry | PatchResponse | StaleWriteResponse>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}/patch`,
+      body: JSON.stringify({ patch, baseRevision }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status === 200 && response.data) {
+      if ("entry" in response.data) {
+        return response.data.entry;
+      }
+      if (!isManifestEntry(response.data)) {
+        throw new Error(response.text || "Invalid patch response");
+      }
+      return response.data;
+    }
+    if (response.status === 409) {
+      throw staleWriteError(staleBody(response.data), response.text);
+    }
+    throw new Error(response.text || `Patch failed (${response.status})`);
+  }
+
+  async renameFile(vaultId: string, oldPath: string, newPath: string, token: string): Promise<ManifestEntry> {
+    const response = await this.request<ManifestEntry>({
+      method: "PATCH",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(oldPath)}`,
+      body: JSON.stringify({ newPath }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Rename failed (${response.status})`);
+    }
+    return response.data;
+  }
+
+  async deleteFile(vaultId: string, path: string, token: string): Promise<void> {
+    const response = await this.request<{ ok: boolean }>({
+      method: "DELETE",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/files/${encodePath(path)}`,
+      token,
+    });
+    if (response.status !== 200) {
+      throw new Error(response.text || `Delete failed (${response.status})`);
+    }
+  }
+
+  async batchSync(vaultId: string, ops: unknown[], token: string): Promise<BatchSyncResponse> {
+    const response = await this.request<BatchSyncResponse>({
+      method: "POST",
+      path: `/api/sync/${encodeURIComponent(vaultId)}/batch`,
+      body: JSON.stringify({ ops }),
+      contentType: "application/json",
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Batch sync failed (${response.status})`);
     }
     return response.data;
   }
@@ -136,4 +271,20 @@ export class LapisClient {
 
 function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function staleWriteError(data: StaleWriteResponse | null, fallback: string): StaleWriteError {
+  const headRevision = data?.headRevision ?? data?.serverRevision;
+  if (typeof headRevision === "number") {
+    return new StaleWriteError(data?.error ?? "Revision conflict", headRevision);
+  }
+  return new StaleWriteError(fallback || "Revision conflict", -1);
+}
+
+function isManifestEntry(value: unknown): value is ManifestEntry {
+  return typeof value === "object" && value !== null && typeof (value as ManifestEntry).path === "string" && typeof (value as ManifestEntry).revision === "number";
+}
+
+function staleBody(value: unknown): StaleWriteResponse | null {
+  return typeof value === "object" && value !== null ? (value as StaleWriteResponse) : null;
 }

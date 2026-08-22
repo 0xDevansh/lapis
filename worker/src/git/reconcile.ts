@@ -7,7 +7,7 @@
 
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import { MemoryFS } from "./memory-fs";
+import { MemoryFS } from "../artifacts/memory-fs";
 import { merge3 } from "../vault/patch";
 import type { ChangeNotification } from "../vault/coordinator";
 import type { ConflictContext } from "../vault/conflict";

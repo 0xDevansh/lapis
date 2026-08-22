@@ -8,15 +8,13 @@ import {
   X,
   Sun,
   Moon,
-  Plugs,
 } from "@phosphor-icons/react";
 import * as api from "../../api";
 import { useToast } from "../ui/Toast";
 import GitHubRemotePanel from "../GitHubRemotePanel";
-import McpSettingsPanel from "../McpSettingsPanel";
 import type { Theme } from "../../hooks/useTheme";
 
-type SettingsTab = "devices" | "github" | "mcp" | "export" | "appearance";
+type SettingsTab = "devices" | "github" | "export" | "appearance";
 
 interface SettingsPopoverProps {
   vaultId: string;
@@ -66,7 +64,6 @@ export default function SettingsPopover({
   const tabs: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
     { id: "devices", label: "Devices", icon: <DeviceMobile size={16} weight="duotone" /> },
     { id: "github", label: "GitHub", icon: <GithubLogo size={16} weight="duotone" /> },
-    { id: "mcp", label: "MCP", icon: <Plugs size={16} weight="duotone" /> },
     { id: "export", label: "Export", icon: <DownloadSimple size={16} /> },
     { id: "appearance", label: "Theme", icon: theme === "dark" ? <Sun size={16} /> : <Moon size={16} /> },
   ];
@@ -100,8 +97,7 @@ export default function SettingsPopover({
       <div className="custom-scroll min-h-0 flex-1 overflow-y-auto p-4">
         {tab === "devices" && <DevicesSettings vaultId={vaultId} toast={toast} />}
         {tab === "github" && <GitHubRemotePanel vaultId={vaultId} defaultOpen />}
-        {tab === "mcp" && <McpSettingsPanel vaultId={vaultId} compact />}
-        {tab === "export" && (
+                {tab === "export" && (
           <div className="space-y-3">
             <p className="text-sm text-muted">
               Download a zip of every file in this vault.

@@ -138,20 +138,7 @@ export default function AuthPage({
           <div className="h-px flex-1 bg-border" />
         </div>
 
-        <button
-          type="button"
-          className="w-full rounded border border-border bg-surface px-3 py-2.5 text-sm font-medium text-ink transition-colors hover:bg-elevated"
-          onClick={() => {
-            void import("../lib/auth-client").then(({ authClient }) =>
-              authClient.signIn.social({
-                provider: "google",
-                callbackURL: "/",
-              })
-            );
-          }}
-        >
-          Continue with Google
-        </button>
+        
       </div>
     </div>
   );

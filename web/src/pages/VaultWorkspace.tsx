@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import * as api from "../api";
-import { FolderTree, buildTree, joinPath, parentDir } from "../components/FolderTree";
+import { FolderTree, buildTree } from "../components/FolderTree";
 import MarkdownView from "../components/MarkdownView";
 import SearchPanel from "../components/SearchPanel";
 import SnapshotsPanel from "../components/SnapshotsPanel";
@@ -9,7 +9,6 @@ import RightPanel from "../components/layout/RightPanel";
 import MarkdownEditor from "../components/editor/MarkdownEditor";
 import { useTheme } from "../hooks/useTheme";
 import { useVaultNotify } from "../hooks/useVaultNotify";
-import { useVaultYjs } from "../hooks/useVaultYjs";
 import { useIsMobile } from "../hooks/useMobile";
 import {
   WorkspaceProvider,
@@ -23,25 +22,25 @@ import StatusBar, { type SyncState } from "../components/layout/StatusBar";
 import MobileToolbar from "../components/layout/MobileToolbar";
 import {
   FilePlus,
-  FolderPlus,
   UploadSimple,
   PencilSimple,
   Eye,
   Trash,
   TextAlignLeft,
   DownloadSimple,
-  FloppyDisk,
-  ArrowCounterClockwise,
-  X as XIcon,
-  FileMagnifyingGlass,
   MagnifyingGlass,
   SidebarSimple,
   SidebarSimple as SidebarRightIcon,
   Sun,
   Moon,
+  FloppyDisk,
+  ArrowCounterClockwise,
+  X as XIcon,
   DeviceMobile,
   House,
+  FileMagnifyingGlass,
 } from "@phosphor-icons/react";
+import { deviceAuthor } from "../identity";
 import { useToast } from "../components/ui/Toast";
 import CommandPalette, {
   type Command,
@@ -78,23 +77,40 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Adapt Yjs-derived entries to ManifestEntry (r2Key unused in UI). */
-function asManifestEntries(
-  entries: Array<{
-    path: string;
-    size: number;
-    contentType: string;
-    updatedAt: string;
-    revision: number;
-  }>
-): api.ManifestEntry[] {
-  return entries.map((e) => ({ ...e, r2Key: "" }));
+function applyUnifiedPatch(original: string, patch: string): string | null {
+  const lines = patch.split("\n");
+  const hunkIndex = lines.findIndex((line) => line.startsWith("@@"));
+  if (hunkIndex < 0) return null;
+  const match = lines[hunkIndex].match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+  if (!match) return null;
+
+  const source = original === "" ? [] : original.split("\n");
+  const output: string[] = [];
+  let sourceIndex = 0;
+  const start = Number(match[1]) - 1;
+  while (sourceIndex < start) output.push(source[sourceIndex++]);
+  for (const line of lines.slice(hunkIndex + 1)) {
+    if (line === "") continue;
+    const prefix = line[0];
+    const content = line.slice(1);
+    if (prefix === " ") {
+      if (source[sourceIndex] !== content) return null;
+      output.push(content);
+      sourceIndex++;
+    } else if (prefix === "-") {
+      if (source[sourceIndex] !== content) return null;
+      sourceIndex++;
+    } else if (prefix === "+") {
+      output.push(content);
+    }
+  }
+  while (sourceIndex < source.length) output.push(source[sourceIndex++]);
+  return output.join("\n");
 }
 
 type Modal =
   | { kind: "none" }
-  | { kind: "newNote"; value: string; parent: string; error: string | null }
-  | { kind: "newFolder"; value: string; parent: string; error: string | null }
+  | { kind: "newNote"; value: string; error: string | null }
   | { kind: "rename"; path: string; value: string; error: string | null }
   | { kind: "deleteConfirm"; path: string }
   | {
@@ -129,10 +145,11 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const isMobile = useIsMobile();
 
   const [vault, setVault] = useState<api.Vault | null>(null);
+  const [manifest, setManifest] = useState<api.VaultManifest | null>(null);
+  const [manifestError, setManifestError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const [palette, setPalette] = useState<PaletteMode | null>(null);
-  /** Folder path used as the create target ("" = vault root). */
-  const [createParent, setCreateParent] = useState("");
   const [load, setLoad] = useState<{
     tabId: string;
     status: "loading" | "error";
@@ -143,7 +160,6 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const uploadRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const initialRouteHandled = useRef(false);
-  const mobileRightCollapsed = useRef(false);
   const activeTabRef = useRef<Tab | null>(activeTab);
   const tabsRef = useRef(state.tabs);
   useEffect(() => {
@@ -153,80 +169,38 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     tabsRef.current = state.tabs;
   }, [state.tabs]);
 
-  // Right panel closed by default on mobile (takes too much space).
-  useEffect(() => {
-    if (isMobile && !mobileRightCollapsed.current) {
-      mobileRightCollapsed.current = true;
-      if (!state.right.collapsed) {
-        dispatch({ type: "TOGGLE_RIGHT", collapsed: true });
-      }
-    }
-  }, [isMobile, state.right.collapsed, dispatch]);
+  const anyDirty = state.tabs.some((t) => t.dirty);
 
-  const {
-    manifestEntries,
-    ready: yjsReady,
-    connected: yjsConnected,
-    readText,
-    saveText,
-    createNote,
-    rename: yjsRename,
-    remove: yjsRemove,
-  } = useVaultYjs(vaultId);
+  // ── Data loading ──────────────────────────────────────────────────────────
 
-  const manifest = useMemo((): api.VaultManifest | null => {
-    if (!yjsReady) return null;
-    const entries: Record<string, api.ManifestEntry> = {};
-    for (const e of asManifestEntries(manifestEntries)) {
-      entries[e.path.toLowerCase()] = e;
+  const refreshManifest = useCallback(async (): Promise<api.VaultManifest | null> => {
+    try {
+      const m = await api.getManifest(vaultId);
+      setManifest(m);
+      return m;
+    } catch (e) {
+      setManifestError((e as Error).message);
+      return null;
     }
-    return {
-      vaultId,
-      updatedAt: new Date().toISOString(),
-      entries,
-    };
-  }, [vaultId, yjsReady, manifestEntries]);
+  }, [vaultId]);
 
   useEffect(() => {
     api.getVault(vaultId).then(setVault).catch(() => {});
-  }, [vaultId]);
+    api.getSession().then((session) => setSessionId(session?.session?.id ?? null)).catch(() => setSessionId(null));
+    refreshManifest();
+  }, [vaultId, refreshManifest]);
 
   // ── Open a file in a tab ────────────────────────────────────────────────--
 
-  // Drop persisted tabs whose files no longer exist once the manifest arrives.
-  useEffect(() => {
-    if (!manifest) return;
-    dispatch({
-      type: "PRUNE_TABS",
-      validPathsLower: Object.keys(manifest.entries),
-    });
-  }, [manifest, dispatch]);
-
   const openFile = useCallback(
     (path: string) => {
-      setCreateParent(parentDir(path));
       dispatch({ type: "OPEN_FILE", path });
+      // On mobile, close the file tree drawer after opening a file.
       if (isMobile && !state.left.collapsed) {
         dispatch({ type: "TOGGLE_LEFT", collapsed: true });
       }
     },
     [dispatch, isMobile, state.left.collapsed]
-  );
-
-  const openNewNoteModal = useCallback(
-    (parent?: string) => {
-      const dir = parent ?? createParent;
-      setModal({ kind: "newNote", value: "", parent: dir, error: null });
-    },
-    [createParent]
-  );
-
-  const openNewFolderModal = useCallback(
-    (parent?: string) => {
-      const dir = parent ?? createParent;
-      setModal({ kind: "newFolder", value: "", parent: dir, error: null });
-    },
-    [createParent]
   );
 
   // Handle initial deep link (/vault/:id/file/...) once manifest is loaded.
@@ -260,7 +234,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   // ── Load content for active text tab ───────────────────────────────────--
 
   useEffect(() => {
-    if (!activeTab || !manifest || !yjsReady) return;
+    if (!activeTab || !manifest) return;
     const entry = manifest.entries[activeTab.path.toLowerCase()];
     if (!entry) {
       setLoad({ tabId: activeTab.id, status: "error", message: "File not in manifest" });
@@ -274,45 +248,29 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       setLoad(null);
       return;
     }
-    const content = readText(activeTab.path);
-    if (content === null) {
-      setLoad({ tabId: activeTab.id, status: "error", message: "File not in vault" });
-      return;
-    }
-    dispatch({
-      type: "SET_TAB_CONTENT",
-      id: activeTab.id,
-      editBuffer: content,
-      baseContent: content,
-    });
-    setLoad(null);
-  }, [
-    activeTab?.id,
-    activeTab?.path,
-    activeTab?.baseContent,
-    manifest,
-    yjsReady,
-    readText,
-    dispatch,
-  ]);
-
-  // Sync remote Yjs text into open non-dirty tabs.
-  useEffect(() => {
-    if (!yjsReady || !manifest) return;
-    for (const tab of tabsRef.current) {
-      if (tab.dirty || tab.baseContent === undefined) continue;
-      const entry = manifest.entries[tab.path.toLowerCase()];
-      if (!entry || !isTextType(entry.contentType)) continue;
-      const remote = readText(tab.path);
-      if (remote === null || remote === tab.baseContent) continue;
-      dispatch({
-        type: "SET_TAB_CONTENT",
-        id: tab.id,
-        editBuffer: remote,
-        baseContent: remote,
+    let cancelled = false;
+    setLoad({ tabId: activeTab.id, status: "loading" });
+    api
+      .getFileText(vaultId, activeTab.path)
+      .then((content) => {
+        if (cancelled) return;
+        dispatch({
+          type: "SET_TAB_CONTENT",
+          id: activeTab.id,
+          editBuffer: content,
+          baseContent: content,
+          baseRevision: entry.revision,
+        });
+        setLoad(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setLoad({ tabId: activeTab.id, status: "error", message: (e as Error).message });
       });
-    }
-  }, [manifestEntries, yjsReady, manifest, readText, dispatch]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab?.id, activeTab?.path, activeTab?.baseContent, manifest, vaultId, dispatch]);
 
   // ── Unsaved-edit guards ─────────────────────────────────────────────────--
 
@@ -361,11 +319,24 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       if (tab.editBuffer === undefined) return;
       setSaving(true);
       try {
-        saveText(tab.path, tab.editBuffer);
+        let result: api.ManifestEntry;
+        try {
+          result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
+            baseRevision: tab.baseRevision ?? 0,
+          });
+        } catch (error) {
+          if (!(error instanceof api.StaleWriteError)) throw error;
+          await api.getFileText(vaultId, tab.path);
+          result = await api.putTextFile(vaultId, tab.path, tab.editBuffer, {
+            baseRevision: error.headRevision,
+          });
+        }
+        await refreshManifest();
         dispatch({
           type: "MARK_TAB_SAVED",
           id: tab.id,
           content: tab.editBuffer,
+          revision: result.revision,
         });
         toast("Saved", { tone: "success", duration: 1500 });
       } catch (e) {
@@ -374,45 +345,121 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         setSaving(false);
       }
     },
-    [saveText, dispatch, toast]
+    [vaultId, refreshManifest, dispatch, toast]
   );
 
   // ── Revert the active tab to the server version ──────────────────────────--
 
   const doRevert = useCallback(
-    (tab: Tab) => {
+    async (tab: Tab) => {
       try {
-        const content = readText(tab.path);
-        if (content === null) throw new Error("File not in vault");
+        const content = await api.getFileText(vaultId, tab.path);
+        const m = await refreshManifest();
+        const entry = m?.entries[tab.path.toLowerCase()];
         dispatch({
           type: "SET_TAB_CONTENT",
           id: tab.id,
           editBuffer: content,
           baseContent: content,
+          baseRevision: entry?.revision ?? tab.baseRevision ?? 0,
         });
-        toast("Reverted to vault version", { tone: "success", duration: 1500 });
+        toast("Reverted to server version", { tone: "success", duration: 1500 });
       } catch (e) {
         toast((e as Error).message, { tone: "error" });
       }
     },
-    [readText, dispatch, toast]
+    [vaultId, refreshManifest, dispatch, toast]
   );
 
   const revertTab = useCallback(
     (tab: Tab) => {
       setModal({
         kind: "confirm",
-        title: "Revert to vault version?",
-        message: `Discard your local changes to ${tab.path} and reload the version in the vault?`,
+        title: "Revert to server version?",
+        message: `Discard your local changes to ${tab.path} and reload the version saved on the server?`,
         confirmLabel: "Revert",
         danger: true,
-        onConfirm: () => doRevert(tab),
+        onConfirm: () => void doRevert(tab),
       });
     },
     [doRevert]
   );
 
-  const { presence, sameFileWarning } = useVaultNotify(vaultId, activeTab?.path ?? null);
+  // ── Remote changes ─────────────────────────────────────────────────────--
+
+  const handleRemoteChange = useCallback(
+    async (msg: import("../hooks/useVaultNotify").ChangeNotification) => {
+      if (sessionId && msg.author === deviceAuthor("web", sessionId)) {
+        return;
+      }
+      if (msg.path.startsWith(".sync-conflicts/")) {
+        toast("Sync conflict recorded — check .sync-conflicts/", { tone: "info", duration: 5000 });
+      }
+      const next = await refreshManifest();
+      const key = msg.path.toLowerCase();
+      if (msg.kind === "delete") {
+        const tab = tabsRef.current.find((t) => t.path.toLowerCase() === key);
+        if (tab && !tab.dirty) dispatch({ type: "REMOVE_PATH", path: tab.path });
+        return;
+      }
+      if (msg.kind === "rename" && msg.newPath) {
+        const tab = tabsRef.current.find((t) => t.path.toLowerCase() === key);
+        if (tab && !tab.dirty) {
+          dispatch({ type: "RENAME_PATH", oldPath: tab.path, newPath: msg.newPath });
+        }
+        return;
+      }
+      if (msg.kind === "put") {
+        const tab = tabsRef.current.find((t) => t.path.toLowerCase() === key);
+        if (tab && !tab.dirty && next) {
+          const entry = next.entries[key];
+          if (entry && isTextType(entry.contentType)) {
+            if (
+              msg.patch &&
+              msg.revision !== undefined &&
+              msg.baseRevision !== undefined &&
+              tab.baseContent !== undefined &&
+              tab.baseRevision === msg.baseRevision
+            ) {
+              const patched = applyUnifiedPatch(tab.baseContent, msg.patch);
+              if (patched !== null) {
+                dispatch({
+                  type: "SET_TAB_CONTENT",
+                  id: tab.id,
+                  editBuffer: patched,
+                  baseContent: patched,
+                  baseRevision: msg.revision,
+                });
+                return;
+              }
+            }
+            try {
+              const content = await api.getFileText(vaultId, tab.path);
+              dispatch({
+                type: "SET_TAB_CONTENT",
+                id: tab.id,
+                editBuffer: content,
+                baseContent: content,
+                baseRevision: entry.revision,
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+    },
+    [refreshManifest, dispatch, vaultId, sessionId, toast]
+  );
+
+  const { connected, presence, sameFileWarning } = useVaultNotify(
+    vaultId,
+    activeTab?.path ?? null,
+    {
+      onChange: (msg) => void handleRemoteChange(msg),
+      onReconnect: () => void refreshManifest(),
+    }
+  );
 
   useEffect(() => {
     if (sameFileWarning) setDismissedWarning(false);
@@ -422,51 +469,16 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   async function handleCreateNote() {
     if (modal.kind !== "newNote") return;
-    let name = modal.value.trim().replace(/^\/+/, "").replace(/\/+$/, "");
-    if (!name) return;
-    // Strip trailing .md from input — ghost suffix implies it.
-    if (name.toLowerCase().endsWith(".md")) name = name.slice(0, -3);
-    if (!name || name.includes("..")) {
-      setModal({ ...modal, error: "Invalid note name" });
-      return;
-    }
-    const path = joinPath(modal.parent, `${name}.md`);
+    let path = modal.value.trim();
+    if (!path) return;
+    if (!path.endsWith(".md")) path += ".md";
     try {
-      createNote(path, "");
+      await api.putTextFile(vaultId, path, "");
+      await refreshManifest();
       setModal({ kind: "none" });
       dispatch({ type: "OPEN_FILE", path });
     } catch (e) {
       setModal({ ...modal, error: (e as Error).message });
-    }
-  }
-
-  async function handleCreateFolder() {
-    if (modal.kind !== "newFolder") return;
-    let name = modal.value.trim().replace(/^\/+/, "").replace(/\/+$/, "");
-    if (!name || name.includes("..") || name.includes("/")) {
-      setModal({ ...modal, error: "Invalid folder name" });
-      return;
-    }
-    const folderPath = joinPath(modal.parent, name);
-    const keepPath = joinPath(folderPath, ".keep");
-    try {
-      createNote(keepPath, "");
-      setCreateParent(folderPath);
-      setModal({ kind: "none" });
-    } catch (e) {
-      setModal({ ...modal, error: (e as Error).message });
-    }
-  }
-
-  async function handleMove(sourcePath: string, destFolder: string) {
-    const name = sourcePath.split("/").pop()!;
-    const newPath = joinPath(destFolder, name);
-    if (newPath === sourcePath) return;
-    try {
-      yjsRename(sourcePath, newPath);
-      dispatch({ type: "RENAME_PATH", oldPath: sourcePath, newPath });
-    } catch (e) {
-      toast((e as Error).message, { tone: "error" });
     }
   }
 
@@ -483,6 +495,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         });
       }
     }
+    await refreshManifest();
     if (uploaded > 0)
       toast(`Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}`, {
         tone: "success",
@@ -497,7 +510,8 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       return;
     }
     try {
-      yjsRename(modal.path, newPath);
+      await api.renameFile(vaultId, modal.path, newPath);
+      await refreshManifest();
       dispatch({ type: "RENAME_PATH", oldPath: modal.path, newPath });
       setModal({ kind: "none" });
     } catch (e) {
@@ -509,7 +523,8 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     if (modal.kind !== "deleteConfirm") return;
     const { path } = modal;
     try {
-      yjsRemove(path);
+      await api.deleteFile(vaultId, path);
+      await refreshManifest();
       dispatch({ type: "REMOVE_PATH", path });
       setModal({ kind: "none" });
     } catch (e) {
@@ -533,14 +548,11 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   const activeText =
     activeTab && activeTab.editBuffer !== undefined ? activeTab.editBuffer : null;
-  const syncState: SyncState =
-    !yjsReady || !yjsConnected
-      ? "idle"
-      : saving
-        ? "saving"
-        : activeTab?.dirty
-          ? "dirty"
-          : "idle";
+  const syncState: SyncState = saving
+    ? "saving"
+    : activeTab?.dirty
+      ? "dirty"
+      : "idle";
 
   const activeIsMd = activeTab
     ? isMarkdown(
@@ -594,7 +606,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         hint: "⌘N",
         keywords: "create file add",
         icon: <FilePlus size={16} />,
-        run: () => openNewNoteModal(),
+        run: () => setModal({ kind: "newNote", value: "", error: null }),
       },
       {
         id: "quick-open",
@@ -775,7 +787,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         dispatch({ type: "TOGGLE_RIGHT" });
       } else if (k === "n") {
         e.preventDefault();
-        openNewNoteModal();
+        setModal({ kind: "newNote", value: "", error: null });
       } else if (k === "w") {
         if (activeTabRef.current) {
           e.preventDefault();
@@ -819,7 +831,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         tabBar={<TabBar contentTypeFor={contentTypeFor} onCloseTab={closeTab} />}
         statusBar={
           <StatusBar
-            connected={yjsConnected}
+            connected={connected}
             presence={presence}
             sameFileWarning={dismissedWarning ? null : sameFileWarning}
             onDismissWarning={() => setDismissedWarning(true)}
@@ -835,7 +847,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             isMd={activeIsMd}
             mode={activeTab?.mode ?? "preview"}
             onToggleLeft={() => dispatch({ type: "TOGGLE_LEFT" })}
-            onNewNote={() => openNewNoteModal()}
+            onNewNote={() => setModal({ kind: "newNote", value: "", error: null })}
             onSave={() => activeTab && saveTab(activeTab)}
             onToggleMode={toggleActiveMode}
             onToggleRight={() => dispatch({ type: "TOGGLE_RIGHT" })}
@@ -846,17 +858,14 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             vaultId={vaultId}
             treeNodes={treeNodes}
             manifest={manifest}
+            manifestError={manifestError}
             activePath={activeTab?.path ?? null}
-            createParent={createParent}
             searchInputRef={searchInputRef}
             onOpenFile={openFile}
-            onSelectFolder={(p) => setCreateParent(p)}
-            onNewNote={(parent) => openNewNoteModal(parent)}
-            onNewFolder={(parent) => openNewFolderModal(parent)}
+            onNewNote={() => setModal({ kind: "newNote", value: "", error: null })}
             onUpload={() => uploadRef.current?.click()}
             onRename={(p) => setModal({ kind: "rename", path: p, value: p, error: null })}
             onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
-            onMove={handleMove}
           />
         }
         right={
@@ -887,11 +896,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           onRename={(p) => setModal({ kind: "rename", path: p, value: p, error: null })}
           onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
           onOpenFile={openFile}
-          onCreateNote={(p) => {
-            const dir = parentDir(p);
-            const name = p.split("/").pop()?.replace(/\.md$/i, "") ?? "";
-            setModal({ kind: "newNote", value: name, parent: dir, error: null });
-          }}
+          onCreateNote={(p) => setModal({ kind: "newNote", value: p, error: null })}
         />
       </WorkspaceLayout>
 
@@ -901,27 +906,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           {modal.kind === "newNote" && (
             <ModalForm
               title="New note"
-              hint={modal.parent ? `in ${modal.parent}/` : "in vault root"}
-              placeholder="Note name"
+              placeholder="path/to/note.md"
               value={modal.value}
               error={modal.error}
               submitLabel="Create"
-              ghostSuffix=".md"
               onChange={(v) => setModal({ ...modal, value: v, error: null })}
               onSubmit={handleCreateNote}
-              onCancel={() => setModal({ kind: "none" })}
-            />
-          )}
-          {modal.kind === "newFolder" && (
-            <ModalForm
-              title="New folder"
-              hint={modal.parent ? `in ${modal.parent}/` : "in vault root"}
-              placeholder="Folder name"
-              value={modal.value}
-              error={modal.error}
-              submitLabel="Create"
-              onChange={(v) => setModal({ ...modal, value: v, error: null })}
-              onSubmit={handleCreateFolder}
               onCancel={() => setModal({ kind: "none" })}
             />
           )}
@@ -950,7 +940,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
                   Cancel
                 </button>
                 <button
-                  className="rounded bg-danger px-3 py-1.5 text-sm font-medium text-on-accent hover:opacity-90"
+                  className="rounded bg-danger px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
                   onClick={handleDelete}
                 >
                   Delete
@@ -970,7 +960,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
                   Cancel
                 </button>
                 <button
-                  className={`rounded px-3 py-1.5 text-sm font-medium text-on-accent hover:opacity-90 ${
+                  className={`rounded px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 ${
                     modal.danger ? "bg-danger" : "bg-accent"
                   }`}
                   onClick={() => {
@@ -1000,73 +990,50 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   );
 }
 
-// ── Sidebar content ──────────────────────────────────────────────────────────
+// ── Sidebar content ──────────────────────────────────────────────────────--
 
 function SidebarContent({
   vaultId,
   treeNodes,
   manifest,
+  manifestError,
   activePath,
-  createParent,
   searchInputRef,
   onOpenFile,
-  onSelectFolder,
   onNewNote,
-  onNewFolder,
   onUpload,
   onRename,
   onDelete,
-  onMove,
 }: {
   vaultId: string;
   treeNodes: ReturnType<typeof buildTree>;
   manifest: api.VaultManifest | null;
+  manifestError: string | null;
   activePath: string | null;
-  createParent: string;
   searchInputRef: React.RefObject<HTMLInputElement>;
   onOpenFile: (path: string) => void;
-  onSelectFolder: (path: string) => void;
-  onNewNote: (parent?: string) => void;
-  onNewFolder: (parent?: string) => void;
+  onNewNote: () => void;
   onUpload: () => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
-  onMove: (sourcePath: string, destFolder: string) => void;
 }) {
-  const createHint = createParent ? createParent : "vault root";
   return (
     <>
-      <div className="flex items-center gap-2 border-b border-border px-1.5 py-1">
-        <div className="inline-flex items-center gap-0.5 rounded-md bg-elevated px-0.5 py-0.5">
-          <button
-            onClick={() => onNewNote(createParent)}
-            className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
-            title={`New note in ${createHint} (⌘N)`}
-          >
-            <FilePlus size={22} weight="bold" />
-          </button>
-          <button
-            onClick={() => onNewFolder(createParent)}
-            className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
-            title={`New folder in ${createHint}`}
-          >
-            <FolderPlus size={22} weight="bold" />
-          </button>
-          <button
-            onClick={onUpload}
-            className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
-            title="Upload file"
-          >
-            <UploadSimple size={22} weight="bold" />
-          </button>
-        </div>
-        {createParent ? (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-faint" title={createParent}>
-            {createParent}/
-          </span>
-        ) : (
-          <span className="text-[11px] text-faint">/</span>
-        )}
+      <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
+        <button
+          onClick={onNewNote}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded bg-accent px-2 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-soft"
+          title="New note (⌘N)"
+        >
+          <FilePlus size={15} weight="bold" /> Note
+        </button>
+        <button
+          onClick={onUpload}
+          className="flex items-center justify-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          title="Upload file"
+        >
+          <UploadSimple size={15} /> Upload
+        </button>
       </div>
 
       <div className="border-b border-border px-2 py-2">
@@ -1074,7 +1041,9 @@ function SidebarContent({
       </div>
 
       <div className="custom-scroll min-h-0 flex-1 overflow-y-auto py-1">
-        {!manifest ? (
+        {manifestError ? (
+          <p className="px-3 py-2 text-[13px] text-danger">{manifestError}</p>
+        ) : !manifest ? (
           <p className="px-3 py-2 text-[13px] text-muted">Loading…</p>
         ) : treeNodes.length === 0 ? (
           <p className="px-3 py-2 text-[13px] text-muted">This vault is empty.</p>
@@ -1082,14 +1051,9 @@ function SidebarContent({
           <FolderTree
             nodes={treeNodes}
             selectedPath={activePath}
-            focusedFolder={createParent}
             onSelect={onOpenFile}
-            onSelectFolder={onSelectFolder}
             onRename={onRename}
             onDelete={onDelete}
-            onNewNote={onNewNote}
-            onNewFolder={onNewFolder}
-            onMove={onMove}
           />
         )}
       </div>
@@ -1155,13 +1119,7 @@ function EditorArea({
     );
   }
 
-  // Wait for the manifest before deciding a tab is missing (cold-start race).
-  if (!manifest) {
-    return <CenterMessage>Loading…</CenterMessage>;
-  }
-
-  const entry = manifest.entries[activeTab.path.toLowerCase()];
-  const noteTitle = activeTab.path.split("/").pop()?.replace(/\.md$/i, "") ?? activeTab.path;
+  const entry = manifest?.entries[activeTab.path.toLowerCase()];
 
   if (load && load.tabId === activeTab.id && load.status === "loading") {
     return <CenterMessage>Loading…</CenterMessage>;
@@ -1177,11 +1135,7 @@ function EditorArea({
   if (isImageType(entry.contentType)) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <FileToolbar
-          dirty={false}
-          saving={false}
-          onDelete={() => onDelete(activeTab.path)}
-        />
+        <FileHeader path={activeTab.path} onRename={onRename} onDelete={onDelete} />
         <div className="custom-scroll flex-1 overflow-auto p-6">
           <img
             src={`${api.fileUrl(vaultId, activeTab.path)}?rev=${entry.revision}`}
@@ -1197,11 +1151,7 @@ function EditorArea({
   if (!isTextType(entry.contentType)) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <FileToolbar
-          dirty={false}
-          saving={false}
-          onDelete={() => onDelete(activeTab.path)}
-        />
+        <FileHeader path={activeTab.path} onRename={onRename} onDelete={onDelete} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted">
           <p className="text-sm">
             {entry.contentType} · {formatBytes(entry.size)}
@@ -1209,7 +1159,7 @@ function EditorArea({
           <a
             href={`${api.fileUrl(vaultId, activeTab.path)}?rev=${entry.revision}`}
             download={activeTab.path.split("/").pop()}
-            className="flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:bg-accent-soft"
+            className="flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-soft"
           >
             <DownloadSimple size={15} /> Download
           </a>
@@ -1225,14 +1175,32 @@ function EditorArea({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <FileToolbar
-        mode={md ? activeTab.mode : undefined}
-        onToggleMode={md ? () => onSetMode(activeTab.mode === "preview" ? "live" : "preview") : undefined}
-        dirty={activeTab.dirty}
+      <FileHeader
+        path={activeTab.path}
+        onRename={onRename}
+        onDelete={onDelete}
+        right={
+          md ? (
+            <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+              <ModeButton
+                active={activeTab.mode === "live"}
+                onClick={() => onSetMode("live")}
+                icon={<PencilSimple size={13} />}
+                label="Edit"
+              />
+              <ModeButton
+                active={activeTab.mode === "preview"}
+                onClick={() => onSetMode("preview")}
+                icon={<Eye size={13} />}
+                label="Preview"
+              />
+            </div>
+          ) : undefined
+        }
         saving={saving}
+        dirty={activeTab.dirty}
         onSave={onSave}
         onRevert={onRevert}
-        onDelete={() => onDelete(activeTab.path)}
       />
       {previewMode ? (
         <div className="custom-scroll min-h-0 flex-1 overflow-y-auto">
@@ -1240,122 +1208,105 @@ function EditorArea({
             source={buffer}
             vaultId={vaultId}
             currentPath={activeTab.path}
-            title={noteTitle}
             vaultPaths={vaultPaths}
-            manifestEntries={manifest.entries}
+            manifestEntries={manifest?.entries}
             onCreateNote={onCreateNote}
             onNavigate={onOpenFile}
           />
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          {md && (
-            <div className="mx-auto w-full max-w-[820px] px-8 pt-5">
-              <h1 className="note-inline-title">{noteTitle}</h1>
-            </div>
-          )}
-          <div className="min-h-0 flex-1">
-            <MarkdownEditor
-              docKey={activeTab.id}
-              currentPath={activeTab.path}
-              value={buffer}
-              onChange={onEdit}
-              onSave={onSave}
-              livePreviewEnabled={md}
-              vaultId={vaultId}
-              vaultPaths={vaultPaths}
-              onOpenLink={onOpenFile}
-              fileUrl={api.fileUrl}
-            />
-          </div>
-        </div>
+        <MarkdownEditor
+          docKey={activeTab.id}
+          currentPath={activeTab.path}
+          value={buffer}
+          onChange={onEdit}
+          onSave={onSave}
+          livePreviewEnabled={md}
+          vaultId={vaultId}
+          vaultPaths={vaultPaths}
+          onOpenLink={onOpenFile}
+          fileUrl={api.fileUrl}
+        />
       )}
     </div>
   );
 }
 
-function FileToolbar({
-  mode,
-  onToggleMode,
-  dirty,
+function ModeButton({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      className={[
+        "flex items-center gap-1 rounded px-2 py-1 text-[12px] font-medium transition-colors",
+        active ? "bg-accent text-white" : "text-muted hover:text-ink",
+      ].join(" ")}
+    >
+      {icon} {label}
+    </button>
+  );
+}
+
+function FileHeader({
+  path,
+  onDelete,
+  right,
   saving,
+  dirty,
   onSave,
   onRevert,
-  onDelete,
 }: {
-  mode?: "live" | "preview";
-  onToggleMode?: () => void;
-  dirty: boolean;
-  saving: boolean;
+  path: string;
+  onRename?: (path: string) => void;
+  onDelete: (path: string) => void;
+  right?: React.ReactNode;
+  saving?: boolean;
+  dirty?: boolean;
   onSave?: () => void;
   onRevert?: () => void;
-  onDelete: () => void;
 }) {
   return (
     <div className="flex h-10 shrink-0 items-center justify-end gap-0.5 border-b border-border bg-canvas px-2">
+      <span className="flex-1 truncate font-mono text-[12px] text-muted">{path}</span>
+      {right}
       {onRevert && (
         <button
           onClick={onRevert}
           disabled={!dirty || saving}
-          title="Revert to vault version"
-          aria-label="Revert"
-          className="flex h-8 w-8 items-center justify-center rounded text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+          title="Revert to server version"
+          aria-label="Revert to server version"
+          className="flex items-center gap-1 rounded border border-border px-2.5 py-1 text-[12px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <ArrowCounterClockwise size={16} weight="bold" />
+          <ArrowCounterClockwise size={13} /> Revert
         </button>
       )}
       {onSave && (
         <button
           onClick={onSave}
           disabled={!dirty || saving}
-          title={saving ? "Saving…" : "Save"}
-          aria-label="Save"
-          className="flex h-8 items-center gap-1.5 rounded px-2 text-[13px] font-medium text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex items-center gap-1 rounded bg-accent px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <FloppyDisk size={16} weight="bold" />
-          {saving ? "Saving…" : dirty ? "Save" : ""}
+          {saving ? "Saving…" : "Save"}
         </button>
       )}
       <button
-        onClick={onDelete}
+        onClick={() => onDelete(path)}
         title="Delete"
         aria-label="Delete"
-        className="flex h-8 w-8 items-center justify-center rounded text-ink hover:bg-hover hover:text-danger"
+        className="flex h-6 w-6 items-center justify-center rounded text-muted hover:bg-hover hover:text-danger"
       >
-        <Trash size={16} weight="bold" />
+        <Trash size={14} />
       </button>
-      {onToggleMode && mode && (
-        <>
-          <div className="mx-1 h-4 w-px bg-border" aria-hidden />
-          <button
-            onClick={onToggleMode}
-            title={mode === "preview" ? "Switch to edit" : "Switch to preview"}
-            aria-label={mode === "preview" ? "Preview mode, switch to edit" : "Edit mode, switch to preview"}
-            className="flex h-8 items-center gap-1.5 rounded-md px-2 text-ink transition-colors hover:bg-hover"
-          >
-            {mode === "preview" ? (
-              <Eye size={16} weight="bold" />
-            ) : (
-              <PencilSimple size={16} weight="bold" />
-            )}
-            {/* Both labels occupy the same cell so width never shifts. */}
-            <span className="grid text-[13px] font-medium leading-none">
-              <span
-                className={mode === "live" ? "visible" : "invisible"}
-                style={{ gridArea: "1 / 1" }}
-              >
-                Edit
-              </span>
-              <span
-                className={mode === "preview" ? "visible" : "invisible"}
-                style={{ gridArea: "1 / 1" }}
-              >
-                Preview
-              </span>
-            </span>
-          </button>
-        </>
-      )}
     </div>
   );
 }
@@ -1428,7 +1379,7 @@ function ModalRoot({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       onClick={onClose}
     >
       <div
@@ -1445,53 +1396,34 @@ function ModalRoot({
 
 function ModalForm({
   title,
-  hint,
   placeholder,
   value,
   error,
   submitLabel,
-  ghostSuffix,
   onChange,
   onSubmit,
   onCancel,
 }: {
   title: string;
-  hint?: string;
   placeholder?: string;
   value: string;
   error: string | null;
   submitLabel: string;
-  /** Ghost suffix shown after the input (e.g. ".md"). */
-  ghostSuffix?: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
 }) {
-  const showGhost = Boolean(ghostSuffix);
-
   return (
     <div className="w-[400px] rounded-lg border border-border bg-surface p-5 shadow-2xl">
-      <h3 className="mb-1 text-base font-semibold text-ink">{title}</h3>
-      {hint && <p className="mb-3 text-[12px] text-muted">{hint}</p>}
-      <div
-        className={`mb-2 flex items-center rounded border border-border bg-canvas focus-within:border-accent ${
-          ghostSuffix ? "pr-3" : ""
-        }`}
-      >
-        <input
-          autoFocus
-          placeholder={placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-          className="min-w-0 flex-1 bg-transparent px-3 py-2 font-sans text-sm text-ink outline-none"
-        />
-        {showGhost && (
-          <span aria-hidden className="shrink-0 select-none font-sans text-sm text-faint">
-            {ghostSuffix}
-          </span>
-        )}
-      </div>
+      <h3 className="mb-3 text-base font-semibold text-ink">{title}</h3>
+      <input
+        autoFocus
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+        className="mb-2 w-full rounded border border-border bg-canvas px-3 py-2 font-mono text-sm text-ink outline-none focus:border-accent"
+      />
       {error && <p className="mb-2 text-sm text-danger">{error}</p>}
       <div className="mt-3 flex justify-end gap-2">
         <button
@@ -1501,7 +1433,7 @@ function ModalForm({
           Cancel
         </button>
         <button
-          className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:opacity-90"
+          className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-soft"
           onClick={onSubmit}
         >
           {submitLabel}

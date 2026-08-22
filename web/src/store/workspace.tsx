@@ -23,8 +23,10 @@ export interface Tab {
   dirty: boolean;
   /** Current in-memory edited content (undefined until loaded/edited). */
   editBuffer?: string;
-  /** Content as last loaded or saved — dirty baseline. */
+  /** Content as last loaded or saved — the conflict base. */
   baseContent?: string;
+  /** Revision as last loaded or saved — the conflict base. */
+  baseRevision?: number;
 }
 
 export interface PanelState {
@@ -87,16 +89,17 @@ export type WorkspaceAction =
       id: string;
       editBuffer: string;
       baseContent: string;
+      baseRevision: number;
     }
   | { type: "EDIT_TAB_BUFFER"; id: string; editBuffer: string }
   | {
       type: "MARK_TAB_SAVED";
       id: string;
       content: string;
+      revision: number;
     }
   | { type: "RENAME_PATH"; oldPath: string; newPath: string }
   | { type: "REMOVE_PATH"; path: string }
-  | { type: "PRUNE_TABS"; validPathsLower: Iterable<string> }
   | { type: "TOGGLE_LEFT"; collapsed?: boolean }
   | { type: "SET_LEFT_WIDTH"; width: number }
   | { type: "TOGGLE_RIGHT"; collapsed?: boolean }
@@ -176,6 +179,7 @@ function reducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState
                 ...t,
                 editBuffer: action.editBuffer,
                 baseContent: action.baseContent,
+                baseRevision: action.baseRevision,
                 dirty: false,
               }
             : t
@@ -205,6 +209,7 @@ function reducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState
                 ...t,
                 editBuffer: action.content,
                 baseContent: action.content,
+                baseRevision: action.revision,
                 dirty: false,
               }
             : t
@@ -225,21 +230,6 @@ function reducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState
       let activeTabId = state.activeTabId;
       if (closing && state.activeTabId === closing.id) {
         activeTabId = neighborTabId(state.tabs, closing.id);
-      }
-      return { ...state, tabs, activeTabId };
-    }
-
-    case "PRUNE_TABS": {
-      const valid = new Set(
-        Array.from(action.validPathsLower, (p) => p.toLowerCase())
-      );
-      const tabs = state.tabs.filter(
-        (t) => typeof t.path === "string" && valid.has(t.path.toLowerCase())
-      );
-      if (tabs.length === state.tabs.length) return state;
-      let activeTabId = state.activeTabId;
-      if (activeTabId && !tabs.some((t) => t.id === activeTabId)) {
-        activeTabId = tabs.length > 0 ? tabs[tabs.length - 1].id : null;
       }
       return { ...state, tabs, activeTabId };
     }

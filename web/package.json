@@ -27,14 +27,11 @@
     "framer-motion": "^12.42.2",
     "js-yaml": "^4.1.0",
     "katex": "0.16.22",
-    "lib0": "^0.2.117",
     "marked": "^15.0.12",
     "marked-katex-extension": "^5.1.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2",
-    "y-protocols": "^1.0.7",
-    "yjs": "^13.6.32"
+    "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",

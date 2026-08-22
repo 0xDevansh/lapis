@@ -19,18 +19,15 @@ async function apiFetch<T>(
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
     try {
-      const body = await res.json() as { error?: string; message?: string };
-      if (body.error || body.message) message = body.error ?? body.message!;
+      const body = await res.json() as { error?: string };
+      if (body.error) message = body.error;
     } catch {
       // ignore parse errors
     }
     throw new Error(message);
   }
 
-  // better-auth may return an empty body for some endpoints; treat as null.
-  const text = await res.text();
-  if (!text) return null as T;
-  return JSON.parse(text) as T;
+  return res.json() as Promise<T>;
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -41,33 +38,22 @@ export interface User {
   email: string;
 }
 
-interface AuthCredentialResponse {
-  user: User;
-}
-
 export async function signUp(name: string, email: string, password: string): Promise<User> {
-  const res = await apiFetch<AuthCredentialResponse>("/api/auth/sign-up/email", {
+  return apiFetch<User>("/api/auth/sign-up/email", {
     method: "POST",
     body: JSON.stringify({ name, email, password }),
   });
-  return res.user;
 }
 
 export async function signIn(email: string, password: string): Promise<User> {
-  const res = await apiFetch<AuthCredentialResponse>("/api/auth/sign-in/email", {
+  return apiFetch<User>("/api/auth/sign-in/email", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-  return res.user;
 }
 
 export async function signOut(): Promise<void> {
-  // better-auth rejects Content-Type: application/json with an empty body
-  // ("Invalid JSON in request body"). Send an empty JSON object.
-  await apiFetch<unknown>("/api/auth/sign-out", {
-    method: "POST",
-    body: "{}",
-  });
+  await apiFetch<unknown>("/api/auth/sign-out", { method: "POST" });
 }
 
 export interface SessionInfo {
@@ -91,7 +77,6 @@ export interface Vault {
   id: string;
   name: string;
   createdAt: string;
-  role?: "owner" | "editor" | "viewer";
 }
 
 export async function listVaults(): Promise<Vault[]> {
@@ -117,8 +102,15 @@ export interface ManifestEntry {
   size: number;
   contentType: string;
   updatedAt: string;
-  /** Monotonic stub kept for FolderTree compatibility; CRDT has no revision. */
+  /** Monotonic revision counter, incremented on every accepted write. */
   revision: number;
+}
+
+export class StaleWriteError extends Error {
+  constructor(message: string, readonly headRevision: number) {
+    super(message);
+    this.name = "StaleWriteError";
+  }
 }
 
 export interface VaultManifest {
@@ -127,12 +119,11 @@ export interface VaultManifest {
   entries: Record<string, ManifestEntry>;
 }
 
-/** Derived listing from server Y.Doc (prefer client Yjs when connected). */
 export async function getManifest(vaultId: string): Promise<VaultManifest> {
   return apiFetch<VaultManifest>(`/api/vaults/${vaultId}/manifest`);
 }
 
-/** Fetch file bytes as text (binaries / fallback; prefer Yjs for notes). */
+/** Fetch the raw text content of a vault file. */
 export async function getFileText(vaultId: string, path: string): Promise<string> {
   const res = await fetch(
     `/api/vaults/${vaultId}/files/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
@@ -147,7 +138,31 @@ export function fileUrl(vaultId: string, path: string): string {
   return `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** Upload a binary file (R2 + Yjs meta). Text notes should use the Yjs provider. */
+/** Create or replace a text file (Markdown, plain text). */
+export async function putTextFile(
+  vaultId: string,
+  path: string,
+  content: string,
+  options?: { baseRevision?: number }
+): Promise<ManifestEntry> {
+  const res = await fetch(`/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`, {
+    method: "PUT",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options?.baseRevision !== undefined ? { "X-Base-Revision": String(options.baseRevision) } : {}),
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (res.ok) return res.json() as Promise<ManifestEntry>;
+  const body = await res.json().catch(() => ({})) as { error?: string; headRevision?: number; serverRevision?: number };
+  if (res.status === 409) {
+    throw new StaleWriteError(body.error ?? "Revision conflict", body.headRevision ?? body.serverRevision ?? -1);
+  }
+  throw new Error(body.error ?? `HTTP ${res.status}`);
+}
+
+/** Upload a binary file (uses raw body, not JSON wrapper). */
 export async function uploadFile(
   vaultId: string,
   path: string,
@@ -171,6 +186,32 @@ export async function uploadFile(
     throw new Error(message);
   }
   return res.json() as Promise<ManifestEntry>;
+}
+
+/** Rename or move a file. */
+export async function renameFile(
+  vaultId: string,
+  oldPath: string,
+  newPath: string
+): Promise<ManifestEntry> {
+  return apiFetch<ManifestEntry>(
+    `/api/vaults/${vaultId}/files/${oldPath.split("/").map(encodeURIComponent).join("/")}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ newPath }),
+    }
+  );
+}
+
+/** Delete a file. */
+export async function deleteFile(
+  vaultId: string,
+  path: string
+): Promise<void> {
+  await apiFetch<unknown>(
+    `/api/vaults/${vaultId}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
+    { method: "DELETE" }
+  );
 }
 
 // ── Search, backlinks, tags (Slice 06) ────────────────────────────────────────
@@ -304,58 +345,6 @@ export async function updateDevice(
   });
 }
 
-// ── MCP (vault agent tools) ───────────────────────────────────────────────────
-
-export interface VaultMcpSettings {
-  vaultId: string;
-  enabled: boolean;
-  readOnly: boolean;
-  allowPaths: string[];
-  denyPaths: string[];
-  allowWrite: boolean;
-  allowSearch: boolean;
-  allowDelete: boolean;
-  maxReadBytes: number;
-  updatedAt: string;
-  endpoint: string;
-}
-
-export async function getMcpSettings(vaultId: string): Promise<VaultMcpSettings> {
-  return apiFetch<VaultMcpSettings>(`/api/vaults/${vaultId}/mcp`);
-}
-
-export async function updateMcpSettings(
-  vaultId: string,
-  patch: Partial<
-    Pick<
-      VaultMcpSettings,
-      | "enabled"
-      | "readOnly"
-      | "allowPaths"
-      | "denyPaths"
-      | "allowWrite"
-      | "allowSearch"
-      | "allowDelete"
-      | "maxReadBytes"
-    >
-  >
-): Promise<VaultMcpSettings> {
-  return apiFetch<VaultMcpSettings>(`/api/vaults/${vaultId}/mcp`, {
-    method: "PUT",
-    body: JSON.stringify(patch),
-  });
-}
-
-export async function createMcpToken(
-  vaultId: string,
-  name: string
-): Promise<{ tokenId: string; name: string; token: string; endpoint: string }> {
-  return apiFetch(`/api/vaults/${vaultId}/mcp/tokens`, {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-}
-
 // ── GitHub remote sync (Slices 25–26) ─────────────────────────────────────────
 
 export type GitRemoteSyncState = "idle" | "pulling" | "pushing" | "conflict";
@@ -418,7 +407,7 @@ export interface Snapshot {
   author: string;
 }
 
-/** Returns the GitHub commit timeline. Empty if no remote is connected. */
+/** Returns the sealed commit timeline from Artifacts. Empty if vault not yet sealed. */
 export async function listSnapshots(vaultId: string): Promise<Snapshot[]> {
   const res = await apiFetch<{ snapshots: Snapshot[] }>(`/api/vaults/${vaultId}/snapshots`);
   return res.snapshots;
@@ -448,4 +437,53 @@ export async function restoreFile(
  */
 export function exportUrl(vaultId: string): string {
   return `/api/vaults/${vaultId}/export`;
+}
+
+// ── Seed (Slice 08) ───────────────────────────────────────────────────────────
+
+export interface SeedCompleteResult {
+  ok: boolean;
+  commitHash: string;
+  fileCount: number;
+  remote: string;
+}
+
+/**
+ * Upload a single file during a vault seed operation.
+ * Uses device Bearer auth (the plugin calls this, not the web UI).
+ * Exposed here for documentation completeness and testing.
+ */
+export async function seedFile(
+  vaultId: string,
+  filePath: string,
+  content: ArrayBuffer,
+  contentType: string,
+  syncToken: string
+): Promise<Response> {
+  return fetch(`/api/sync/${vaultId}/seed/files/${encodeURIComponent(filePath)}`, {
+    method: "PUT",
+    headers: {
+      "Authorization": `Bearer ${syncToken}`,
+      "Content-Type": contentType,
+    },
+    body: content,
+  });
+}
+
+/**
+ * Call after all seed files are uploaded to trigger an immediate Artifacts seal.
+ */
+export async function completeSeed(
+  vaultId: string,
+  syncToken: string
+): Promise<SeedCompleteResult> {
+  const res = await fetch(`/api/sync/${vaultId}/seed/complete`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${syncToken}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<SeedCompleteResult>;
 }

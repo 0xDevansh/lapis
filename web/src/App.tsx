@@ -8,7 +8,6 @@ import { ToastProvider } from "./components/ui/Toast";
 const VaultListPage = lazy(() => import("./pages/VaultListPage"));
 const VaultWorkspace = lazy(() => import("./pages/VaultWorkspace"));
 const DevicesPage = lazy(() => import("./pages/DevicesPage"));
-const InviteAcceptPage = lazy(() => import("./pages/InviteAcceptPage"));
 
 function RouteFallback() {
   return (
@@ -140,7 +139,6 @@ export default function App() {
               element={<VaultListPage user={user} onSignOut={signOut} />}
             />
             <Route path="/auth" element={<Navigate to="/" replace />} />
-            <Route path="/invites/:token" element={<InviteAcceptPage />} />
             <Route path="/vault/:id/devices" element={<DevicesPage />} />
             <Route path="/vault/:id/*" element={<VaultWorkspace />} />
             <Route

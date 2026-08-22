@@ -17,10 +17,70 @@ export interface ManifestEntry {
   revision: number;
 }
 
+export interface VaultManifest {
+  version: 1;
+  vaultId: string;
+  updatedAt: string;
+  entries: Record<string, ManifestEntry>;
+}
+
+export interface SyncJournal {
+  version: 1;
+  vaultId: string;
+  lastSyncAt: string;
+  fileRevisions: Record<string, number>;
+  fileHashes: Record<string, string>;
+  pendingOps: PendingOp[];
+}
+
+export type PendingOp = PendingPutOp | PendingPatchOp | PendingRenameOp | PendingDeleteOp;
+
+export interface PendingPutOp {
+  op: "put";
+  path: string;
+  contentBase64: string;
+  contentType: string;
+  baseRevision?: number;
+}
+
+export interface PendingPatchOp {
+  op: "patch";
+  path: string;
+  patch: string;
+  baseRevision: number;
+}
+
+export interface PendingRenameOp {
+  op: "rename";
+  oldPath: string;
+  newPath: string;
+}
+
+export interface PendingDeleteOp {
+  op: "delete";
+  path: string;
+}
+
+export interface BatchOpResult {
+  op: PendingOp["op"];
+  path: string;
+  status: "accepted" | "stale" | "error";
+  error?: string;
+  headRevision?: number;
+  entry?: ManifestEntry;
+}
+
+export interface BatchSyncResponse {
+  results: BatchOpResult[];
+}
+
 export interface ChangeNotification {
   type: "change";
   path: string;
   kind: "put" | "rename" | "delete";
+  baseRevision?: number;
+  revision?: number;
+  patch?: string;
   newPath?: string;
   author?: string;
   ts: string;
@@ -44,10 +104,14 @@ export interface SameFileWarning {
 
 export interface PluginData {
   settings?: Partial<LapisSettings>;
-  /** Yjs FS bridge index (path ↔ fileId + hashes) */
-  fsIndex?: import("./sync/reconcile").FsIndexState | null;
-  /** Base64-encoded Yjs document state for offline */
-  yjsStateBase64?: string | null;
+  journal?: SyncJournal | null;
+}
+
+export interface SeedCompleteResult {
+  ok: boolean;
+  commitHash?: string;
+  fileCount: number;
+  remote?: string;
 }
 
 export const DEFAULT_SETTINGS: LapisSettings = {
@@ -85,6 +149,16 @@ export interface LapisRequestOptions {
   contentType?: string;
   token?: string;
   headers?: Record<string, string>;
+}
+
+export interface StaleWriteResponse {
+  error?: string;
+  headRevision?: number;
+  serverRevision?: number;
+}
+
+export interface PatchResponse {
+  entry: ManifestEntry;
 }
 
 export interface LapisResponse<T> {

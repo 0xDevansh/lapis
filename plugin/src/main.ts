@@ -2,25 +2,23 @@ import { Notice, Plugin, TFile } from "obsidian";
 import { LapisClient } from "./net/client";
 import { NotifyClient, type NotifyMessage } from "./net/notify";
 import { LapisSettingTab, normalizeSettings } from "./settings";
-import type { LapisSettings, PluginData } from "./types";
-import { bytesToBase64, base64ToBytes } from "./sync/hash";
-import { isValidFsIndex, type FsIndexState } from "./sync/reconcile";
-import { YjsFsBridge } from "./sync/yjs-fs-bridge";
+import type { LapisSettings, PluginData, SyncJournal } from "./types";
+import { SyncEngine } from "./sync/engine";
+import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
-import { LapisStatusBar } from "./ui/status";
+import { countConflicts, LapisStatusBar } from "./ui/status";
+import { deviceAuthor } from "./identity";
 
 const LOCAL_CHANGE_DEBOUNCE_MS = 5_000;
 
 export default class LapisPlugin extends Plugin {
   settings!: LapisSettings;
-  fsIndex: FsIndexState | null = null;
-  yjsState: Uint8Array | null = null;
+  journal: SyncJournal | null = null;
   settingTab!: LapisSettingTab;
   private statusBar!: LapisStatusBar;
   private modifyTimers = new Map<string, number>();
   private suppressWatcher = false;
   private notifyClient: NotifyClient | null = null;
-  private bridge: YjsFsBridge | null = null;
   private lastPresenceCount = 0;
   private currentOpenPath: string | null = null;
   private syncChain: Promise<void> = Promise.resolve();
@@ -50,6 +48,12 @@ export default class LapisPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "open-conflicts-folder",
+      name: "Open conflicts folder",
+      callback: () => this.openConflictsFolder(),
+    });
+
+    this.addCommand({
       id: "show-sync-diagnostics",
       name: "Show sync diagnostics",
       callback: () => void this.showSyncDiagnostics(),
@@ -59,38 +63,19 @@ export default class LapisPlugin extends Plugin {
     this.addSettingTab(this.settingTab);
     this.registerWatcher();
     this.registerEditorChangeFallback();
-
-    if (this.settings.syncToken) {
-      this.startNotify();
-      void this.startBridge();
-    }
-
-    this.registerInterval(
-      window.setInterval(() => {
-        if (this.bridge) void this.enqueueSync(() => this.bridge!.reconcileFromDisk().then(() => undefined));
-      }, 5 * 60 * 1000)
-    );
+    this.startNotify();
+    this.registerInterval(window.setInterval(() => void this.pullChanged(), 5 * 60 * 1000));
     this.registerInterval(window.setInterval(() => this.reportOpenFile(), 2000));
   }
 
   onunload() {
-    this.bridge?.stop();
-    this.bridge = null;
     this.notifyClient?.close();
   }
 
   async loadSettings() {
     const data = (await this.loadData()) as PluginData | null;
     this.settings = normalizeSettings(data?.settings ?? data);
-    this.fsIndex =
-      data?.fsIndex && isValidFsIndex(data.fsIndex, this.settings.vaultId) ? data.fsIndex : null;
-    if (data?.yjsStateBase64) {
-      try {
-        this.yjsState = new Uint8Array(base64ToBytes(data.yjsStateBase64));
-      } catch {
-        this.yjsState = null;
-      }
-    }
+    this.journal = isValidJournal(data?.journal, this.settings.vaultId) ? data.journal : null;
   }
 
   async saveSettings() {
@@ -100,6 +85,12 @@ export default class LapisPlugin extends Plugin {
 
   refreshSettingsTab() {
     this.settingTab?.display();
+  }
+
+  async saveJournal(journal: SyncJournal) {
+    this.journal = journal;
+    await this.savePluginData();
+    this.updateStatus();
   }
 
   async connect() {
@@ -130,7 +121,6 @@ export default class LapisPlugin extends Plugin {
           await this.saveSettings();
           this.refreshSettingsTab();
           this.startNotify();
-          await this.startBridge();
           await this.syncNow();
         },
         onDone: () => this.updateStatus(),
@@ -143,13 +133,10 @@ export default class LapisPlugin extends Plugin {
   }
 
   async disconnect() {
-    this.bridge?.stop();
-    this.bridge = null;
     this.settings.syncToken = "";
     this.settings.deviceId = "";
     this.settings.lastConnectedAt = null;
-    this.fsIndex = null;
-    this.yjsState = null;
+    this.journal = null;
     this.notifyClient?.close();
     this.notifyClient = null;
     await this.saveSettings();
@@ -162,11 +149,7 @@ export default class LapisPlugin extends Plugin {
     this.settings.receiveInternals = receiveInternals;
     try {
       if (this.settings.syncToken) {
-        await new LapisClient(this.settings.serverUrl).updateDevice(
-          this.settings.vaultId,
-          this.settings.syncToken,
-          receiveInternals
-        );
+        await new LapisClient(this.settings.serverUrl).updateDevice(this.settings.vaultId, this.settings.syncToken, receiveInternals);
       }
       await this.saveSettings();
       new Notice(`Lapis: Vault Internals ${receiveInternals ? "enabled" : "disabled"}`);
@@ -186,58 +169,90 @@ export default class LapisPlugin extends Plugin {
 
     await this.enqueueSync(async () => {
       this.updateStatus("syncing");
+      const previousSuppress = this.suppressWatcher;
+      this.suppressWatcher = true;
+      const engine = new SyncEngine({
+        app: this.app,
+        settings: this.settings,
+        client: new LapisClient(this.settings.serverUrl),
+        getJournal: () => this.journal,
+        setJournal: (journal) => this.saveJournal(journal),
+      });
       try {
-        if (!this.bridge) await this.startBridge();
-        const result = await this.bridge!.reconcileFromDisk();
-        new Notice(
-          result.ops > 0
-            ? `Lapis: reconciled ${result.ops} change${result.ops === 1 ? "" : "s"}`
-            : "Lapis: sync complete"
-        );
+        if (this.journal) {
+          await engine.replayPending();
+          const { pushed, deleted } = await engine.pushLocalChanges();
+          await engine.pullChanged();
+          if (pushed > 0 || deleted > 0) {
+            new Notice(`Lapis: pushed ${pushed} change${pushed === 1 ? "" : "s"}${deleted > 0 ? ` and ${deleted} delete${deleted === 1 ? "" : "s"}` : ""}`);
+          } else {
+            new Notice("Lapis: sync complete");
+          }
+        } else {
+          await engine.firstSync();
+        }
         this.updateStatus();
       } catch (error) {
         this.updateStatus("error");
         const message = error instanceof Error ? error.message : "Sync failed";
         new Notice(`Lapis: ${message}`);
+      } finally {
+        this.suppressWatcher = previousSuppress;
       }
     });
   }
 
-  private async startBridge(): Promise<void> {
-    if (this.bridge || !this.settings.syncToken) return;
-    this.bridge = new YjsFsBridge({
-      app: this.app,
-      settings: this.settings,
-      getIndex: () => this.fsIndex,
-      setIndex: async (index) => {
-        this.fsIndex = index;
-        await this.savePluginData();
-      },
-      getYjsState: () => this.yjsState,
-      setYjsState: async (state) => {
-        this.yjsState = state;
-        await this.savePluginData();
-      },
-      onStatus: (s) => {
-        if (s === "connected") this.updateStatus("idle");
-        else if (s === "syncing") this.updateStatus("syncing");
-        else if (s === "error") this.updateStatus("error");
-        else this.updateStatus("idle");
-      },
-    });
-    await this.bridge.start();
+  private async pullChanged() {
+    if (!this.settings.syncToken || !this.journal) {
+      return;
+    }
+    await this.runSync((engine) => engine.pullChanged(), true);
+  }
+
+  private openConflictsFolder() {
+    const folder = this.app.vault.getAbstractFileByPath(".sync-conflicts");
+    if (folder) {
+      (this.app.workspace as unknown as { revealInFolder(file: unknown): void }).revealInFolder(folder);
+    } else {
+      new Notice("Lapis: no conflict notes");
+    }
   }
 
   private async showSyncDiagnostics() {
-    const localCount = this.app.vault.getFiles().length;
-    const indexCount = this.fsIndex ? Object.keys(this.fsIndex.pathToId).length : 0;
-    const msg = `Lapis: local files ${localCount}, indexed ${indexCount}, yjs ${this.bridge ? "on" : "off"}`;
-    console.info("[lapis] diagnostics", { localCount, indexCount, hasState: Boolean(this.yjsState) });
-    new Notice(msg);
+    const engine = new SyncEngine({
+      app: this.app,
+      settings: this.settings,
+      client: new LapisClient(this.settings.serverUrl),
+      getJournal: () => this.journal,
+      setJournal: (journal) => this.saveJournal(journal),
+    });
+    try {
+      const diagnostics = await engine.diagnostics();
+      console.info("[lapis] sync diagnostics", diagnostics);
+      if (diagnostics.changedPaths.length > 0) {
+        console.info("[lapis] changed paths", diagnostics.changedPaths);
+      }
+      if (diagnostics.deletedPaths.length > 0) {
+        console.info("[lapis] deleted paths", diagnostics.deletedPaths);
+      }
+      new Notice(
+        `Lapis diagnostics: local ${diagnostics.localFileCount}, server ${diagnostics.serverFileCount ?? "?"}, changed ${diagnostics.changedPaths.length}, pending ${diagnostics.pendingOpCount}`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Diagnostics failed";
+      console.error("[lapis] sync diagnostics failed", error);
+      new Notice(`Lapis: ${message}`);
+    }
   }
 
   private updateStatus(state: "idle" | "connecting" | "syncing" | "error" = "idle") {
-    this.statusBar?.update(this.settings, state, 0);
+    this.statusBar?.update(this.settings, state, this.conflictCount());
+  }
+
+  private conflictCount(): number {
+    const journalPaths = this.journal ? Object.keys(this.journal.fileRevisions) : [];
+    const localPaths = this.app.vault.getFiles().map((file) => file.path);
+    return countConflicts([...journalPaths, ...localPaths]);
   }
 
   private startNotify() {
@@ -250,28 +265,44 @@ export default class LapisPlugin extends Plugin {
       token: this.settings.syncToken,
       onOpen: (reconnected) => {
         this.updateStatus();
-        if (reconnected) {
-          this.debug("notify reconnected");
-          void this.bridge?.reconcileFromDisk();
-        }
+        if (reconnected) this.debug("notify reconnected");
         this.reportOpenFile(true);
       },
-      onClose: () => this.statusBar.offline(0, 0),
+      onClose: () => this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount()),
       onMessage: (message) => this.handleNotifyMessage(message),
     });
     this.notifyClient.connect();
   }
 
-  private handleNotifyMessage(message: NotifyMessage) {
-    // File content sync is Yjs; notify channel is presence-only now.
+  private async handleNotifyMessage(message: NotifyMessage) {
+    if (message.type === "change") {
+      if (message.author === deviceAuthor("plugin", this.settings.deviceId)) {
+        return;
+      }
+      if (message.kind === "put" && this.journal?.fileRevisions[message.path.toLowerCase()] === message.revision) {
+        return;
+      }
+      if (message.kind === "put") {
+        await this.runSync((engine) => engine.applyRemotePut(message.path, message.revision, message.patch, message.baseRevision), true);
+      } else if (message.kind === "rename" && message.newPath) {
+        const newPath = message.newPath;
+        await this.runSync((engine) => engine.applyRemoteRename(message.path, newPath), true);
+      } else if (message.kind === "delete") {
+        await this.runSync((engine) => engine.applyRemoteDelete(message.path), true);
+      }
+      return;
+    }
+
     if (message.type === "presence") {
-      const others = message.sessions.filter((s) => !s.identity.startsWith("plugin:"));
-      if (others.length !== this.lastPresenceCount && others.length > 0) {
+      const selfIdentity = deviceAuthor("plugin", this.settings.deviceId);
+      const others = message.sessions.filter((session) => session.identity !== selfIdentity);
+      if (this.lastPresenceCount !== 0 && others.length !== this.lastPresenceCount) {
         new Notice(`Lapis: ${others.length} other session${others.length === 1 ? "" : "s"} connected`);
       }
       this.lastPresenceCount = others.length;
       return;
     }
+
     if (message.type === "same_file_warning") {
       new Notice(`Lapis: another session is editing ${message.path}`);
     }
@@ -282,38 +313,45 @@ export default class LapisPlugin extends Plugin {
     const nextPath = activeFile?.path ?? null;
     if (!force && nextPath === this.currentOpenPath) return;
     this.currentOpenPath = nextPath;
-    if (nextPath) this.notifyClient?.sendOpen(nextPath);
-    else this.notifyClient?.sendCloseFile();
+    if (nextPath) {
+      this.notifyClient?.sendOpen(nextPath);
+    } else {
+      this.notifyClient?.sendCloseFile();
+    }
   }
 
   private registerWatcher() {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
-        if (this.suppressWatcher || !this.bridge) return;
-        if (file instanceof TFile) this.scheduleLocalFlush(file.path, "create");
+        if (this.suppressWatcher) return;
+        if (file instanceof TFile) {
+          this.scheduleLocalFlush(file.path, "watcher create");
+        }
       })
     );
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (this.suppressWatcher || !this.bridge) return;
-        if (file instanceof TFile) this.scheduleLocalFlush(file.path, "modify");
+        if (this.suppressWatcher) return;
+        if (file instanceof TFile) {
+          this.scheduleLocalFlush(file.path, "watcher modify");
+        }
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (this.suppressWatcher || !this.bridge) return;
+        if (this.suppressWatcher) return;
         if (file instanceof TFile) {
           this.debug("watcher rename", oldPath, "->", file.path);
-          void this.enqueueSync(() => this.bridge!.onLocalRename(oldPath, file.path));
+          void this.runSync((engine) => engine.pushRename(oldPath, file.path), false, (engine) => engine.queueRename(oldPath, file.path));
         }
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (this.suppressWatcher || !this.bridge) return;
+        if (this.suppressWatcher) return;
         if (file instanceof TFile) {
           this.debug("watcher delete", file.path);
-          void this.enqueueSync(() => this.bridge!.onLocalDelete(file.path));
+          void this.runSync((engine) => engine.pushDelete(file.path), false, (engine) => engine.queueDelete(file.path));
         }
       })
     );
@@ -322,24 +360,23 @@ export default class LapisPlugin extends Plugin {
   private registerEditorChangeFallback() {
     this.registerEvent(
       this.app.workspace.on("editor-change", () => {
-        if (this.suppressWatcher || !this.bridge) return;
+        if (this.suppressWatcher) return;
         const file = this.app.workspace.getActiveFile();
         if (!file) return;
-        this.scheduleLocalFlush(file.path, "editor");
+        this.scheduleLocalFlush(file.path, "editor change");
       })
     );
   }
 
   private scheduleLocalFlush(path: string, source: string) {
     const previous = this.modifyTimers.get(path);
-    if (previous) window.clearTimeout(previous);
+    if (previous) {
+      window.clearTimeout(previous);
+    }
     const timer = window.setTimeout(() => {
       this.modifyTimers.delete(path);
       this.debug(`${source} flush`, path);
-      void this.enqueueSync(async () => {
-        if (source === "create") await this.bridge?.onLocalCreate(path);
-        else await this.bridge?.onLocalModify(path);
-      });
+      void this.runSync((engine) => engine.pushPut(path), false, (engine) => engine.queuePut(path));
     }, LOCAL_CHANGE_DEBOUNCE_MS);
     this.modifyTimers.set(path, timer);
   }
@@ -349,6 +386,47 @@ export default class LapisPlugin extends Plugin {
       console.error("[lapis] sync chain error", error);
     });
     return this.syncChain;
+  }
+
+  private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false, onFailure?: (engine: SyncEngine) => Promise<void>) {
+    if (!this.settings.syncToken) {
+      return;
+    }
+    await this.enqueueSync(async () => {
+      this.updateStatus("syncing");
+      const previousSuppress = this.suppressWatcher;
+      this.suppressWatcher = previousSuppress || suppressWatcher;
+      try {
+        const engine = new SyncEngine({
+          app: this.app,
+          settings: this.settings,
+          client: new LapisClient(this.settings.serverUrl),
+          getJournal: () => this.journal,
+          setJournal: (journal) => this.saveJournal(journal),
+        });
+        await action(engine);
+        this.updateStatus();
+      } catch (error) {
+        if (onFailure) {
+          const engine = new SyncEngine({
+            app: this.app,
+            settings: this.settings,
+            client: new LapisClient(this.settings.serverUrl),
+            getJournal: () => this.journal,
+            setJournal: (journal) => this.saveJournal(journal),
+          });
+          await onFailure(engine);
+          this.statusBar.offline(this.journal?.pendingOps.length ?? 0, this.conflictCount());
+          return;
+        }
+        this.updateStatus("error");
+        const message = error instanceof Error ? error.message : "Sync failed";
+        console.error("[lapis] sync failed", error);
+        new Notice(`Lapis: ${message}`);
+      } finally {
+        this.suppressWatcher = previousSuppress;
+      }
+    });
   }
 
   private openSettingsTab(): void {
@@ -365,13 +443,6 @@ export default class LapisPlugin extends Plugin {
   }
 
   private async savePluginData() {
-    await this.saveData({
-      settings: this.settings,
-      fsIndex: this.fsIndex,
-      yjsStateBase64: this.yjsState ? bytesToBase64(this.yjsState.buffer.slice(
-        this.yjsState.byteOffset,
-        this.yjsState.byteOffset + this.yjsState.byteLength
-      ) as ArrayBuffer) : null,
-    } satisfies PluginData);
+    await this.saveData({ settings: this.settings, journal: this.journal } satisfies PluginData);
   }
 }

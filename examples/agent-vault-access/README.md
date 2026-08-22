@@ -20,7 +20,8 @@ Lapis sync API  (Authorization: Bearer <agent token>)
     │
     ├── GET  /api/sync/:id/manifest
     ├── GET  /api/sync/:id/files/*
-    └── PUT  /api/sync/:id/files/*        → write (Yjs-backed for text)
+    ├── PUT  /api/sync/:id/files/*        → write file
+    └── POST /api/sync/:id/files/*/patch   → apply patch
 ```
 
 ## Prerequisites

@@ -69,5 +69,13 @@
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS"
-  }
+  },
+
+  // Artifacts — sealed Git history per vault
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "lapis"
+    }
+  ]
 }

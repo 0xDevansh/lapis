@@ -11,13 +11,13 @@ Lapis is a self-hosted web app that turns your Obsidian vault into a private, al
 ## Features
 
 - **Web vault** — browse, search, and edit notes from any browser; no Obsidian installation needed
-- **Collaborative vaults** — invite editors and viewers to the same vault; owner retains admin control
-- **Yjs sync** — CRDT-backed sync across browsers and the Obsidian plugin; concurrent text edits merge without Conflict Notes
+- **Two-way sync** — an Obsidian plugin keeps your local vault and web vault in sync; changes flow both ways
 - **Markdown rendering** — wikilinks, embeds, callouts, tags, frontmatter, backlinks, and built-in themes rendered faithfully
 - **Full-text search** — fast keyword search with highlighted snippets powered by SQLite FTS5
-- **Works offline** — the plugin keeps a local Yjs state and merges when you reconnect
+- **Conflict notes** — when edits collide, Lapis writes a human-readable conflict note instead of silently overwriting your work
+- **Works offline** — the plugin queues changes locally when you're offline and replays them when you reconnect
 - **Zip export** — download your entire vault as a zip at any time
-- **Private by default** — email/password or Google sign-in; vaults are membership-gated
+- **Private by default** — email/password auth; your vault is not publicly visible
 
 ## Install the Obsidian plugin
 
@@ -94,11 +94,12 @@ wrangler d1 create lapis-db
 # KV namespace for session storage
 # Copy the returned id into worker/wrangler.jsonc
 wrangler kv namespace create lapis-kv
+
+# Artifacts namespace for sealed Git history
+wrangler artifacts namespace create lapis
 ```
 
 Open `worker/wrangler.jsonc` and paste the `database_id` and KV `id` into the right fields.
-
-Optional sealed history uses a GitHub remote (configure in the vault UI), not Cloudflare Artifacts.
 
 ### 3. Set secrets
 
@@ -106,9 +107,6 @@ Optional sealed history uses a GitHub remote (configure in the vault UI), not Cl
 cd worker
 wrangler secret put BETTER_AUTH_SECRET   # any random 32+ character string
 wrangler secret put BETTER_AUTH_URL      # your worker URL, e.g. https://lapis.example.workers.dev
-# Optional Google sign-in:
-# wrangler secret put GOOGLE_CLIENT_ID
-# wrangler secret put GOOGLE_CLIENT_SECRET
 ```
 
 ### 4. Run migrations
