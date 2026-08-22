@@ -29,6 +29,10 @@ export interface ManifestEntry {
    * 0 or undefined for entries created before Slice 09.
    */
   revision: number;
+  /** Storage class for the live body. Text is authoritative in DO SQLite. */
+  storageKind?: "text" | "blob";
+  /** SHA-256 hex OID for immutable binary blobs. */
+  blobOid?: string;
 }
 
 export interface VaultManifest {
@@ -75,6 +79,11 @@ export function manifestKey(vaultId: string): string {
 /** R2 key for a vault content file. */
 export function contentKey(vaultId: string, path: string): string {
   return `${vaultId}/${path}`;
+}
+
+/** R2 key for an immutable binary blob within a vault. */
+export function blobKey(vaultId: string, oid: string): string {
+  return `${vaultId}/_blobs/sha256/${oid}`;
 }
 
 /**

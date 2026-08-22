@@ -30,20 +30,7 @@ const RESERVED_PREFIXES = [
  * Does NOT check for case duplicates — that is the manifest's job.
  */
 export function isValidVaultPath(path: string): boolean {
-  if (!path || typeof path !== "string") return false;
-
-  // No leading slash (absolute paths are rejected)
-  if (path.startsWith("/")) return false;
-
-  // No control characters
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(path)) return false;
-
-  // No empty segments or dot-dot traversal
-  const segments = path.split("/");
-  for (const seg of segments) {
-    if (seg === "" || seg === "." || seg === "..") return false;
-  }
+  if (!isSafeRelativePath(path)) return false;
 
   // Block vault internals (but allow .sync-conflicts/)
   const lower = path.toLowerCase();
@@ -60,6 +47,19 @@ export function isValidVaultPath(path: string): boolean {
 }
 
 /**
+ * Device sync may opt into hidden Vault Internals, but never reserved
+ * server-owned names such as `_manifest.json`.
+ */
+export function isValidSyncPath(path: string, allowInternals: boolean): boolean {
+  if (isValidVaultPath(path)) return true;
+  if (!allowInternals || !isSafeRelativePath(path) || !isVaultInternal(path)) {
+    return false;
+  }
+  const lower = path.toLowerCase();
+  return !RESERVED_PREFIXES.some((reserved) => lower === reserved);
+}
+
+/**
  * Return true if `path` is under a vault-internal directory that should be
  * hidden from Vault Content browsing.
  */
@@ -69,6 +69,15 @@ export function isVaultInternal(path: string): boolean {
     if (lower === prefix || lower.startsWith(prefix)) return true;
   }
   return false;
+}
+
+function isSafeRelativePath(path: string): boolean {
+  if (!path || typeof path !== "string" || path.startsWith("/")) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(path)) return false;
+  return path
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 /**

@@ -4,9 +4,11 @@ import { requireSession } from "../middleware/auth";
 import { isValidVaultPath, isVaultInternal, isOsJunk } from "./path";
 import { deviceAuthor } from "./identity";
 import { buildZip, type ZipEntry } from "./zip";
-import type { ResolveConflictRequest } from "./contracts";
+import { isTextContentType, type ResolveConflictRequest } from "./contracts";
+import { contentTypeForUpload, detectMimeFromPath } from "./mime";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
+const SAFE_DO_RPC_UPLOAD_BYTES = 24 * 1024 * 1024;
 
 // ── Helper: resolve vault and verify ownership ─────────────────────────────
 
@@ -21,6 +23,47 @@ async function resolveVault(
     )
     .bind(vaultId, userId)
     .first<{ id: string; name: string; createdAt: string }>();
+}
+
+async function putWebBytes(
+  env: Env,
+  vaultId: string,
+  path: string,
+  body: ArrayBuffer,
+  contentType: string,
+  baseRevision: number | undefined,
+  author: string
+) {
+  const stub = env.VAULT_COORDINATOR.get(
+    env.VAULT_COORDINATOR.idFromName(vaultId)
+  );
+  if (isTextContentType(contentType) && body.byteLength <= SAFE_DO_RPC_UPLOAD_BYTES) {
+    return stub.syncPutFile(
+      vaultId,
+      path,
+      body,
+      contentType,
+      baseRevision,
+      author
+    );
+  }
+  const stagingKey = `${vaultId}/_staging/${crypto.randomUUID()}`;
+  await env.VAULT_BUCKET.put(stagingKey, body, {
+    httpMetadata: { contentType },
+  });
+  try {
+    return await stub.syncPutStagedFile(
+      vaultId,
+      path,
+      stagingKey,
+      contentType,
+      baseRevision,
+      author
+    );
+  } catch (error) {
+    await env.VAULT_BUCKET.delete(stagingKey);
+    throw error;
+  }
 }
 
 // ── Vault CRUD ─────────────────────────────────────────────────────────────
@@ -93,7 +136,14 @@ vaultRoutes.get("/:id/manifest", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(doId);
   const manifest = await stub.getManifest(id);
 
-  return c.json(manifest);
+  return c.json({
+    ...manifest,
+    entries: Object.fromEntries(
+      Object.entries(manifest.entries).filter(
+        ([, entry]) => !isVaultInternal(entry.path)
+      )
+    ),
+  });
 });
 
 vaultRoutes.post("/:id/acks", requireSession, async (c) => {
@@ -134,7 +184,11 @@ vaultRoutes.get("/:id/conflicts", requireSession, async (c) => {
   const stub = c.env.VAULT_COORDINATOR.get(
     c.env.VAULT_COORDINATOR.idFromName(id)
   );
-  return c.json({ conflicts: await stub.listConflicts(id) });
+  return c.json({
+    conflicts: (await stub.listConflicts(id)).filter(
+      (conflict) => !isVaultInternal(conflict.path)
+    ),
+  });
 });
 
 vaultRoutes.post("/:id/conflicts/resolve", requireSession, async (c) => {
@@ -212,17 +266,15 @@ vaultRoutes.get("/:id/files/*", requireSession, async (c) => {
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
-  const content = await stub.getContent(id, filePath);
-  if (!content) return c.json({ error: "Not found" }, 404);
-
-  return new Response(content.bytes, {
-    headers: {
-      "Content-Type": content.contentType,
-      "Cache-Control": "private, max-age=30",
-      "Content-Length": String(content.bytes.byteLength),
-      "X-Revision": String(content.revision),
-    },
-  });
+  const content = await stub.fetch(
+    new Request(
+      `https://do-internal/content?vaultId=${encodeURIComponent(id)}&path=${encodeURIComponent(filePath)}`
+    )
+  );
+  if (content.status === 404) return c.json({ error: "Not found" }, 404);
+  const headers = new Headers(content.headers);
+  headers.set("Cache-Control", "private, max-age=30");
+  return new Response(content.body, { status: content.status, headers });
 });
 
 // ── File mutations ─────────────────────────────────────────────────────────
@@ -269,16 +321,19 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
     body = await c.req.arrayBuffer();
   }
 
-  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
-  const stub = c.env.VAULT_COORDINATOR.get(doId);
-
   // Determine the actual content type to store
-  const storageContentType = contentType.includes("application/json")
-    ? detectMimeFromPath(filePath)
-    : contentType.split(";")[0].trim();
+  const storageContentType = contentTypeForUpload(filePath, contentType);
 
   try {
-    const entry = await stub.syncPutFile(id, filePath, body, storageContentType, baseRevision, deviceAuthor("web", session.sessionId));
+    const entry = await putWebBytes(
+      c.env,
+      id,
+      filePath,
+      body,
+      storageContentType,
+      baseRevision,
+      deviceAuthor("web", session.sessionId)
+    );
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
@@ -433,11 +488,16 @@ vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
   const contentType = detectMimeFromPath(filePath);
   const encoded = new TextEncoder().encode(body.content);
 
-  const doId = c.env.VAULT_COORDINATOR.idFromName(id);
-  const stub = c.env.VAULT_COORDINATOR.get(doId);
-
   try {
-    const entry = await stub.syncPutFile(id, filePath, encoded.buffer as ArrayBuffer, contentType, undefined, deviceAuthor("web", session.sessionId));
+    const entry = await putWebBytes(
+      c.env,
+      id,
+      filePath,
+      encoded.buffer as ArrayBuffer,
+      contentType,
+      undefined,
+      deviceAuthor("web", session.sessionId)
+    );
     return c.json({ restored: true, entry }, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -473,9 +533,21 @@ vaultRoutes.get("/:id/export", requireSession, async (c) => {
 
   const zipEntries: ZipEntry[] = [];
   for (const entry of entries) {
-    const content = await stub.getContent(id, entry.path);
-    if (content) {
-      zipEntries.push({ path: entry.path, data: new Uint8Array(content.bytes) });
+    const content = await stub.fetch(
+      new Request(
+        `https://do-internal/content?vaultId=${encodeURIComponent(id)}&path=${encodeURIComponent(entry.path)}`
+      )
+    );
+    if (content.ok) {
+      zipEntries.push({
+        path: entry.path,
+        data: new Uint8Array(await content.arrayBuffer()),
+      });
+    } else {
+      return c.json(
+        { error: "Export failed because a vault blob is missing", path: entry.path },
+        503
+      );
     }
   }
 
@@ -495,29 +567,5 @@ vaultRoutes.get("/:id/export", requireSession, async (c) => {
     },
   });
 });
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function detectMimeFromPath(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    md: "text/markdown",
-    txt: "text/plain",
-    html: "text/html",
-    css: "text/css",
-    js: "text/javascript",
-    ts: "text/typescript",
-    json: "application/json",
-    xml: "application/xml",
-    svg: "image/svg+xml",
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    pdf: "application/pdf",
-  };
-  return map[ext] ?? "application/octet-stream";
-}
 
 export { vaultRoutes };

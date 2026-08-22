@@ -16,6 +16,7 @@ import { ConflictModal } from "./ui/conflict-modal";
 import { countConflicts, LapisStatusBar } from "./ui/status";
 import { deviceAuthor } from "./identity";
 import { PluginDevice } from "./device/plugin-device";
+import { isVaultInternal } from "./sync/paths";
 
 const LOCAL_CHANGE_DEBOUNCE_MS = 5_000;
 
@@ -216,6 +217,7 @@ export default class LapisPlugin extends Plugin {
           await engine.replayPending();
           const { pushed, deleted } = await engine.pushLocalChanges();
           await engine.pullChanged();
+          await engine.completePendingSeed();
           if (pushed > 0 || deleted > 0) {
             new Notice(`Lapis: pushed ${pushed} change${pushed === 1 ? "" : "s"}${deleted > 0 ? ` and ${deleted} delete${deleted === 1 ? "" : "s"}` : ""}`);
           } else {
@@ -260,6 +262,7 @@ export default class LapisPlugin extends Plugin {
       });
       try {
         await engine.forceReconcile();
+        await this.refreshConflicts();
         this.updateStatus();
         progressNotice.setMessage("Lapis: full reconcile complete");
         window.setTimeout(() => progressNotice.hide(), 3_000);
@@ -430,6 +433,12 @@ export default class LapisPlugin extends Plugin {
 
   private async handleNotifyMessage(message: NotifyMessage) {
     if (message.type === "change") {
+      if (
+        isVaultInternal(message.path) &&
+        !this.settings.receiveInternals
+      ) {
+        return;
+      }
       if (message.author === deviceAuthor("plugin", this.settings.deviceId)) {
         return;
       }
@@ -463,6 +472,12 @@ export default class LapisPlugin extends Plugin {
     }
 
     if (message.type === "conflict") {
+      if (
+        isVaultInternal(message.conflict.path) &&
+        !this.settings.receiveInternals
+      ) {
+        return;
+      }
       const index = this.conflicts.findIndex(
         (conflict) =>
           conflict.conflictNote === message.conflict.conflictNote
@@ -481,6 +496,12 @@ export default class LapisPlugin extends Plugin {
     }
 
     if (message.type === "conflict_resolved") {
+      if (
+        isVaultInternal(message.path) &&
+        !this.settings.receiveInternals
+      ) {
+        return;
+      }
       this.conflicts = this.conflicts.filter(
         (conflict) => conflict.conflictNote !== message.conflictNote
       );

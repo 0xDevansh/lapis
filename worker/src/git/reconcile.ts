@@ -14,6 +14,8 @@ import type { ConflictContext } from "../vault/conflict";
 import type { GitRemote } from "./remote";
 import { gitPathFromVault, vaultPathFromGit } from "./remote";
 import type { ManifestEntry } from "../vault/manifest";
+import { parseLfsPointer } from "./lfs-pointer";
+import { isTextContentType } from "../vault/contracts";
 
 export interface ReconcileDeps {
   remote: GitRemote;
@@ -30,14 +32,26 @@ export interface ReconcileResult {
   newCommit: string | null;
 }
 
+interface GitTextFile {
+  content: string;
+  lfsPointer: boolean;
+}
+
+interface GitTreeEntry {
+  mode: string;
+  path: string;
+  oid: string;
+  type: "blob" | "tree" | "commit";
+}
+
 async function listTreeAtCommit(
   remote: GitRemote,
   commitOid: string | null
-): Promise<Map<string, string>> {
+): Promise<Map<string, GitTextFile>> {
   const dir = "/reconcile";
   const fs = new MemoryFS();
   const auth = remote.onAuth();
-  const files = new Map<string, string>();
+  const files = new Map<string, GitTextFile>();
 
   if (!commitOid) return files;
 
@@ -50,26 +64,31 @@ async function listTreeAtCommit(
       ref: commitOid,
       singleBranch: true,
       depth: 1,
-      noCheckout: false,
+      noCheckout: true,
       onAuth: () => auth,
     });
 
-    async function walk(prefix: string): Promise<void> {
-      const entries = await fs.promises.readdir(`${dir}/${prefix}`).catch(() => [] as string[]);
-      for (const name of entries) {
-        const rel = prefix ? `${prefix}/${name}` : name;
-        const stat = await fs.promises.stat(`${dir}/${rel}`);
-        if (stat.isDirectory()) {
-          await walk(rel);
-        } else {
-          const vaultPath = vaultPathFromGit(remote.subdir, rel);
-          if (!vaultPath) continue;
-          const raw = await fs.promises.readFile(`${dir}/${rel}`);
-          files.set(vaultPath.toLowerCase(), typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+    const commit = await git.readCommit({ fs, dir, oid: commitOid });
+    async function walk(treeOid: string, prefix: string): Promise<void> {
+      const result = await git.readTree({ fs, dir, oid: treeOid });
+      for (const entry of result.tree as GitTreeEntry[]) {
+        const rel = prefix ? `${prefix}/${entry.path}` : entry.path;
+        if (entry.type === "tree") {
+          await walk(entry.oid, rel);
+          continue;
         }
+        if (entry.type !== "blob") continue;
+        const vaultPath = vaultPathFromGit(remote.subdir, rel);
+        if (!vaultPath) continue;
+        const raw = await git.readBlob({ fs, dir, oid: entry.oid });
+        const content = new TextDecoder().decode(raw.blob);
+        files.set(vaultPath.toLowerCase(), {
+          content,
+          lfsPointer: parseLfsPointer(content) !== null,
+        });
       }
     }
-    await walk("");
+    await walk(commit.commit.tree, "");
   } catch {
     // empty tree on first sync
   }
@@ -80,24 +99,28 @@ export async function reconcileInbound(deps: ReconcileDeps): Promise<ReconcileRe
   const author = `github:${deps.vaultId}`;
   const baseTree = await listTreeAtCommit(deps.remote, deps.lastSyncedCommit);
   const headOid = await fetchHeadOid(deps.remote);
-  const theirsTree = headOid ? await listTreeAtCommit(deps.remote, headOid) : new Map<string, string>();
+  const theirsTree = headOid ? await listTreeAtCommit(deps.remote, headOid) : new Map<string, GitTextFile>();
 
   const paths = new Set([...baseTree.keys(), ...theirsTree.keys()]);
   const applied: ChangeNotification[] = [];
 
   for (const key of paths) {
-    const base = baseTree.get(key) ?? "";
+    const baseFile = baseTree.get(key);
     const theirs = theirsTree.get(key);
     if (theirs === undefined) continue; // deleted on GitHub — skip inbound delete for safety
+    if (baseFile?.lfsPointer || theirs.lfsPointer) continue; // binary pointers are handled by Lapis live sync
 
     const entry = deps.getEntry(key);
+    if (entry && !isTextContentType(entry.contentType)) continue;
     const ours = entry ? await deps.getHeadText(entry.path) : "";
+    const base = baseFile?.content ?? "";
+    const theirsContent = theirs.content;
 
-    if (theirs === base) continue; // only vault changed — outbound handles
-    if (theirs === ours) continue; // already converged
+    if (theirsContent === base) continue; // only vault changed — outbound handles
+    if (theirsContent === ours) continue; // already converged
 
     if (!entry) {
-      const result = await deps.applyMerged(key, theirs, author);
+      const result = await deps.applyMerged(key, theirsContent, author);
       applied.push({
         type: "change",
         path: key,
@@ -110,12 +133,12 @@ export async function reconcileInbound(deps: ReconcileDeps): Promise<ReconcileRe
       continue;
     }
 
-    const { merged, hasConflicts } = merge3(base, ours, theirs);
+    const { merged, hasConflicts } = merge3(base, ours, theirsContent);
     if (hasConflicts) {
       const ctx: ConflictContext = {
         path: entry.path,
         serverContent: ours,
-        clientContent: theirs,
+        clientContent: theirsContent,
         baseContent: base || undefined,
         serverRevision: entry.revision,
         clientBaseRevision: entry.revision,

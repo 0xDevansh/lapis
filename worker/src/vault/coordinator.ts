@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
 import {
+  blobKey,
   type ManifestEntry,
   type VaultManifest,
   contentKey,
@@ -9,7 +10,8 @@ import {
   isAncestorPath,
   manifestKey,
 } from "./manifest";
-import { isValidVaultPath, isVaultInternal } from "./path";
+import { sha256Hex, sha256StreamHex } from "./sha256";
+import { isValidSyncPath, isValidVaultPath, isVaultInternal } from "./path";
 import { applyPatch, merge3 } from "./patch";
 import { indexFile, removeFromIndex } from "../search/indexer";
 import {
@@ -81,6 +83,8 @@ type ManifestEntryRow = Record<string, SqlStorageValue> & {
   updatedAt: SqlStorageValue;
   revision: SqlStorageValue;
   r2Revision: SqlStorageValue;
+  blobOid: SqlStorageValue;
+  blobR2Key: SqlStorageValue;
 };
 
 type PendingOpRow = Record<string, SqlStorageValue> & {
@@ -225,7 +229,9 @@ export class VaultCoordinator extends DurableObject<Env> {
         content_type  TEXT NOT NULL,
         updated_at    TEXT NOT NULL,
         revision      INTEGER NOT NULL,
-        r2_revision   INTEGER NOT NULL
+        r2_revision   INTEGER NOT NULL,
+        blob_oid      TEXT,
+        blob_r2_key   TEXT
       );
 
       CREATE TABLE IF NOT EXISTS pending_ops (
@@ -281,6 +287,16 @@ export class VaultCoordinator extends DurableObject<Env> {
         PRIMARY KEY (conflict_note_lower, content_kind, chunk_idx)
       );
     `);
+    try {
+      this.sql.exec(`ALTER TABLE manifest_entries ADD COLUMN blob_oid TEXT`);
+    } catch {
+      // Column already exists in newer Durable Object instances.
+    }
+    try {
+      this.sql.exec(`ALTER TABLE manifest_entries ADD COLUMN blob_r2_key TEXT`);
+    } catch {
+      // Column already exists in newer Durable Object instances.
+    }
     initializeTextStoreSchema(this.sql);
   }
 
@@ -426,10 +442,11 @@ export class VaultCoordinator extends DurableObject<Env> {
   async resolveConflict(
     vaultId: string,
     request: ResolveConflictRequest,
-    author = "web"
+    author = "web",
+    allowInternals = false
   ): Promise<ConflictResolutionResult> {
     await this.ensureManifestLoaded(vaultId);
-    if (!isValidVaultPath(request.path)) {
+    if (!isValidSyncPath(request.path, allowInternals)) {
       throw Object.assign(new Error("Invalid conflict path"), { status: 400 });
     }
     if (
@@ -515,7 +532,8 @@ export class VaultCoordinator extends DurableObject<Env> {
         current.contentType,
         current.revision,
         author,
-        "rebase"
+        "rebase",
+        allowInternals
       );
     }
 
@@ -601,7 +619,7 @@ export class VaultCoordinator extends DurableObject<Env> {
       return { path: entry.path, contentType: entry.contentType, revision: entry.revision, bytes };
     }
 
-    const obj = await this.env.VAULT_BUCKET.get(contentKey(vaultId, entry.path));
+    const obj = await this.getBinaryObject(vaultId, entry);
     if (!obj) return null;
     return {
       path: entry.path,
@@ -609,6 +627,18 @@ export class VaultCoordinator extends DurableObject<Env> {
       revision: entry.revision,
       bytes: await obj.arrayBuffer(),
     };
+  }
+
+  private async getBinaryObject(
+    vaultId: string,
+    entry: ManifestEntry
+  ): Promise<R2ObjectBody | null> {
+    if (entry.blobOid) {
+      const object = await this.env.VAULT_BUCKET.get(entry.r2Key);
+      if (object) return object;
+      return null;
+    }
+    return this.env.VAULT_BUCKET.get(contentKey(vaultId, entry.path));
   }
 
   async listContent(vaultId: string): Promise<Array<{ path: string; data: Uint8Array }>> {
@@ -633,9 +663,64 @@ export class VaultCoordinator extends DurableObject<Env> {
     contentType: string,
     baseRevision?: number,
     author = "device",
-    conflictPolicy: ConflictPolicy = "rebase"
+    conflictPolicy: ConflictPolicy = "rebase",
+    allowInternals = false
   ): Promise<WriteResult> {
-    return this.applyPut(vaultId, path, body, contentType, baseRevision, author, conflictPolicy);
+    return this.applyPut(
+      vaultId,
+      path,
+      body,
+      contentType,
+      baseRevision,
+      author,
+      conflictPolicy,
+      allowInternals
+    );
+  }
+
+  async syncPutStagedFile(
+    vaultId: string,
+    path: string,
+    stagingKey: string,
+    contentType: string,
+    baseRevision?: number,
+    author = "device",
+    conflictPolicy: ConflictPolicy = "rebase",
+    allowInternals = false
+  ): Promise<WriteResult> {
+    if (!stagingKey.startsWith(`${vaultId}/_staging/`)) {
+      throw Object.assign(new Error("Invalid staging key"), { status: 400 });
+    }
+    const staged = await this.env.VAULT_BUCKET.get(stagingKey);
+    if (!staged) {
+      throw Object.assign(new Error("Staged upload not found"), { status: 404 });
+    }
+    try {
+      if (isTextContentType(contentType)) {
+        return await this.applyPut(
+          vaultId,
+          path,
+          await staged.arrayBuffer(),
+          contentType,
+          baseRevision,
+          author,
+          conflictPolicy,
+          allowInternals
+        );
+      }
+      return await this.applyStagedBinaryPut(
+        vaultId,
+        path,
+        stagingKey,
+        staged,
+        contentType,
+        baseRevision,
+        author,
+        allowInternals
+      );
+    } finally {
+      await this.env.VAULT_BUCKET.delete(stagingKey);
+    }
   }
 
   async syncApplyPatch(
@@ -644,10 +729,12 @@ export class VaultCoordinator extends DurableObject<Env> {
     patch: string,
     baseRevision: number,
     author = "device",
-    conflictPolicy: ConflictPolicy = "rebase"
+    conflictPolicy: ConflictPolicy = "rebase",
+    allowInternals = false
   ): Promise<WriteResult> {
-    if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
-    if (isVaultInternal(path)) throw Object.assign(new Error("Cannot write to vault internals"), { status: 400 });
+    if (!isValidSyncPath(path, allowInternals)) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
 
     await this.ensureManifestLoaded(vaultId);
     const entry = this.getEntry(path);
@@ -682,10 +769,26 @@ export class VaultCoordinator extends DurableObject<Env> {
     return this.handleStaleTextWrite(vaultId, path, entry, baseRevision, theirs, author, conflictPolicy, resolvedBase);
   }
 
-  async renameFile(vaultId: string, oldPath: string, newPath: string, author = "web"): Promise<ManifestEntry> {
+  async renameFile(
+    vaultId: string,
+    oldPath: string,
+    newPath: string,
+    author = "web",
+    allowInternals = false
+  ): Promise<ManifestEntry> {
     await this.ensureManifestLoaded(vaultId);
-    if (!isValidVaultPath(oldPath) || !isValidVaultPath(newPath)) throw Object.assign(new Error("Invalid path"), { status: 400 });
-    if (isVaultInternal(newPath)) throw Object.assign(new Error("Cannot move to vault internals"), { status: 400 });
+    if (
+      !isValidSyncPath(oldPath, allowInternals) ||
+      !isValidSyncPath(newPath, allowInternals)
+    ) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
+    if (isVaultInternal(oldPath) !== isVaultInternal(newPath)) {
+      throw Object.assign(
+        new Error("Cannot move between Vault Content and Vault Internals"),
+        { status: 400 }
+      );
+    }
     if (oldPath === newPath) throw Object.assign(new Error("Source and destination are the same"), { status: 400 });
     if (isAncestorPath(oldPath, newPath)) throw Object.assign(new Error("Cannot move a folder into itself"), { status: 400 });
 
@@ -703,7 +806,7 @@ export class VaultCoordinator extends DurableObject<Env> {
         `DELETE FROM pending_ops WHERE path_lower = ?`,
         lowerPath(oldEntry.path)
       );
-    } else {
+    } else if (isTextContentType(oldEntry.contentType)) {
       // Fold legacy text changes first so the deferred rename has a stable R2 source.
       await this.flushPathToR2(vaultId, oldEntry.path);
     }
@@ -711,7 +814,7 @@ export class VaultCoordinator extends DurableObject<Env> {
     const next: ManifestEntry = {
       ...oldEntry,
       path: newPath,
-      r2Key: contentKey(vaultId, newPath),
+      r2Key: oldEntry.blobOid ? oldEntry.r2Key : contentKey(vaultId, newPath),
       updatedAt: new Date().toISOString(),
       revision: oldEntry.revision + 1,
     };
@@ -748,19 +851,32 @@ export class VaultCoordinator extends DurableObject<Env> {
     return next;
   }
 
-  async syncRenameFile(vaultId: string, oldPath: string, newPath: string, author = "device"): Promise<ManifestEntry> {
-    return this.renameFile(vaultId, oldPath, newPath, author);
+  async syncRenameFile(
+    vaultId: string,
+    oldPath: string,
+    newPath: string,
+    author = "device",
+    allowInternals = false
+  ): Promise<ManifestEntry> {
+    return this.renameFile(vaultId, oldPath, newPath, author, allowInternals);
   }
 
-  async deleteFile(vaultId: string, path: string, author = "web"): Promise<void> {
+  async deleteFile(
+    vaultId: string,
+    path: string,
+    author = "web",
+    allowInternals = false
+  ): Promise<void> {
     await this.ensureManifestLoaded(vaultId);
-    if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
+    if (!isValidSyncPath(path, allowInternals)) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
 
     const entry = this.getEntry(path);
     if (!entry) return;
     if (this.usesSqliteText() && isTextContentType(entry.contentType)) {
       this.textStore.deleteFile(entry.path);
-    } else {
+    } else if (isTextContentType(entry.contentType)) {
       await this.flushPathToR2(vaultId, entry.path);
     }
 
@@ -786,8 +902,13 @@ export class VaultCoordinator extends DurableObject<Env> {
     });
   }
 
-  async syncDeleteFile(vaultId: string, path: string, author = "device"): Promise<void> {
-    return this.deleteFile(vaultId, path, author);
+  async syncDeleteFile(
+    vaultId: string,
+    path: string,
+    author = "device",
+    allowInternals = false
+  ): Promise<void> {
+    return this.deleteFile(vaultId, path, author, allowInternals);
   }
 
   async flushToR2(vaultId?: string): Promise<void> {
@@ -813,15 +934,12 @@ export class VaultCoordinator extends DurableObject<Env> {
       const sqliteText = this.usesSqliteText() && textOp;
 
       if (kind === "delete") {
-        if (!sqliteText) {
-          await this.env.VAULT_BUCKET.delete(contentKey(id, path));
-        }
         removeFromIndex(this.env.DB, id, path).catch(() => {});
         continue;
       }
 
       const rename = keyRows.find((row) => String(row.kind) === "rename");
-      if (rename && !sqliteText) {
+      if (rename && !sqliteText && textOp) {
         const oldPath = String(rename.oldPath);
         const newPath = String(rename.newPath);
         const oldObj = await this.env.VAULT_BUCKET.get(contentKey(id, oldPath));
@@ -1087,6 +1205,43 @@ export class VaultCoordinator extends DurableObject<Env> {
       await this.initialize(body);
       return new Response("OK");
     }
+    if (url.pathname === "/content" && request.method === "GET") {
+      const vaultId = url.searchParams.get("vaultId") ?? "";
+      const path = url.searchParams.get("path") ?? "";
+      if (!vaultId || !path) return new Response("Not found", { status: 404 });
+      await this.ensureManifestLoaded(vaultId);
+      const entry = this.getEntry(path);
+      if (!entry || this.hasPendingDelete(path)) {
+        return new Response("Not found", { status: 404 });
+      }
+      if (isTextContentType(entry.contentType)) {
+        const bytes = new TextEncoder().encode(
+          await this.headText(vaultId, entry.path)
+        );
+        return new Response(bytes, {
+          headers: {
+            "Content-Type": entry.contentType,
+            "Content-Length": String(bytes.byteLength),
+            "X-Revision": String(entry.revision),
+          },
+        });
+      }
+      const object = await this.getBinaryObject(vaultId, entry);
+      if (!object) {
+        return Response.json(
+          { error: "blob_missing", path: entry.path, oid: entry.blobOid },
+          { status: 503 }
+        );
+      }
+      return new Response(object.body, {
+        headers: {
+          "Content-Type":
+            object.httpMetadata?.contentType ?? entry.contentType,
+          "Content-Length": String(object.size),
+          "X-Revision": String(entry.revision),
+        },
+      });
+    }
     if (url.pathname === "/ws" && request.method === "GET") {
       if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected WebSocket upgrade", { status: 426 });
       const identity = url.searchParams.get("identity") ?? "unknown";
@@ -1107,10 +1262,12 @@ export class VaultCoordinator extends DurableObject<Env> {
     contentType: string,
     baseRevision: number | undefined,
     author: string,
-    conflictPolicy: ConflictPolicy = "rebase"
+    conflictPolicy: ConflictPolicy = "rebase",
+    allowInternals = false
   ): Promise<WriteResult> {
-    if (!isValidVaultPath(path)) throw Object.assign(new Error("Invalid path"), { status: 400 });
-    if (isVaultInternal(path)) throw Object.assign(new Error("Cannot write to vault internals"), { status: 400 });
+    if (!isValidSyncPath(path, allowInternals)) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
     await this.ensureManifestLoaded(vaultId);
 
     const existing = this.getEntry(path);
@@ -1119,6 +1276,18 @@ export class VaultCoordinator extends DurableObject<Env> {
         return this.recordBinaryConflict(vaultId, path, existing, baseRevision, author);
       }
       const modified = decodeUtf8(body);
+      if (baseRevision === -1) {
+        return this.handleStaleTextWrite(
+          vaultId,
+          path,
+          existing,
+          baseRevision,
+          modified,
+          author,
+          conflictPolicy,
+          ""
+        );
+      }
       const baseText = await this.resolveBaseText(vaultId, path, existing, baseRevision);
       if (baseText === null) {
         return this.recordTextConflict(
@@ -1154,20 +1323,18 @@ export class VaultCoordinator extends DurableObject<Env> {
     };
 
     if (!isTextContentType(contentType)) {
-      await this.env.VAULT_BUCKET.put(contentKey(vaultId, path), body, { httpMetadata: { contentType } });
-      if (
-        this.usesSqliteText() &&
-        existing &&
-        isTextContentType(existing.contentType)
-      ) {
-        this.textStore.deleteFile(existing.path);
-        this.headContent.delete(lowerPath(existing.path));
-      }
-      this.upsertEntry(entry, nextRevision);
-      this.markDirty(path, false);
-      await this.scheduleFlush();
-      this.broadcast({ type: "change", path, kind: "put", baseRevision: previousRevision, revision: nextRevision, author, ts: now });
-      return entry;
+      return this.commitBinaryPut(
+        vaultId,
+        path,
+        body,
+        contentType,
+        entry,
+        existing,
+        previousRevision,
+        nextRevision,
+        author,
+        now
+      );
     }
 
     let original = "";
@@ -1175,7 +1342,7 @@ export class VaultCoordinator extends DurableObject<Env> {
       if (isTextContentType(existing.contentType)) {
         original = await this.headText(vaultId, existing.path);
       } else {
-        const object = await this.env.VAULT_BUCKET.get(contentKey(vaultId, existing.path));
+        const object = await this.getBinaryObject(vaultId, existing);
         original = object ? await object.text() : "";
       }
     }
@@ -1234,6 +1401,185 @@ export class VaultCoordinator extends DurableObject<Env> {
     return entry;
   }
 
+  private async applyStagedBinaryPut(
+    vaultId: string,
+    path: string,
+    stagingKey: string,
+    staged: R2ObjectBody,
+    contentType: string,
+    baseRevision: number | undefined,
+    author: string,
+    allowInternals: boolean
+  ): Promise<WriteResult> {
+    if (!isValidSyncPath(path, allowInternals)) {
+      throw Object.assign(new Error("Invalid path"), { status: 400 });
+    }
+    await this.ensureManifestLoaded(vaultId);
+    const existing = this.getEntry(path);
+    if (
+      existing &&
+      baseRevision !== undefined &&
+      baseRevision !== existing.revision
+    ) {
+      return this.recordBinaryConflict(
+        vaultId,
+        path,
+        existing,
+        baseRevision,
+        author
+      );
+    }
+    if (hasCaseDuplicate(await this.getManifest(vaultId), path)) {
+      throw Object.assign(
+        new Error("Case conflict: a file with a similar name already exists"),
+        { status: 409 }
+      );
+    }
+
+    const now = new Date().toISOString();
+    const previousRevision = existing?.revision ?? 0;
+    const nextRevision = previousRevision + 1;
+    const entry: ManifestEntry = {
+      path,
+      r2Key: contentKey(vaultId, path),
+      size: staged.size,
+      contentType,
+      updatedAt: now,
+      revision: nextRevision,
+    };
+    return this.commitStagedBinaryPut(
+      vaultId,
+      path,
+      stagingKey,
+      staged,
+      contentType,
+      entry,
+      existing,
+      previousRevision,
+      nextRevision,
+      author,
+      now
+    );
+  }
+
+  private async commitBinaryPut(
+    vaultId: string,
+    path: string,
+    body: ArrayBuffer,
+    contentType: string,
+    entry: ManifestEntry,
+    existing: (ManifestEntry & { r2Revision: number }) | null | undefined,
+    previousRevision: number,
+    nextRevision: number,
+    author: string,
+    now: string
+  ): Promise<ManifestEntry> {
+    const bytes = new Uint8Array(body);
+    const oid = sha256Hex(bytes);
+    const key = blobKey(vaultId, oid);
+    if (!(await this.env.VAULT_BUCKET.get(key))) {
+      await this.env.VAULT_BUCKET.put(key, bytes, {
+        httpMetadata: { contentType },
+      });
+    }
+    return this.commitBinaryMetadata(
+      vaultId,
+      path,
+      {
+        ...entry,
+        r2Key: key,
+        blobOid: oid,
+        storageKind: "blob",
+      },
+      existing,
+      previousRevision,
+      nextRevision,
+      author,
+      now
+    );
+  }
+
+  private async commitStagedBinaryPut(
+    vaultId: string,
+    path: string,
+    stagingKey: string,
+    staged: R2ObjectBody,
+    contentType: string,
+    entry: ManifestEntry,
+    existing: (ManifestEntry & { r2Revision: number }) | null | undefined,
+    previousRevision: number,
+    nextRevision: number,
+    author: string,
+    now: string
+  ): Promise<ManifestEntry> {
+    if (!staged.body) {
+      throw Object.assign(new Error("Staged upload is missing a body"), {
+        status: 500,
+      });
+    }
+    const oid = await sha256StreamHex(staged.body);
+    const key = blobKey(vaultId, oid);
+    if (!(await this.env.VAULT_BUCKET.get(key))) {
+      const source = await this.env.VAULT_BUCKET.get(stagingKey);
+      if (!source?.body) {
+        throw Object.assign(new Error("Staged upload disappeared"), {
+          status: 404,
+        });
+      }
+      await this.env.VAULT_BUCKET.put(key, source.body, {
+        httpMetadata: { contentType },
+      });
+    }
+    return this.commitBinaryMetadata(
+      vaultId,
+      path,
+      {
+        ...entry,
+        r2Key: key,
+        blobOid: oid,
+        storageKind: "blob",
+      },
+      existing,
+      previousRevision,
+      nextRevision,
+      author,
+      now
+    );
+  }
+
+  private async commitBinaryMetadata(
+    vaultId: string,
+    path: string,
+    entry: ManifestEntry,
+    existing: (ManifestEntry & { r2Revision: number }) | null | undefined,
+    previousRevision: number,
+    nextRevision: number,
+    author: string,
+    now: string
+  ): Promise<ManifestEntry> {
+    if (
+      this.usesSqliteText() &&
+      existing &&
+      isTextContentType(existing.contentType)
+    ) {
+      this.textStore.deleteFile(existing.path);
+      this.headContent.delete(lowerPath(existing.path));
+    }
+    this.upsertEntry(entry, nextRevision);
+    this.markDirty(path, false);
+    await this.scheduleFlush();
+    this.broadcast({
+      type: "change",
+      path,
+      kind: "put",
+      baseRevision: previousRevision,
+      revision: nextRevision,
+      author,
+      ts: now,
+    });
+    return entry;
+  }
+
   private async ensureManifestLoaded(vaultId: string): Promise<void> {
     const existing = this.sql.exec(`SELECT path_lower FROM manifest_entries LIMIT 1`).toArray();
     if (existing.length === 0) {
@@ -1245,6 +1591,40 @@ export class VaultCoordinator extends DurableObject<Env> {
       }
     }
     await this.ensureTextStorageMigrated(vaultId);
+    await this.ensureBinaryBlobsMigrated(vaultId);
+  }
+
+  private async ensureBinaryBlobsMigrated(vaultId: string): Promise<void> {
+    const entries = Object.values(this.manifestFromSql(vaultId).entries).filter(
+      (entry) => !isTextContentType(entry.contentType) && !entry.blobOid
+    );
+    for (const entry of entries) {
+      const legacyKey = contentKey(vaultId, entry.path);
+      const legacy = await this.env.VAULT_BUCKET.get(legacyKey);
+      if (!legacy?.body) continue;
+      const oid = await sha256StreamHex(legacy.body);
+      const key = blobKey(vaultId, oid);
+      const existingBlob = await this.env.VAULT_BUCKET.get(key);
+      if (!existingBlob) {
+        const source = await this.env.VAULT_BUCKET.get(legacyKey);
+        if (!source?.body) continue;
+        await this.env.VAULT_BUCKET.put(key, source.body, {
+          httpMetadata: {
+            contentType: source.httpMetadata?.contentType ?? entry.contentType,
+          },
+        });
+      }
+      this.upsertEntry(
+        {
+          ...entry,
+          r2Key: key,
+          blobOid: oid,
+          storageKind: "blob",
+        },
+        entry.revision
+      );
+      await this.env.VAULT_BUCKET.delete(legacyKey);
+    }
   }
 
   private async ensureTextStorageMigrated(vaultId: string): Promise<void> {
@@ -1317,7 +1697,8 @@ export class VaultCoordinator extends DurableObject<Env> {
     const entries: Record<string, ManifestEntry> = {};
     for (const row of this.sql.exec<ManifestEntryRow>(
       `SELECT path_lower AS pathLower, path, size, content_type AS contentType,
-              updated_at AS updatedAt, revision, r2_revision AS r2Revision
+              updated_at AS updatedAt, revision, r2_revision AS r2Revision,
+              blob_oid AS blobOid, blob_r2_key AS blobR2Key
        FROM manifest_entries ORDER BY path`
     ).toArray()) {
       const entry = entryFromRow(row, vaultId);
@@ -1329,7 +1710,8 @@ export class VaultCoordinator extends DurableObject<Env> {
   private getEntry(path: string): (ManifestEntry & { r2Revision: number }) | null {
     const row = this.sql.exec<ManifestEntryRow>(
       `SELECT path_lower AS pathLower, path, size, content_type AS contentType,
-              updated_at AS updatedAt, revision, r2_revision AS r2Revision
+              updated_at AS updatedAt, revision, r2_revision AS r2Revision,
+              blob_oid AS blobOid, blob_r2_key AS blobR2Key
        FROM manifest_entries WHERE path_lower = ?`,
       lowerPath(path)
     ).toArray()[0];
@@ -1339,15 +1721,17 @@ export class VaultCoordinator extends DurableObject<Env> {
   private upsertEntry(entry: ManifestEntry, r2Revision: number): void {
     this.sql.exec(
       `INSERT OR REPLACE INTO manifest_entries
-       (path_lower, path, size, content_type, updated_at, revision, r2_revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (path_lower, path, size, content_type, updated_at, revision, r2_revision, blob_oid, blob_r2_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       lowerPath(entry.path),
       entry.path,
       entry.size,
       entry.contentType,
       entry.updatedAt,
       entry.revision,
-      r2Revision
+      r2Revision,
+      entry.blobOid ?? null,
+      entry.blobOid ? entry.r2Key : null
     );
   }
 
@@ -1482,7 +1866,19 @@ export class VaultCoordinator extends DurableObject<Env> {
   private dirtyChanges(): IncrementalSealChange[] {
     return this.sql.exec<DirtyRow>(
       `SELECT path_lower AS pathLower, path, deleted FROM seal_dirty ORDER BY path`
-    ).toArray().map((row) => ({ path: String(row.path), deleted: Number(row.deleted) === 1 }));
+    ).toArray().map((row) => {
+      const path = String(row.path);
+      const deleted = Number(row.deleted) === 1;
+      if (deleted) return { path, deleted };
+      const entry = this.getEntry(path);
+      return {
+        path,
+        deleted,
+        contentType: entry?.contentType,
+        size: entry?.size,
+        blobOid: entry?.blobOid,
+      };
+    });
   }
 
   private async writeManifestToR2(vaultId: string): Promise<void> {
@@ -1998,13 +2394,17 @@ export class VaultCoordinator extends DurableObject<Env> {
 
 function entryFromRow(row: ManifestEntryRow, vaultId: string): ManifestEntry & { r2Revision: number } {
   const path = String(row.path);
+  const blobOid = row.blobOid == null ? undefined : String(row.blobOid);
+  const blobR2Key = row.blobR2Key == null ? undefined : String(row.blobR2Key);
   return {
     path,
-    r2Key: contentKey(vaultId, path),
+    r2Key: blobR2Key ?? contentKey(vaultId, path),
     size: Number(row.size),
     contentType: String(row.contentType),
     updatedAt: String(row.updatedAt),
     revision: Number(row.revision),
+    storageKind: isTextContentType(String(row.contentType)) ? "text" : "blob",
+    blobOid,
     r2Revision: Number(row.r2Revision),
   };
 }

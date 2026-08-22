@@ -1,42 +1,72 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../types";
 import { requireDevice } from "../middleware/syncAuth";
-import { isOsJunk, isValidVaultPath, isVaultInternal } from "../vault/path";
-import { contentKey } from "../vault/manifest";
-import type { ResolveConflictRequest } from "../vault/contracts";
+import {
+  isOsJunk,
+  isValidSyncPath,
+  isVaultInternal,
+} from "../vault/path";
+import { isTextContentType, type ResolveConflictRequest } from "../vault/contracts";
+import { contentTypeForUpload } from "../vault/mime";
+import type { ConflictPolicy } from "../devices/types";
 import type { BatchOpResult, BatchSyncRequest, BatchSyncResponse } from "./journal";
 
 const syncRoutes = new Hono<{ Bindings: Env }>();
+const SAFE_DO_RPC_UPLOAD_BYTES = 24 * 1024 * 1024;
 
 function extractFilePath(url: URL, vaultId: string): string {
   const prefix = `/api/sync/${vaultId}/files/`;
   return decodeURIComponent(url.pathname.slice(prefix.length));
 }
 
-function detectMime(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    md: "text/markdown",
-    txt: "text/plain",
-    html: "text/html",
-    css: "text/css",
-    js: "text/javascript",
-    ts: "text/typescript",
-    json: "application/json",
-    xml: "application/xml",
-    svg: "image/svg+xml",
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    pdf: "application/pdf",
-  };
-  return map[ext] ?? "application/octet-stream";
-}
-
 function stubFor(env: Env, vaultId: string) {
   return env.VAULT_COORDINATOR.get(env.VAULT_COORDINATOR.idFromName(vaultId));
+}
+
+async function syncPutBytes(
+  env: Env,
+  vaultId: string,
+  path: string,
+  body: ArrayBuffer,
+  contentType: string,
+  baseRevision: number | undefined,
+  author: string,
+  conflictPolicy: ConflictPolicy,
+  allowInternals: boolean
+) {
+  const stub = stubFor(env, vaultId);
+  if (isTextContentType(contentType) && body.byteLength <= SAFE_DO_RPC_UPLOAD_BYTES) {
+    return stub.syncPutFile(
+      vaultId,
+      path,
+      body,
+      contentType,
+      baseRevision,
+      author,
+      conflictPolicy,
+      allowInternals
+    );
+  }
+
+  const stagingKey = `${vaultId}/_staging/${crypto.randomUUID()}`;
+  await env.VAULT_BUCKET.put(stagingKey, body, {
+    httpMetadata: { contentType },
+  });
+  try {
+    return await stub.syncPutStagedFile(
+      vaultId,
+      path,
+      stagingKey,
+      contentType,
+      baseRevision,
+      author,
+      conflictPolicy,
+      allowInternals
+    );
+  } catch (error) {
+    await env.VAULT_BUCKET.delete(stagingKey);
+    throw error;
+  }
 }
 
 function staleResponse(c: Context, err: { message?: string; serverRevision?: number; headRevision?: number }) {
@@ -62,7 +92,16 @@ syncRoutes.get("/:vaultId/manifest", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
   if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
-  return c.json(await stubFor(c.env, vaultId).getManifest(vaultId));
+  const manifest = await stubFor(c.env, vaultId).getManifest(vaultId);
+  if (device.receiveInternals) return c.json(manifest);
+  return c.json({
+    ...manifest,
+    entries: Object.fromEntries(
+      Object.entries(manifest.entries).filter(
+        ([, entry]) => !isVaultInternal(entry.path)
+      )
+    ),
+  });
 });
 
 syncRoutes.post("/:vaultId/acks", requireDevice, async (c) => {
@@ -94,8 +133,11 @@ syncRoutes.get("/:vaultId/conflicts", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
   if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const conflicts = await stubFor(c.env, vaultId).listConflicts(vaultId);
   return c.json({
-    conflicts: await stubFor(c.env, vaultId).listConflicts(vaultId),
+    conflicts: device.receiveInternals
+      ? conflicts
+      : conflicts.filter((conflict) => !isVaultInternal(conflict.path)),
   });
 });
 
@@ -126,7 +168,8 @@ syncRoutes.post("/:vaultId/conflicts/resolve", requireDevice, async (c) => {
       await stubFor(c.env, vaultId).resolveConflict(
         vaultId,
         body as ResolveConflictRequest,
-        device.author
+        device.author,
+        device.receiveInternals
       )
     );
   } catch (error: unknown) {
@@ -145,18 +188,19 @@ syncRoutes.get("/:vaultId/files/*", requireDevice, async (c) => {
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
-  if (isVaultInternal(filePath)) return c.json({ error: "Not found" }, 404);
+  if (isVaultInternal(filePath) && !device.receiveInternals) {
+    return c.json({ error: "Not found" }, 404);
+  }
 
-  const content = await stubFor(c.env, vaultId).getContent(vaultId, filePath);
-  if (!content) return c.json({ error: "Not found" }, 404);
-  return new Response(content.bytes, {
-    headers: {
-      "Content-Type": content.contentType,
-      "Cache-Control": "no-store",
-      "Content-Length": String(content.bytes.byteLength),
-      "X-Revision": String(content.revision),
-    },
-  });
+  const content = await stubFor(c.env, vaultId).fetch(
+    new Request(
+      `https://do-internal/content?vaultId=${encodeURIComponent(vaultId)}&path=${encodeURIComponent(filePath)}`
+    )
+  );
+  if (content.status === 404) return c.json({ error: "Not found" }, 404);
+  const headers = new Headers(content.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(content.body, { status: content.status, headers });
 });
 
 syncRoutes.put("/:vaultId/files/*", requireDevice, async (c) => {
@@ -166,17 +210,31 @@ syncRoutes.put("/:vaultId/files/*", requireDevice, async (c) => {
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
-  if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
-  if (isVaultInternal(filePath)) return c.json({ error: "Cannot write to vault internals" }, 400);
+  if (!isValidSyncPath(filePath, device.receiveInternals)) {
+    return c.json({ error: "Invalid path" }, 400);
+  }
   if (isOsJunk(filePath)) return c.json({ error: "OS junk files are not accepted" }, 400);
 
   const baseRevisionHeader = c.req.header("X-Base-Revision");
   const baseRevision = baseRevisionHeader !== undefined ? parseInt(baseRevisionHeader, 10) : undefined;
   const body = await c.req.arrayBuffer();
-  const contentType = (c.req.header("Content-Type") ?? detectMime(filePath)).split(";")[0].trim();
+  const contentType = contentTypeForUpload(
+    filePath,
+    c.req.header("Content-Type")
+  );
 
   try {
-    const entry = await stubFor(c.env, vaultId).syncPutFile(vaultId, filePath, body, contentType, baseRevision, device.author, device.conflictPolicy);
+    const entry = await syncPutBytes(
+      c.env,
+      vaultId,
+      filePath,
+      body,
+      contentType,
+      baseRevision,
+      device.author,
+      device.conflictPolicy,
+      device.receiveInternals
+    );
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
@@ -197,8 +255,9 @@ syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
 
   const filePath = rawPath;
   if (!filePath) return c.json({ error: "Path required" }, 400);
-  if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
-  if (isVaultInternal(filePath)) return c.json({ error: "Cannot write to vault internals" }, 400);
+  if (!isValidSyncPath(filePath, device.receiveInternals)) {
+    return c.json({ error: "Invalid path" }, 400);
+  }
 
   const body = await c.req.json<{ patch: string; baseRevision: number }>();
   if (typeof body.patch !== "string" || typeof body.baseRevision !== "number") {
@@ -206,7 +265,15 @@ syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
   }
 
   try {
-    const entry = await stubFor(c.env, vaultId).syncApplyPatch(vaultId, filePath, body.patch, body.baseRevision, device.author, device.conflictPolicy);
+    const entry = await stubFor(c.env, vaultId).syncApplyPatch(
+      vaultId,
+      filePath,
+      body.patch,
+      body.baseRevision,
+      device.author,
+      device.conflictPolicy,
+      device.receiveInternals
+    );
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string; serverRevision?: number; headRevision?: number };
@@ -227,7 +294,13 @@ syncRoutes.patch("/:vaultId/files/*", requireDevice, async (c) => {
   if (!newPath) return c.json({ error: "newPath is required" }, 400);
 
   try {
-    const entry = await stubFor(c.env, vaultId).syncRenameFile(vaultId, filePath, newPath, device.author);
+    const entry = await stubFor(c.env, vaultId).syncRenameFile(
+      vaultId,
+      filePath,
+      newPath,
+      device.author,
+      device.receiveInternals
+    );
     return c.json(entry, 200);
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -242,8 +315,16 @@ syncRoutes.delete("/:vaultId/files/*", requireDevice, async (c) => {
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
+  if (!isValidSyncPath(filePath, device.receiveInternals)) {
+    return c.json({ error: "Invalid path" }, 400);
+  }
   try {
-    await stubFor(c.env, vaultId).syncDeleteFile(vaultId, filePath, device.author);
+    await stubFor(c.env, vaultId).syncDeleteFile(
+      vaultId,
+      filePath,
+      device.author,
+      device.receiveInternals
+    );
     return c.json({ ok: true });
   } catch (e: unknown) {
     const err = e as { status?: number; message?: string };
@@ -274,16 +355,45 @@ syncRoutes.post("/:vaultId/batch", requireDevice, async (c) => {
         const bin = atob(op.contentBase64);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const entry = await stub.syncPutFile(vaultId, path, bytes.buffer, op.contentType, op.baseRevision, device.author, device.conflictPolicy);
+        const entry = await syncPutBytes(
+          c.env,
+          vaultId,
+          path,
+          bytes.buffer,
+          contentTypeForUpload(path, op.contentType),
+          op.baseRevision,
+          device.author,
+          device.conflictPolicy,
+          device.receiveInternals
+        );
         results.push({ op: "put", path, status: "accepted", entry: entry as unknown as Record<string, unknown> });
       } else if (op.op === "patch") {
-        const entry = await stub.syncApplyPatch(vaultId, path, op.patch, op.baseRevision, device.author, device.conflictPolicy);
+        const entry = await stub.syncApplyPatch(
+          vaultId,
+          path,
+          op.patch,
+          op.baseRevision,
+          device.author,
+          device.conflictPolicy,
+          device.receiveInternals
+        );
         results.push({ op: "patch", path, status: "accepted", entry: entry as unknown as Record<string, unknown> });
       } else if (op.op === "rename") {
-        const entry = await stub.syncRenameFile(vaultId, op.oldPath, op.newPath, device.author);
+        const entry = await stub.syncRenameFile(
+          vaultId,
+          op.oldPath,
+          op.newPath,
+          device.author,
+          device.receiveInternals
+        );
         results.push({ op: "rename", path: op.oldPath, status: "accepted", entry: entry as unknown as Record<string, unknown> });
       } else if (op.op === "delete") {
-        await stub.syncDeleteFile(vaultId, path, device.author);
+        await stub.syncDeleteFile(
+          vaultId,
+          path,
+          device.author,
+          device.receiveInternals
+        );
         results.push({ op: "delete", path, status: "accepted" });
       }
     } catch (e: unknown) {
@@ -313,26 +423,28 @@ syncRoutes.put("/:vaultId/seed/files/*", requireDevice, async (c) => {
   if (!filePath) return c.json({ error: "Path required" }, 400);
   if (isOsJunk(filePath)) return new Response(null, { status: 204 });
 
-  if (isVaultInternal(filePath)) {
-    if (!device.receiveInternals) return new Response(null, { status: 204 });
-    const body = await c.req.arrayBuffer();
-    const contentType = (c.req.header("Content-Type") ?? "application/octet-stream").split(";")[0].trim();
-    await c.env.VAULT_BUCKET.put(contentKey(vaultId, filePath), body, { httpMetadata: { contentType } });
+  if (isVaultInternal(filePath) && !device.receiveInternals) {
     return new Response(null, { status: 204 });
   }
-
-  if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
+  if (!isValidSyncPath(filePath, device.receiveInternals)) {
+    return c.json({ error: "Invalid path" }, 400);
+  }
   const body = await c.req.arrayBuffer();
-  const contentType = (c.req.header("Content-Type") ?? detectMime(filePath)).split(";")[0].trim();
+  const contentType = contentTypeForUpload(
+    filePath,
+    c.req.header("Content-Type")
+  );
   try {
-    const entry = await stubFor(c.env, vaultId).syncPutFile(
+    const entry = await syncPutBytes(
+      c.env,
       vaultId,
       filePath,
       body,
       contentType,
       undefined,
       device.author,
-      device.conflictPolicy
+      device.conflictPolicy,
+      device.receiveInternals
     );
     return c.json(entry, 200);
   } catch (error: unknown) {

@@ -514,6 +514,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   const handleRemoteChange = useCallback(
     async (msg: import("../hooks/useVaultNotify").ChangeNotification) => {
+      if (isVaultInternalPath(msg.path)) {
+        return;
+      }
       if (sessionId && msg.author === deviceAuthor("web", sessionId)) {
         return;
       }
@@ -579,6 +582,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   const handleConflict = useCallback(
     (msg: import("../hooks/useVaultNotify").ConflictNotification) => {
+      if (isVaultInternalPath(msg.conflict.path)) {
+        return;
+      }
       setConflicts((current) => [
         ...current.filter(
           (conflict) =>
@@ -599,6 +605,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   const handleConflictResolved = useCallback(
     (msg: import("../hooks/useVaultNotify").ConflictResolvedNotification) => {
+      if (isVaultInternalPath(msg.path)) {
+        return;
+      }
       setConflicts((current) =>
         current.filter(
           (conflict) => conflict.conflictNote !== msg.conflictNote
@@ -1647,5 +1656,15 @@ function ModalForm({
         </button>
       </div>
     </div>
+  );
+}
+
+function isVaultInternalPath(path: string): boolean {
+  const normalized = path.toLowerCase();
+  return (
+    normalized === ".obsidian" ||
+    normalized.startsWith(".obsidian/") ||
+    normalized === ".trash" ||
+    normalized.startsWith(".trash/")
   );
 }

@@ -27,6 +27,8 @@ import http from "isomorphic-git/http/web";
 import { MemoryFS } from "./memory-fs";
 import type { GitRemote } from "../git/remote";
 import { gitPathFromVault } from "../git/remote";
+import { isTextContentType } from "../vault/contracts";
+import { formatLfsPointer } from "../git/lfs-pointer";
 export interface SealResult {
   commitHash: string;
   repoName: string;
@@ -37,6 +39,9 @@ export interface SealResult {
 export interface IncrementalSealChange {
   path: string;
   deleted?: boolean;
+  contentType?: string;
+  size?: number;
+  blobOid?: string;
 }
 
 export interface SealedCommit {
@@ -46,9 +51,103 @@ export interface SealedCommit {
   author: string;
 }
 
+interface GitTreeBlob {
+  mode: string;
+  oid: string;
+  type: "blob";
+}
+
+interface GitTreeEntry {
+  mode: string;
+  path: string;
+  oid: string;
+  type: "blob" | "tree" | "commit";
+}
+
 /** Artifacts repo name for a vault. Must start with a letter per naming rules. */
 export function repoName(vaultId: string): string {
   return `vault-${vaultId}`;
+}
+
+async function readTreeMap(
+  fs: MemoryFS,
+  dir: string,
+  commitOid: string
+): Promise<Map<string, GitTreeBlob>> {
+  const commit = await git.readCommit({ fs, dir, oid: commitOid });
+  const out = new Map<string, GitTreeBlob>();
+
+  async function walkTree(treeOid: string, prefix: string): Promise<void> {
+    const result = await git.readTree({ fs, dir, oid: treeOid });
+    for (const entry of result.tree as GitTreeEntry[]) {
+      const path = prefix ? `${prefix}/${entry.path}` : entry.path;
+      if (entry.type === "tree") {
+        await walkTree(entry.oid, path);
+      } else if (entry.type === "blob") {
+        out.set(path, { mode: entry.mode, oid: entry.oid, type: "blob" });
+      }
+    }
+  }
+
+  await walkTree(commit.commit.tree, "");
+  return out;
+}
+
+async function writeTreeMap(
+  fs: MemoryFS,
+  dir: string,
+  files: Map<string, GitTreeBlob>
+): Promise<string> {
+  interface TreeNode {
+    files: Map<string, GitTreeBlob>;
+    dirs: Map<string, TreeNode>;
+  }
+  const root: TreeNode = { files: new Map(), dirs: new Map() };
+  for (const [path, blob] of files) {
+    const parts = path.split("/").filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      let child = node.dirs.get(part);
+      if (!child) {
+        child = { files: new Map(), dirs: new Map() };
+        node.dirs.set(part, child);
+      }
+      node = child;
+    }
+    node.files.set(parts[parts.length - 1], blob);
+  }
+
+  async function writeNode(node: TreeNode): Promise<string> {
+    const tree: GitTreeEntry[] = [];
+    for (const [path, child] of [...node.dirs].sort(([a], [b]) => a.localeCompare(b))) {
+      tree.push({
+        mode: "040000",
+        path,
+        oid: await writeNode(child),
+        type: "tree",
+      });
+    }
+    for (const [path, blob] of [...node.files].sort(([a], [b]) => a.localeCompare(b))) {
+      tree.push({ ...blob, path });
+    }
+    return git.writeTree({ fs, dir, tree });
+  }
+
+  return writeNode(root);
+}
+
+async function readBlobAtPath(
+  fs: MemoryFS,
+  dir: string,
+  commitOid: string,
+  filepath: string
+): Promise<Uint8Array | null> {
+  const tree = await readTreeMap(fs, dir, commitOid);
+  const entry = tree.get(filepath);
+  if (!entry) return null;
+  const blob = await git.readBlob({ fs, dir, oid: entry.oid });
+  return blob.blob;
 }
 
 /**
@@ -122,6 +221,8 @@ export async function sealToRemote(
   const dir = "/vault";
   const fs = new MemoryFS();
   const auth = remote.onAuth();
+  let parent: string | null = null;
+  let tree = new Map<string, GitTreeBlob>();
 
   try {
     await git.clone({
@@ -132,9 +233,11 @@ export async function sealToRemote(
       ref: remote.branch,
       singleBranch: true,
       depth: 1,
-      noCheckout: false,
+      noCheckout: true,
       onAuth: () => auth,
     });
+    parent = await git.resolveRef({ fs, dir, ref: remote.branch });
+    tree = await readTreeMap(fs, dir, parent);
   } catch {
     await git.init({ fs, dir, defaultBranch: remote.branch });
   }
@@ -145,19 +248,22 @@ export async function sealToRemote(
     if (!gitPath) continue;
 
     if (change.deleted) {
-      try {
-        await git.remove({ fs, dir, filepath: gitPath });
-        fileCount++;
-      } catch {
-        // idempotent delete
-      }
+      if (tree.delete(gitPath)) fileCount++;
       continue;
     }
 
-    const content = await readFile(change.path);
-    if (content === null) continue;
-    await fs.promises.writeFile(`${dir}/${gitPath}`, new Uint8Array(content));
-    await git.add({ fs, dir, filepath: gitPath });
+    let content: Uint8Array;
+    if (change.blobOid && change.contentType && !isTextContentType(change.contentType)) {
+      content = new TextEncoder().encode(
+        formatLfsPointer({ oid: change.blobOid, size: change.size ?? 0 })
+      );
+    } else {
+      const bytes = await readFile(change.path);
+      if (bytes === null) continue;
+      content = new Uint8Array(bytes);
+    }
+    const oid = await git.writeBlob({ fs, dir, blob: content });
+    tree.set(gitPath, { mode: "100644", oid, type: "blob" });
     fileCount++;
   }
 
@@ -170,16 +276,30 @@ export async function sealToRemote(
     ? `seal: ${label} (${now.toISOString()})`
     : `seal: snapshot ${now.toISOString()}`;
 
-  const commitHash = await git.commit({
+  const treeOid = await writeTreeMap(fs, dir, tree);
+  const author = {
+    name: commitAuthor,
+    email: "lapis@seal",
+    timestamp: Math.floor(now.getTime() / 1000),
+    timezoneOffset: 0,
+  };
+  const commitHash = await git.writeCommit({
     fs,
     dir,
-    message: commitMessage,
-    author: {
-      name: commitAuthor,
-      email: "lapis@seal",
-      timestamp: Math.floor(now.getTime() / 1000),
-      timezoneOffset: 0,
+    commit: {
+      message: commitMessage,
+      tree: treeOid,
+      parent: parent ? [parent] : [],
+      author,
+      committer: author,
     },
+  });
+  await git.writeRef({
+    fs,
+    dir,
+    ref: `refs/heads/${remote.branch}`,
+    value: commitHash,
+    force: true,
   });
 
   try {
@@ -322,13 +442,11 @@ export async function readFileAtRemoteCommit(
       ref: commitHash,
       singleBranch: true,
       depth: 1,
-      noCheckout: false,
+      noCheckout: true,
       onAuth: () => auth,
     });
 
-    const content = await fs.promises.readFile(`${dir}/${gitPath}`);
-    if (content instanceof Uint8Array) return content;
-    return new TextEncoder().encode(content as string);
+    return await readBlobAtPath(fs, dir, commitHash, gitPath);
   } catch {
     return null;
   }
@@ -366,13 +484,11 @@ export async function readFileAtCommit(
       ref: commitHash,
       singleBranch: true,
       depth: 1,
-      noCheckout: false,
+      noCheckout: true,
       onAuth: () => ({ username: "x", password: tokenSecret }),
     });
 
-    const content = await fs.promises.readFile(`${dir}/${filePath}`);
-    if (content instanceof Uint8Array) return content;
-    return new TextEncoder().encode(content as string);
+    return await readBlobAtPath(fs, dir, commitHash, filePath);
   } catch {
     return null;
   }

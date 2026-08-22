@@ -14,6 +14,8 @@ import {
 	renderConflictNote,
 } from "../src/vault/conflict";
 import { encryptPat, decryptPat, patLast4 } from "../src/git/crypto";
+import { isValidSyncPath } from "../src/vault/path";
+import { contentTypeForUpload } from "../src/vault/mime";
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -79,6 +81,30 @@ describe("Lapis worker", () => {
 		const theirs = "theirs\nline";
 		const { hasConflicts } = merge3(base, ours, theirs);
 		expect(hasConflicts).toBe(true);
+	});
+
+	it("allows only opted-in hidden paths through device sync", () => {
+		expect(isValidSyncPath("notes/visible.md", false)).toBe(true);
+		expect(isValidSyncPath(".obsidian/app.json", false)).toBe(false);
+		expect(isValidSyncPath(".obsidian/app.json", true)).toBe(true);
+		expect(isValidSyncPath(".trash/deleted.md", true)).toBe(true);
+		expect(isValidSyncPath("_manifest.json", true)).toBe(false);
+		expect(isValidSyncPath(".obsidian/../secret", true)).toBe(false);
+	});
+
+	it("classifies managed text by path even with a generic upload MIME", () => {
+		expect(contentTypeForUpload("data.json", "application/octet-stream")).toBe(
+			"application/json"
+		);
+		expect(contentTypeForUpload("board.canvas", "application/octet-stream")).toBe(
+			"application/json"
+		);
+		expect(contentTypeForUpload(".obsidian/app.json", "image/png")).toBe(
+			"application/json"
+		);
+		expect(contentTypeForUpload("image.png", "application/octet-stream")).toBe(
+			"image/png"
+		);
 	});
 
 	it("renders conflict notes with frontmatter", () => {

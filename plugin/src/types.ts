@@ -65,6 +65,7 @@ export interface SyncJournal {
   fileRevisions: Record<string, number>;
   fileHashes: Record<string, string>;
   pendingOps: PendingOp[];
+  initialSeedPending?: boolean;
 }
 
 export type PendingOp = PendingPutOp | PendingPatchOp | PendingRenameOp | PendingDeleteOp;

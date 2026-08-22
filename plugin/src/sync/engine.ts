@@ -62,6 +62,15 @@ export class SyncEngine {
     this.reportProgress("reconciling", 0, 0, "Loading the server manifest…");
     const manifest = await this.client.getManifest(this.vaultId, this.token);
     await this.reconcile(localFiles, manifest);
+    await this.completePendingSeed();
+  }
+
+  async completePendingSeed(): Promise<void> {
+    const journal = this.options.getJournal();
+    if (!journal?.initialSeedPending) return;
+    await this.client.completeSeed(this.vaultId, this.token);
+    journal.initialSeedPending = false;
+    await this.options.setJournal(journal);
   }
 
   async firstSync(): Promise<void> {
@@ -154,8 +163,12 @@ export class SyncEngine {
       }
       journal.pendingOps.shift();
       await this.options.setJournal(journal);
-      if (result.entry && !isConflictResult(result.entry)) {
-        await this.ackEntry(result.entry);
+      if (result.entry) {
+        if (isConflictResult(result.entry)) {
+          await this.pullConflictNote(result.entry.conflictNote, journal);
+        } else {
+          await this.ackEntry(result.entry);
+        }
       }
       this.reportProgress(
         "replaying",
@@ -248,13 +261,9 @@ export class SyncEngine {
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
     }
-    const abstractFile = this.vault.getAbstractFileByPath(path);
-    if (!(abstractFile instanceof TFile)) {
-      return;
-    }
-
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
-    const content = await this.vault.readBinary(abstractFile);
+    const content = await this.readLocalFile(path);
+    if (!content) return;
     const hash = await sha256Hex(content);
     const key = lowerPath(path);
     if (journal.fileHashes[key] === hash) {
@@ -314,12 +323,9 @@ export class SyncEngine {
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
     }
-    const abstractFile = this.vault.getAbstractFileByPath(path);
-    if (!(abstractFile instanceof TFile)) {
-      return;
-    }
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
-    const content = await this.vault.readBinary(abstractFile);
+    const content = await this.readLocalFile(path);
+    if (!content) return;
     appendPendingOp(journal, {
       op: "put",
       path,
@@ -417,6 +423,8 @@ export class SyncEngine {
 
   private async seedLocal(localFiles: LocalFile[]) {
     const journal = emptyJournal(this.vaultId);
+    journal.initialSeedPending = true;
+    await this.options.setJournal(journal);
     let count = 0;
     this.reportProgress(
       "seeding",
@@ -453,6 +461,8 @@ export class SyncEngine {
       "Uploads complete — sealing initial history…"
     );
     await this.client.completeSeed(this.vaultId, this.token);
+    journal.initialSeedPending = false;
+    await this.options.setJournal(journal);
     new Notice("Lapis: seed complete — initial history sealed");
   }
 
@@ -525,16 +535,17 @@ export class SyncEngine {
           setEntry(journal, server, local.hash);
           await this.ackEntry(server);
         } else {
+          const baseRevision = journal.fileRevisions[key] ?? -1;
           const result = await this.client.putFileWithBaseRevision(
             this.vaultId,
             local.path,
             local.content,
             local.contentType,
-            server.revision,
+            baseRevision,
             this.token
           );
           let appliedHash = local.hash;
-          if (!isConflictResult(result) && result.revision > server.revision + 1) {
+          if (!isConflictResult(result)) {
             const merged = await this.client.getFile(
               this.vaultId,
               result.path,
@@ -545,7 +556,9 @@ export class SyncEngine {
           }
           setEntry(journal, result, appliedHash);
           await this.options.setJournal(journal);
-          if (!isConflictResult(result)) {
+          if (isConflictResult(result)) {
+            await this.pullConflictNote(result.conflictNote, journal);
+          } else {
             await this.ackEntry(result);
           }
         }
@@ -571,6 +584,19 @@ export class SyncEngine {
     );
   }
 
+  private async pullConflictNote(
+    conflictNote: string | undefined,
+    journal: SyncJournal
+  ): Promise<void> {
+    if (!conflictNote) return;
+    const manifest = await this.client.getManifest(this.vaultId, this.token);
+    const entry = manifest.entries[lowerPath(conflictNote)];
+    if (!entry) return;
+    await this.pullEntry(entry, journal);
+    await this.options.setJournal(journal);
+    await this.ackEntry(entry);
+  }
+
   private async hashServerFile(entry: ManifestEntry): Promise<string> {
     const content = await this.client.getFile(this.vaultId, entry.path, this.token);
     return sha256Hex(content);
@@ -578,17 +604,62 @@ export class SyncEngine {
 
   private async scanLocalFiles(): Promise<LocalFile[]> {
     const files = this.vault.getFiles().filter((file) => shouldSyncPath(file.path, this.options.settings.receiveInternals));
-    const localFiles: LocalFile[] = [];
+    const localFiles = new Map<string, LocalFile>();
     for (const file of files) {
       const content = await this.vault.readBinary(file);
-      localFiles.push({
+      localFiles.set(lowerPath(file.path), {
         path: file.path,
         content,
         contentType: contentTypeFromPath(file.path),
         hash: await sha256Hex(content),
       });
     }
-    return localFiles;
+    if (this.options.settings.receiveInternals) {
+      await this.scanAdapterFolder(".obsidian", localFiles);
+      await this.scanAdapterFolder(".trash", localFiles);
+    }
+    return [...localFiles.values()];
+  }
+
+  private async readLocalFile(path: string): Promise<ArrayBuffer | null> {
+    if (isVaultInternal(path)) {
+      if (!(await this.vault.adapter.exists(path))) return null;
+      return this.vault.adapter.readBinary(path);
+    }
+    const file = this.vault.getAbstractFileByPath(path);
+    return file instanceof TFile ? this.vault.readBinary(file) : null;
+  }
+
+  private async scanAdapterFolder(
+    folder: string,
+    files: Map<string, LocalFile>
+  ): Promise<void> {
+    if (!(await this.vault.adapter.exists(folder))) return;
+    const listed = await this.vault.adapter.list(folder);
+    for (const path of listed.files) {
+      if (
+        !shouldSyncPath(path, true) ||
+        lowerPath(path).startsWith(".obsidian/plugins/lapis-sync/")
+      ) {
+        continue;
+      }
+      const content = await this.vault.adapter.readBinary(path);
+      files.set(lowerPath(path), {
+        path,
+        content,
+        contentType: contentTypeFromPath(path),
+        hash: await sha256Hex(content),
+      });
+    }
+    for (const child of listed.folders) {
+      if (
+        lowerPath(child) === ".obsidian/plugins/lapis-sync" ||
+        lowerPath(child).startsWith(".obsidian/plugins/lapis-sync/")
+      ) {
+        continue;
+      }
+      await this.scanAdapterFolder(child, files);
+    }
   }
 
   private async writeLocal(path: string, content: ArrayBuffer, contentType: string) {
@@ -691,7 +762,31 @@ function contentTypeFromPath(path: string): string {
     case "md":
       return "text/markdown; charset=utf-8";
     case "txt":
+    case "toml":
       return "text/plain; charset=utf-8";
+    case "csv":
+      return "text/csv; charset=utf-8";
+    case "html":
+    case "htm":
+      return "text/html; charset=utf-8";
+    case "css":
+      return "text/css; charset=utf-8";
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return "text/javascript; charset=utf-8";
+    case "ts":
+    case "tsx":
+      return "text/typescript; charset=utf-8";
+    case "json":
+    case "canvas":
+      return "application/json";
+    case "xml":
+      return "application/xml";
+    case "yaml":
+    case "yml":
+      return "text/yaml; charset=utf-8";
     case "png":
       return "image/png";
     case "jpg":

@@ -34,6 +34,7 @@ interface SyncJournal {
 
 **Lifecycle:**
 - Populated from the server manifest after the first successful sync.
+- Initial seeding sets an optional `initialSeedPending` marker before the first upload and clears it only after `seed/complete`; interrupted seeds therefore resume and still produce their initial seal.
 - Updated after every accepted push or pull (`fileRevisions`, `fileHashes`, `lastSyncAt`).
 - Offline: changes are appended to `pendingOps` in order instead of being sent immediately.
 - On reconnect: `pendingOps` are replayed via `POST /batch` (ordered, single DO queue), then the journal is refreshed from the full server manifest to catch any remote changes made while offline.
@@ -48,7 +49,7 @@ When both sides have content on first connection, the plugin treats every differ
 - **Server only** → pull to local.
 - **Local only** → push to server (Vault Content only; Vault Internals and OS junk skipped).
 - **Both, identical hash** → no-op; record revision.
-- **Both, different content** → send as a patch with `clientContent` and `baseContent` (empty string as the shared base, since there is no real shared history). The server performs a three-way merge; clean merges are accepted silently; unsafe merges create Conflict Notes under `.sync-conflicts/`.
+- **Both, different content** → send the local content with the journal's last known revision. If no cursor exists, send the `-1` no-shared-base sentinel, which the server interprets as an empty merge base. The server performs a three-way merge; clean merges are returned and applied locally, while unsafe merges create Conflict Notes under `.sync-conflicts/`.
 
 This avoids any "who wins" prompt and produces the same observable behavior as the online three-way merge path, keeping the conflict model consistent across all sync scenarios.
 

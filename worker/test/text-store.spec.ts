@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { contentKey, type ManifestEntry } from "../src/vault/manifest";
+import { blobKey, contentKey, type ManifestEntry } from "../src/vault/manifest";
 import { VaultCoordinator } from "../src/vault/coordinator";
 import { createPatch } from "../src/vault/patch";
 import {
@@ -8,6 +8,7 @@ import {
   isTextContentType,
 } from "../src/vault/contracts";
 import { TEXT_CHUNK_SIZE, chunkUtf8 } from "../src/vault/text-store";
+import { formatLfsPointer, parseLfsPointer } from "../src/git/lfs-pointer";
 
 function coordinator(vaultId: string) {
   return env.VAULT_COORDINATOR.get(
@@ -44,6 +45,16 @@ async function initialize(vaultId: string) {
 }
 
 describe("SQLite text heads", () => {
+  it("formats and parses standard Git LFS pointers", () => {
+    const oid = "a".repeat(64);
+    const pointer = formatLfsPointer({ oid, size: 12345 });
+    expect(pointer).toBe(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize 12345\n`
+    );
+    expect(parseLfsPointer(pointer)).toEqual({ oid, size: 12345 });
+    expect(parseLfsPointer("not a pointer")).toBeNull();
+  });
+
   it("classifies every supported text MIME contract", () => {
     expect(isTextContentType("text/markdown")).toBe(true);
     expect(isTextContentType("application/json")).toBe(true);
@@ -187,7 +198,7 @@ describe("SQLite text heads", () => {
       new TextEncoder().encode(text).buffer as ArrayBuffer,
       "text/markdown"
     );
-    await stub.syncPutFile(
+    const binaryEntry = await stub.syncPutFile(
       vaultId,
       binaryPath,
       binary.buffer as ArrayBuffer,
@@ -202,8 +213,10 @@ describe("SQLite text heads", () => {
       await env.VAULT_BUCKET.get(contentKey(vaultId, renamedPath))
     ).toBeNull();
 
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, binaryPath))).toBeNull();
+    expect(binaryEntry.blobOid).toMatch(/^[0-9a-f]{64}$/);
     const binaryObject = await env.VAULT_BUCKET.get(
-      contentKey(vaultId, binaryPath)
+      blobKey(vaultId, binaryEntry.blobOid!)
     );
     expect(Array.from(new Uint8Array(await binaryObject!.arrayBuffer()))).toEqual(
       Array.from(binary)
@@ -286,7 +299,7 @@ describe("SQLite text heads", () => {
         file.contentType
       );
     }
-    await stub.syncPutFile(
+    const binaryEntry = await stub.syncPutFile(
       vaultId,
       binaryPath,
       binary.buffer as ArrayBuffer,
@@ -320,13 +333,228 @@ describe("SQLite text heads", () => {
     expect(Array.from(listedByPath.get(binaryPath) ?? [])).toEqual(
       Array.from(binary)
     );
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, binaryPath))).toBeNull();
+    expect(binaryEntry.blobOid).toMatch(/^[0-9a-f]{64}$/);
     const storedBinary = await env.VAULT_BUCKET.get(
-      contentKey(vaultId, binaryPath)
+      blobKey(vaultId, binaryEntry.blobOid!)
     );
     expect(storedBinary).not.toBeNull();
     expect(
       Array.from(new Uint8Array(await storedBinary!.arrayBuffer()))
     ).toEqual(Array.from(binary));
+  });
+
+  it("stores opted-in Vault Internals by MIME during first seed", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const textPath = ".obsidian/app.json";
+    const binaryPath = ".obsidian/icons/theme.png";
+    const text = "{\"legacyEditor\":false}";
+    const binary = new Uint8Array([1, 3, 3, 7]);
+
+    await expect(
+      stub.syncPutFile(
+        vaultId,
+        textPath,
+        new TextEncoder().encode(text).buffer as ArrayBuffer,
+        "application/json"
+      )
+    ).rejects.toThrow("Invalid path");
+
+    const textEntry = await stub.syncPutFile(
+      vaultId,
+      textPath,
+      new TextEncoder().encode(text).buffer as ArrayBuffer,
+      "application/json",
+      undefined,
+      "plugin:test",
+      "rebase",
+      true
+    );
+    const binaryEntry = await stub.syncPutFile(
+      vaultId,
+      binaryPath,
+      binary.buffer as ArrayBuffer,
+      "image/png",
+      undefined,
+      "plugin:test",
+      "rebase",
+      true
+    );
+
+    expect(textEntry.revision).toBe(1);
+    expect(binaryEntry.revision).toBe(1);
+    expect(
+      new TextDecoder().decode(
+        (await stub.getContent(vaultId, textPath))?.bytes
+      )
+    ).toBe(text);
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, textPath))).toBeNull();
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, binaryPath))).toBeNull();
+    expect(binaryEntry.blobOid).toMatch(/^[0-9a-f]{64}$/);
+    const storedBinary = await env.VAULT_BUCKET.get(
+      blobKey(vaultId, binaryEntry.blobOid!)
+    );
+    expect(
+      Array.from(new Uint8Array(await storedBinary!.arrayBuffer()))
+    ).toEqual(Array.from(binary));
+    expect(await stub.getStorageMetrics()).toMatchObject({
+      r2TextPuts: 0,
+      textFileCount: 1,
+    });
+
+    await stub.syncDeleteFile(vaultId, textPath, "plugin:test", true);
+    expect(await stub.getContent(vaultId, textPath)).toBeNull();
+  });
+
+  it("commits binaries larger than the DO RPC limit through R2 staging", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "attachments/large.bin";
+    const stagingKey = `${vaultId}/_staging/${crypto.randomUUID()}`;
+    const bytes = new Uint8Array(33 * 1024 * 1024);
+    bytes[0] = 17;
+    bytes[bytes.length - 1] = 29;
+    await env.VAULT_BUCKET.put(stagingKey, bytes);
+
+    const entry = await stub.syncPutStagedFile(
+      vaultId,
+      path,
+      stagingKey,
+      "application/octet-stream"
+    );
+
+    expect(entry.size).toBe(bytes.byteLength);
+    expect(entry.blobOid).toMatch(/^[0-9a-f]{64}$/);
+    expect(await env.VAULT_BUCKET.get(stagingKey)).toBeNull();
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, path))).toBeNull();
+    const stored = await env.VAULT_BUCKET.get(blobKey(vaultId, entry.blobOid!));
+    expect(stored?.size).toBe(bytes.byteLength);
+    const response = await stub.fetch(
+      new Request(
+        `https://do-internal/content?vaultId=${encodeURIComponent(vaultId)}&path=${encodeURIComponent(path)}`
+      )
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Length")).toBe(
+      String(bytes.byteLength)
+    );
+    const downloaded = new Uint8Array(await response.arrayBuffer());
+    expect(downloaded[0]).toBe(17);
+    expect(downloaded[downloaded.length - 1]).toBe(29);
+  });
+
+  it("deduplicates binary blobs and renames binaries with metadata only", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const bytes = new Uint8Array([4, 5, 6, 7]);
+
+    const first = await stub.syncPutFile(
+      vaultId,
+      "a.bin",
+      bytes.buffer as ArrayBuffer,
+      "application/octet-stream"
+    );
+    const second = await stub.syncPutFile(
+      vaultId,
+      "folder/b.bin",
+      bytes.buffer as ArrayBuffer,
+      "application/octet-stream"
+    );
+
+    expect(first.blobOid).toBe(second.blobOid);
+    expect(await env.VAULT_BUCKET.get(blobKey(vaultId, first.blobOid!))).not.toBeNull();
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, "a.bin"))).toBeNull();
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, "folder/b.bin"))).toBeNull();
+
+    const renamed = await stub.syncRenameFile(vaultId, "a.bin", "renamed.bin");
+    expect(renamed.blobOid).toBe(first.blobOid);
+    expect(renamed.r2Key).toBe(blobKey(vaultId, first.blobOid!));
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, "renamed.bin"))).toBeNull();
+
+    await stub.syncDeleteFile(vaultId, "folder/b.bin");
+    expect(await env.VAULT_BUCKET.get(blobKey(vaultId, first.blobOid!))).not.toBeNull();
+    const content = await stub.getContent(vaultId, "renamed.bin");
+    expect(Array.from(new Uint8Array(content!.bytes))).toEqual(Array.from(bytes));
+  });
+
+  it("treats a missing reconcile cursor as no shared text base", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "first-reconcile.md";
+    const server = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("server").buffer as ArrayBuffer,
+      "text/markdown"
+    );
+
+    const result = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("local").buffer as ArrayBuffer,
+      "text/markdown",
+      -1,
+      "plugin:first-connect"
+    );
+
+    expect(result.conflict).toMatchObject({
+      path,
+      serverRevision: server.revision,
+      clientBaseRevision: -1,
+      serverContent: "server",
+      clientContent: "local",
+    });
+    expect(
+      new TextDecoder().decode((await stub.getContent(vaultId, path))?.bytes)
+    ).toBe("server");
+  });
+
+  it("keeps the web head when plugin and web replace the same base line", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "same-line-conflict.md";
+    const base = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode(
+        "Keep this line\nChange this exact line\nKeep this too"
+      ).buffer as ArrayBuffer,
+      "text/markdown"
+    );
+    const web = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode(
+        "Keep this line\nWeb version\nKeep this too"
+      ).buffer as ArrayBuffer,
+      "text/markdown",
+      base.revision,
+      "web:test"
+    );
+
+    const plugin = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode(
+        "Keep this line\nPlugin version\nKeep this too"
+      ).buffer as ArrayBuffer,
+      "text/markdown",
+      base.revision,
+      "plugin:test"
+    );
+
+    expect(plugin.conflict).toMatchObject({
+      path,
+      serverRevision: web.revision,
+      clientBaseRevision: base.revision,
+      serverContent: "Keep this line\nWeb version\nKeep this too",
+      clientContent: "Keep this line\nPlugin version\nKeep this too",
+      baseContent: "Keep this line\nChange this exact line\nKeep this too",
+    });
+    expect(
+      new TextDecoder().decode((await stub.getContent(vaultId, path))?.bytes)
+    ).toBe("Keep this line\nWeb version\nKeep this too");
   });
 
   it("migrates legacy R2 text into SQLite and deletes only verified text keys", async () => {
@@ -382,7 +610,13 @@ describe("SQLite text heads", () => {
     expect(new TextDecoder().decode(content?.bytes)).toBe(text);
     expect(await stub.getStorageVersion()).toBe(SQLITE_TEXT_STORAGE_VERSION);
     expect(await env.VAULT_BUCKET.get(contentKey(vaultId, textPath))).toBeNull();
-    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, binaryPath))).not.toBeNull();
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, binaryPath))).toBeNull();
+    const migratedManifest = await stub.getManifest(vaultId);
+    const migratedBinary = migratedManifest.entries[binaryPath.toLowerCase()];
+    expect(migratedBinary.blobOid).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      await env.VAULT_BUCKET.get(blobKey(vaultId, migratedBinary.blobOid!))
+    ).not.toBeNull();
 
     await runInDurableObject(stub, async (_instance, state) => {
       const head = state.storage.sql

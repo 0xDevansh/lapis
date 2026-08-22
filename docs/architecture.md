@@ -14,7 +14,7 @@ Lapis does **not** use CRDTs or Yjs. Sync is **per-file revisions**, **unified-d
 | **Obsidian plugin** (`plugin/`) | Watches the local vault, pushes patches/puts, keeps an offline **journal**, applies remote changes to disk. |
 | **Worker** (`worker/`) | HTTP API: session auth for the web, device-token auth for the plugin. |
 | **VaultCoordinator** | One Cloudflare Durable Object per vault. Single writer. Owns the live manifest, chunked text, retained merge history, acknowledgements, conflicts, presence, and flush/seal alarms. |
-| **R2** | Durable latest bytes for **binaries** plus `_manifest.json`. Text bodies never use R2 after storage migration. |
+| **R2** | Immutable content-addressed **binary blobs** plus `_manifest.json`. Text bodies never use R2 after storage migration. |
 | **D1** | Auth, devices, search/FTS, tags/backlinks, GitHub remote config. Not the live file store. |
 | **Artifacts** | Default sealed Git history (append-only snapshots). |
 | **GitHub** (optional) | If configured, seal prefers GitHub; inbound reconcile runs before push. |
@@ -25,7 +25,7 @@ Authority for “what is the current text of `note.md`?” is always the **Durab
 
 ## Storage decisions
 
-[ADR 0010](adr/0010-do-sqlite-text-and-conflict-resolve.md) defines text storage, chunking, and retained merge history. [ADR 0011](adr/0011-structured-conflict-resolution.md) defines conflict creation and resolution. The detailed implementation plan is retained in [`proposals/sqlite-text-and-conflict-ux.md`](proposals/sqlite-text-and-conflict-ux.md).
+[ADR 0010](adr/0010-do-sqlite-text-and-conflict-resolve.md) defines text storage, chunking, and retained merge history. [ADR 0011](adr/0011-structured-conflict-resolution.md) defines conflict creation and resolution. [ADR 0012](adr/0012-lapis-managed-lfs-pointer-sealing.md) defines binary blob storage and Git LFS pointer sealing. The detailed text/conflict implementation plan is retained in [`proposals/sqlite-text-and-conflict-ux.md`](proposals/sqlite-text-and-conflict-ux.md).
 
 ---
 
@@ -90,7 +90,12 @@ After applying a returned server revision, the browser acknowledges it. Writes t
 ### Batch / seed
 
 - Offline replay uses `POST /api/sync/:vaultId/batch`.
-- First connection can **seed** an empty web vault (`PUT .../seed/files/*` then `POST .../seed/complete`), which also triggers a seal.
+- First connection can **seed** an empty web vault (`PUT .../seed/files/*` then `POST .../seed/complete`), which also triggers a seal. Seed writes use the normal coordinator path: text goes to DO SQLite and binaries go to R2.
+- Upload MIME is normalized from known path extensions on the Worker, so generic client headers cannot route JSON, Canvas, CSS, or other managed text into R2. The plugin uses the same extension policy.
+- Binary uploads avoid the 32 MiB Durable Object RPC serialization limit: uploads use a short-lived R2 staging key, the coordinator records only SHA-256 blob metadata, and downloads are streamed through the coordinator's internal `fetch` endpoint. The final authority remains SQLite for text and R2 for binaries.
+- The plugin persists an `initialSeedPending` journal marker before uploading. If the initial upload is interrupted, the next normal or forced sync finishes reconciliation and calls `seed/complete` before clearing the marker.
+- Full reconcile uses the journal revision as the merge base. With no prior cursor, `baseRevision = -1` means “no shared history” and uses an empty merge base; it never claims local bytes were based on the current server head. Any clean merged result is fetched back before the journal hash is updated.
+- Opted-in Vault Internals use the same MIME-based storage split but remain hidden from web manifests and devices that did not opt in.
 
 ---
 
@@ -157,6 +162,10 @@ Success updates the client revision/journal, broadcasts `conflict_resolved`, and
 
 Sealing is history, not the live truth. Live readers always go through the DO, which reads text from SQLite and binaries from R2.
 
+Git sealing writes text as normal Git blobs and binaries as standard Git LFS pointer files whose `oid sha256:<hash>` references the same immutable R2 blob used by live sync. The sealer constructs commits from Git tree object IDs and dirty deltas, so unchanged files are preserved without checking out binary worktrees.
+
+Lapis does not yet expose an external Git LFS Batch API. External Git clients may see pointer files in sealed Git history; normal `git lfs clone`, `pull`, and `push` will require future authenticated batch/transfer endpoints, repository `.gitattributes` / `.lfsconfig`, and GitHub OAuth through Better Auth. If GitHub OAuth is not configured, external LFS client support should remain unavailable.
+
 Zip export and snapshot listing read sealed history / vault content through the Worker → DO.
 
 ---
@@ -181,6 +190,7 @@ The same snapshot is available from the coordinator's `getStorageMetrics()` RPC 
 |---|---|
 | DO writes, flush, seal, WS | `worker/src/vault/coordinator.ts` |
 | Text chunks, checkpoints, diffs, acks | `worker/src/vault/text-store.ts` |
+| LFS pointer formatting | `worker/src/git/lfs-pointer.ts` |
 | Diff / patch / merge3 | `worker/src/vault/patch.ts` |
 | Conflict note format | `worker/src/vault/conflict.ts` |
 | Web vault HTTP | `worker/src/vault/routes.ts` |
@@ -200,8 +210,8 @@ The same snapshot is available from the coordinator's `getStorageMetrics()` RPC 
 3. Text sync is patch-oriented; binaries are whole-object.
 4. Unresolvable overlap → Conflict Note, not last-write-wins on the main path.
 5. Revision acknowledgement happens only after a client successfully applies the matching server content.
-6. R2 contains no text body after storage migration; it may lag binary heads by seconds.
+6. R2 contains no text body after storage migration; binary manifest entries point at immutable SHA-256 blob objects.
 7. Conflict resolution is idempotence-protected by the open conflict row and hard-deletes its note.
 8. Secrets (Artifacts tokens, GitHub PATs) stay server-side.
 
-For *why* these choices exist, see [`adr/`](adr/), especially 0001–0004, 0007, 0010, and 0011.
+For *why* these choices exist, see [`adr/`](adr/), especially 0001–0004, 0007, and 0010–0012.
