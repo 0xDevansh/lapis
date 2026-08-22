@@ -8,7 +8,7 @@ The missing piece is a locally-installed companion that watches the Local Vault,
 
 ## Solution
 
-An Obsidian community plugin that acts as a sync agent between the Local Vault and the Web Vault. The plugin connects once via a device-code flow (no pasting long secrets), then runs silently in the background: watching for local file changes, patching or uploading them to the server, pulling remote changes down, queuing work offline and replaying it on reconnect, and surfacing merge conflicts as Conflict Notes with explicit resolve actions (keep server / keep mine / manual merge — see [ADR 0010](../adr/0010-do-sqlite-text-and-conflict-resolve.md); web ships first, then plugin).
+An Obsidian community plugin that acts as a sync agent between the Local Vault and the Web Vault. The plugin connects once via a device-code flow (no pasting long secrets), then runs silently in the background: watching for local file changes, patching or uploading them to the server, pulling remote changes down, queuing work offline and replaying it on reconnect, and surfacing merge conflicts as Conflict Notes with explicit resolve actions (keep server / keep mine / manual merge — see [ADR 0011](../adr/0011-structured-conflict-resolution.md)).
 
 The server already implements the sync protocol. The plugin is a client that speaks it.
 

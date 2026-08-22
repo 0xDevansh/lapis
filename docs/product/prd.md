@@ -1,7 +1,7 @@
 # Lapis PRD
 
 For how sync works today: [`../architecture.md`](../architecture.md).  
-Accepted next work (DO SQLite text + conflict UX): [`../proposals/sqlite-text-and-conflict-ux.md`](../proposals/sqlite-text-and-conflict-ux.md).
+Accepted implementation plan (DO SQLite text + conflict UX): [`../proposals/sqlite-text-and-conflict-ux.md`](../proposals/sqlite-text-and-conflict-ux.md).
 
 ## Problem Statement
 
@@ -11,7 +11,7 @@ Lapis must make a Web Vault feel like a useful first-class product, while local 
 
 ## Solution
 
-Lapis is an open-source, self-deployable Cloudflare application that provides an auth-gated Web Vault. A Durable Object per vault serializes sync (revision + patch for text, whole-object for binaries). **Today** latest content is mirrored to R2; **target** ([ADR 0010](../adr/0010-do-sqlite-text-and-conflict-resolve.md)) stores text in DO SQLite and keeps only binaries on R2. Artifacts (or optional GitHub) hold sealed history; D1 provides FTS. A companion Obsidian plugin connects via device-code and syncs with patches, server-side three-way merge, live notifications, and Conflict Notes with an explicit resolve flow (in progress).
+Lapis is an open-source, self-deployable Cloudflare application that provides an auth-gated Web Vault. A Durable Object per vault serializes sync (revision + patch for text, whole-object for binaries), stores chunked text and ack-bounded merge history in SQLite, and keeps only binaries in R2 ([ADR 0010](../adr/0010-do-sqlite-text-and-conflict-resolve.md)). Artifacts (or optional GitHub) hold sealed history; D1 provides FTS. A companion Obsidian plugin connects via device-code and syncs with server-side three-way merge, live notifications, and first-class conflict resolution ([ADR 0011](../adr/0011-structured-conflict-resolution.md)).
 
 The Web Vault supports browsing, Markdown source editing, rendered preview, folder navigation, backlinks, full wikilink handling, tags, attachments, basic mobile editing, and file operations over Vault Content. Vault Internals such as `.obsidian` are hidden from the normal web experience; each Local Vault can opt into receiving internals updates.
 
@@ -91,7 +91,7 @@ The Web Vault supports browsing, Markdown source editing, rendered preview, fold
 - Vault Content is visible and manageable in the Web Vault. Vault Internals are hidden from normal web browsing and handled through sync preferences.
 - Each Vault Owner can have multiple Web Vaults. One Local Vault connects to exactly one Web Vault. Multiple Local Vaults can connect to one Web Vault.
 - First-time setup can start from a plugin-seeded Local Vault or an empty Web Vault. Syncing an existing Web Vault into a non-empty unrelated local folder is not allowed by default.
-- The Durable Object is authority for live vault mutations. **Today** text and binaries are mirrored to R2. **Target** ([ADR 0010](../adr/0010-do-sqlite-text-and-conflict-resolve.md)): text latest in DO SQLite; binaries on R2; Artifacts/GitHub for sealed history; D1 FTS for search.
+- The Durable Object is authority for live vault mutations and stores latest text in SQLite; binaries live in R2, Artifacts/GitHub provide sealed history, and D1 FTS provides search ([ADR 0010](../adr/0010-do-sqlite-text-and-conflict-resolve.md)).
 - Accepted changes update the DO head immediately, notify peers, and are sealed into Artifacts/GitHub on a longer debounce.
 - Server-created commits are the normal path. Clients and plugins do not push directly to Artifacts and do not receive Artifacts repo tokens.
 - Text-like files use file-diff patches for transport. The server materializes accepted patches into file revisions. Binary files use whole-object transfers.

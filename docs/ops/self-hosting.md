@@ -2,8 +2,9 @@
 
 Lapis is an open-source, self-deployable Cloudflare application. You deploy it into your own Cloudflare account; there is no built-in billing or quota enforcement.
 
-How the running system syncs notes (revisions, patches, R2 flush for text today, seal): [`../architecture.md`](../architecture.md).  
-Accepted storage change (text → DO SQLite, binaries stay on R2): [`../adr/0010-do-sqlite-text-and-conflict-resolve.md`](../adr/0010-do-sqlite-text-and-conflict-resolve.md).
+How the running system syncs notes (revisions, SQLite text, binary R2 flush, and seal): [`../architecture.md`](../architecture.md).
+
+Storage decision (text → DO SQLite, binaries stay on R2): [`../adr/0010-do-sqlite-text-and-conflict-resolve.md`](../adr/0010-do-sqlite-text-and-conflict-resolve.md).
 
 ---
 
@@ -13,7 +14,7 @@ Accepted storage change (text → DO SQLite, binaries stay on R2): [`../adr/0010
 |---|---|---|
 | **Workers** | Runs the Lapis API and serves the web UI | Standard Workers plan sufficient |
 | **Durable Objects** | Per-vault coordination, serialized mutations, WebSocket presence | Requires Workers Paid plan |
-| **R2** | Stores latest vault **binaries** (and today still stores text until ADR 0010 migrates text into DO SQLite) | First 10 GB/month free |
+| **R2** | Stores latest vault **binaries** and the optional manifest mirror; text bodies live in DO SQLite | First 10 GB/month free |
 | **D1** | Relational + FTS database (auth, search index, backlinks, tags, devices) | First 5 million rows/month free |
 | **KV** | Session storage for better-auth | Free tier adequate for personal use |
 

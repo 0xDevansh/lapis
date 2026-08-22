@@ -130,6 +130,48 @@ describe("SQLite text heads", () => {
     expect(await env.VAULT_BUCKET.get(contentKey(vaultId, path))).toBeNull();
   });
 
+  it("reports bounded storage, history, ack, and R2 text metrics", async () => {
+    const vaultId = crypto.randomUUID();
+    const path = "metrics.md";
+    const stub = await initialize(vaultId);
+    const first = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("one").buffer as ArrayBuffer,
+      "text/markdown"
+    );
+    const second = await stub.syncPutFile(
+      vaultId,
+      path,
+      new TextEncoder().encode("two").buffer as ArrayBuffer,
+      "text/markdown",
+      first.revision
+    );
+
+    const beforeAck = await stub.getStorageMetrics();
+    expect(beforeAck).toMatchObject({
+      storageVersion: SQLITE_TEXT_STORAGE_VERSION,
+      r2TextPuts: 0,
+      textFileCount: 1,
+      textUpdateCount: 1,
+      maxChainLength: 1,
+      maxAckLagRevisions: 1,
+      openConflicts: 0,
+      resolvedConflicts: 0,
+      conflictResolveRate: 0,
+    });
+    expect(beforeAck.doStorageBytes).toBeGreaterThan(0);
+
+    await stub.recordAcks(vaultId, "plugin:metrics", {
+      acks: [{ path, revision: second.revision }],
+    });
+    const afterAck = await stub.getStorageMetrics();
+    expect(afterAck.textUpdateCount).toBe(0);
+    expect(afterAck.maxChainLength).toBe(0);
+    expect(afterAck.maxAckLagRevisions).toBe(0);
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, path))).toBeNull();
+  });
+
   it("renames and deletes SQLite text while binaries remain in R2", async () => {
     const vaultId = crypto.randomUUID();
     const stub = await initialize(vaultId);
@@ -652,6 +694,11 @@ describe("SQLite text heads", () => {
       clientContent: "client",
     });
     expect(await stub.listConflicts(vaultId)).toEqual([result.conflict]);
+    expect(await stub.getStorageMetrics()).toMatchObject({
+      openConflicts: 1,
+      resolvedConflicts: 0,
+      conflictResolveRate: 0,
+    });
     const head = await stub.getContent(vaultId, path);
     expect(new TextDecoder().decode(head?.bytes)).toBe("server");
     const note = await stub.getContent(vaultId, result.conflictNote!);
@@ -669,6 +716,11 @@ describe("SQLite text heads", () => {
     expect(resolution.entry.revision).toBe(second.revision);
     expect(await stub.getContent(vaultId, result.conflictNote!)).toBeNull();
     expect(await stub.listConflicts(vaultId)).toEqual([]);
+    expect(await stub.getStorageMetrics()).toMatchObject({
+      openConflicts: 0,
+      resolvedConflicts: 1,
+      conflictResolveRate: 1,
+    });
     await expect(
       stub.resolveConflict(vaultId, {
         path,

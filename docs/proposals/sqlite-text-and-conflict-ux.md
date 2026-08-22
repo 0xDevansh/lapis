@@ -1,6 +1,6 @@
 # Plan: DO SQLite text storage + first-class conflict UX
 
-**Status:** Accepted for implementation (2026-08-22) — not yet shipped  
+**Status:** Accepted and implemented (2026-08-22)
 **Depends on:** current revision/patch sync ([`../architecture.md`](../architecture.md))  
 **Supersedes:** [`text-in-do-sqlite.md`](text-in-do-sqlite.md)  
 

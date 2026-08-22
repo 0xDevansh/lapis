@@ -164,6 +164,19 @@ export interface VaultContentResult {
   bytes: ArrayBuffer;
 }
 
+export interface VaultStorageMetrics {
+  storageVersion: StorageVersion;
+  doStorageBytes: number;
+  r2TextPuts: number;
+  textFileCount: number;
+  textUpdateCount: number;
+  maxChainLength: number;
+  maxAckLagRevisions: number;
+  openConflicts: number;
+  resolvedConflicts: number;
+  conflictResolveRate: number;
+}
+
 type ServerMessage =
   | ChangeNotification
   | PresenceNotification
@@ -184,6 +197,7 @@ type AttachedWebSocket = WebSocket & {
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
 const DEFAULT_SEAL_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_FLUSH_MAX_PENDING = 250;
+const R2_TEXT_PUTS_STATE_KEY = "metric_r2_text_puts";
 
 export class VaultCoordinator extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -292,6 +306,50 @@ export class VaultCoordinator extends DurableObject<Env> {
     return version !== null && Number.isInteger(version) && version >= 1
       ? version
       : R2_TEXT_STORAGE_VERSION;
+  }
+
+  getStorageMetrics(): VaultStorageMetrics {
+    const text = this.sql.exec<Record<string, SqlStorageValue>>(
+      `SELECT
+         COUNT(*) AS textFileCount,
+         COALESCE(SUM(
+           (SELECT COUNT(*) FROM text_updates tu
+            WHERE tu.path_lower = tf.path_lower)
+         ), 0) AS textUpdateCount,
+         COALESCE(MAX(
+           (SELECT COUNT(*) FROM text_updates tu
+            WHERE tu.path_lower = tf.path_lower)
+         ), 0) AS maxChainLength,
+         COALESCE(MAX(tf.revision - COALESCE(
+           (SELECT revision FROM text_checkpoints tc
+            WHERE tc.path_lower = tf.path_lower),
+           0
+         )), 0) AS maxAckLagRevisions
+       FROM text_files tf`
+    ).toArray()[0];
+    const conflicts = this.sql.exec<Record<string, SqlStorageValue>>(
+      `SELECT
+         SUM(CASE WHEN resolved_at IS NULL THEN 1 ELSE 0 END) AS openConflicts,
+         SUM(CASE WHEN resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS resolvedConflicts
+       FROM conflicts`
+    ).toArray()[0];
+    const openConflicts = Number(conflicts?.openConflicts ?? 0);
+    const resolvedConflicts = Number(conflicts?.resolvedConflicts ?? 0);
+    const conflictCount = openConflicts + resolvedConflicts;
+
+    return {
+      storageVersion: this.getStorageVersion(),
+      doStorageBytes: this.sql.databaseSize,
+      r2TextPuts: this.numberState(R2_TEXT_PUTS_STATE_KEY) ?? 0,
+      textFileCount: Number(text?.textFileCount ?? 0),
+      textUpdateCount: Number(text?.textUpdateCount ?? 0),
+      maxChainLength: Number(text?.maxChainLength ?? 0),
+      maxAckLagRevisions: Number(text?.maxAckLagRevisions ?? 0),
+      openConflicts,
+      resolvedConflicts,
+      conflictResolveRate:
+        conflictCount === 0 ? 0 : resolvedConflicts / conflictCount,
+    };
   }
 
   async recordAcks(
@@ -768,6 +826,7 @@ export class VaultCoordinator extends DurableObject<Env> {
         const newPath = String(rename.newPath);
         const oldObj = await this.env.VAULT_BUCKET.get(contentKey(id, oldPath));
         if (oldObj) {
+          if (textOp) this.recordR2TextPut();
           await this.env.VAULT_BUCKET.put(contentKey(id, newPath), await oldObj.arrayBuffer(), {
             httpMetadata: { contentType: oldObj.httpMetadata?.contentType ?? String(rename.contentType ?? "application/octet-stream") },
           });
@@ -782,6 +841,7 @@ export class VaultCoordinator extends DurableObject<Env> {
         const text = await this.headText(id, entry.path);
         if (!this.usesSqliteText()) {
           const bytes = new TextEncoder().encode(text);
+          this.recordR2TextPut();
           await this.env.VAULT_BUCKET.put(contentKey(id, entry.path), bytes, {
             httpMetadata: { contentType: entry.contentType },
           });
@@ -948,6 +1008,7 @@ export class VaultCoordinator extends DurableObject<Env> {
       }
     }
 
+    this.emitStorageMetrics(meta.id);
     await this.armAlarm();
   }
 
@@ -1400,6 +1461,7 @@ export class VaultCoordinator extends DurableObject<Env> {
     const entry = this.getEntry(path);
     if (!entry || !isTextContentType(entry.contentType)) return;
     const text = await this.headText(vaultId, entry.path);
+    this.recordR2TextPut();
     await this.env.VAULT_BUCKET.put(contentKey(vaultId, entry.path), new TextEncoder().encode(text), {
       httpMetadata: { contentType: entry.contentType },
     });
@@ -1878,6 +1940,24 @@ export class VaultCoordinator extends DurableObject<Env> {
     if (!row) return null;
     const value = Number(row.value);
     return Number.isFinite(value) ? value : null;
+  }
+
+  private recordR2TextPut(): void {
+    const next = (this.numberState(R2_TEXT_PUTS_STATE_KEY) ?? 0) + 1;
+    this.sql.exec(
+      `INSERT OR REPLACE INTO do_state (key, value) VALUES (?, ?)`,
+      R2_TEXT_PUTS_STATE_KEY,
+      String(next)
+    );
+  }
+
+  private emitStorageMetrics(vaultId: string): void {
+    console.info({
+      event: "lapis.storage_metrics",
+      vaultId,
+      ...this.getStorageMetrics(),
+      sampledAt: new Date().toISOString(),
+    });
   }
 
   private usesSqliteText(): boolean {

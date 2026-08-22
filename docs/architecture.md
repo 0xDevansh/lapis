@@ -13,8 +13,8 @@ Lapis does **not** use CRDTs or Yjs. Sync is **per-file revisions**, **unified-d
 | **Web app** (`web/`) | Browser editor. Saves with an explicit `PUT` and a `baseRevision`. Listens on a notify WebSocket for remote changes. |
 | **Obsidian plugin** (`plugin/`) | Watches the local vault, pushes patches/puts, keeps an offline **journal**, applies remote changes to disk. |
 | **Worker** (`worker/`) | HTTP API: session auth for the web, device-token auth for the plugin. |
-| **VaultCoordinator** | One Cloudflare Durable Object per vault. Single writer. Owns the live manifest, pending write log, merge logic, presence, flush/seal alarms. |
-| **R2** | Durable latest bytes for **binaries** (and today still for text until ADR 0010 ships), plus `_manifest.json`. |
+| **VaultCoordinator** | One Cloudflare Durable Object per vault. Single writer. Owns the live manifest, chunked text, retained merge history, acknowledgements, conflicts, presence, and flush/seal alarms. |
+| **R2** | Durable latest bytes for **binaries** plus `_manifest.json`. Text bodies never use R2 after storage migration. |
 | **D1** | Auth, devices, search/FTS, tags/backlinks, GitHub remote config. Not the live file store. |
 | **Artifacts** | Default sealed Git history (append-only snapshots). |
 | **GitHub** (optional) | If configured, seal prefers GitHub; inbound reconcile runs before push. |
@@ -23,15 +23,9 @@ Authority for “what is the current text of `note.md`?” is always the **Durab
 
 ---
 
-## Roadmap (accepted, not shipped)
+## Storage decisions
 
-See [ADR 0010](adr/0010-do-sqlite-text-and-conflict-resolve.md) and the full plan [`proposals/sqlite-text-and-conflict-ux.md`](proposals/sqlite-text-and-conflict-ux.md):
-
-1. Move all text latest content into **DO SQLite** (chunked); **no R2 for text** after migration.
-2. Keep one full-text **checkpoint at `minAck`** (least common device ack) + forward diffs to head.
-3. Structured conflicts + resolve API + web then plugin UX; delete Conflict Notes on resolve.
-
-Until that lands, the rest of this document describes **current** production behavior (text still flushed to R2).
+[ADR 0010](adr/0010-do-sqlite-text-and-conflict-resolve.md) defines text storage, chunking, and retained merge history. [ADR 0011](adr/0011-structured-conflict-resolution.md) defines conflict creation and resolution. The detailed implementation plan is retained in [`proposals/sqlite-text-and-conflict-ux.md`](proposals/sqlite-text-and-conflict-ux.md).
 
 ---
 
@@ -41,32 +35,34 @@ Until that lands, the rest of this document describes **current** production beh
   Obsidian disk ◄──patch/put/notify──► Worker ──► VaultCoordinator
   Browser editor ◄──PUT + WS──────────┘                 │
                                                         │
-                              live head (SQLite manifest + pending_ops
-                                         + in-memory text cache)
-                                                        │
-                         flush (~10s / 250 ops)         │ seal (~5 min)
-                                ▼                       ▼
-                               R2                 Artifacts
-                                                  (or GitHub)
+                              DO SQLite
+                       manifest + chunked text heads
+                    checkpoint/diffs + acks + conflicts
+                            │                    │
+               binary + manifest flush          │ seal (~5 min)
+                            ▼                    ▼
+                           R2              Artifacts/GitHub
 ```
 
-Writes are accepted in the DO **immediately**. R2 is updated on a short debounce. History is sealed on a longer debounce.
+Writes are accepted in the DO **immediately**. Binary bytes and the optional manifest mirror are flushed to R2; text bodies stay in SQLite. History is sealed on a longer debounce.
 
 ---
 
 ## Revisions and the manifest
 
-Every file has a monotonic **`revision`** integer. Clients must say which revision they edited (`baseRevision`).
+Every file has a monotonic **`revision`** integer. Clients must say which revision they edited (`baseRevision`). The DO stores the live manifest in `manifest_entries`.
 
-The DO stores the live manifest in SQLite (`manifest_entries`). On flush it also writes `{vaultId}/_manifest.json` to R2.
+For `isTextContentType` entries, the materialized head is stored in `text_files` plus UTF-8-safe `text_chunks`. A new or migrated text file starts with a full checkpoint. Each later commit stores the canonical forward diff from the previous server head in `text_updates` (with chunk rows for oversized patches).
 
-Text that was accepted but not yet flushed may exist only as:
+For each path, retained merge history is:
 
-1. the last R2 blob for that path, plus
-2. an ordered list of `pending_ops` (put / patch / rename / delete) in DO SQLite, plus
-3. an in-memory `headContent` cache.
+1. one full-text checkpoint at `minAck`, the least revision acknowledged by retained clients;
+2. contiguous forward diffs from `minAck` to head; and
+3. the materialized chunked head for cheap reads.
 
-`headText(path)` reconstructs current text from those layers. That is why a read right after a save is correct even before R2 catches up.
+Plugin devices stop retaining history after 30 days without activity. Browser acknowledgements expire after 24 hours. When `minAck` advances, the DO reconstructs that revision, replaces the checkpoint, and deletes obsolete diffs. A client older than the checkpoint takes the conflict path; the server never substitutes the current head as a fake merge base.
+
+Text bodies are not written to or read from R2 once `storage_version` is 2. Migration materializes legacy R2 text into SQLite, verifies it, writes the initial checkpoint, deletes the legacy object, and then marks the vault migrated.
 
 ---
 
@@ -78,18 +74,18 @@ Text that was accepted but not yet flushed may exist only as:
 2. Save calls `PUT /api/vaults/:id/files/*` with body `{ content }` and header `X-Base-Revision`.
 3. Route calls `VaultCoordinator.syncPutFile(...)`.
 4. DO `applyPut`:
-   - **Same revision (or no base):** accept, bump revision, record a pending op, broadcast a `change` notification (usually with a patch so peers can apply cheaply).
+   - **Same revision (or a new path):** accept, bump revision, persist the new head and canonical diff, and broadcast a `change` notification (usually with a patch so peers can apply cheaply).
    - **Stale text:** three-way merge (`merge3(base, ours, theirs)`). Clean merge → new head. Overlap → leave the original file alone and write a **Conflict Note** under `.sync-conflicts/`.
    - **Stale binary:** Conflict Note only (no silent overwrite).
 
-If the HTTP layer still returns **409**, the web client can retry with the server’s `headRevision`. Many races never surface as 409 because the DO merges or emits a conflict note and returns success.
+After applying a returned server revision, the browser acknowledges it. Writes that cannot reconstruct their base return a structured conflict rather than silently rebasing against head.
 
 ### Plugin online push
 
 1. Vault watcher debounces local edits.
-2. For text with a known revision: fetch server text → build a unified diff → `POST /api/sync/:vaultId/files/*/patch` with `{ patch, baseRevision }`.
-3. DO `syncApplyPatch` uses the same merge / conflict-note rules.
-4. Binaries (and first upload) use full `PUT` with `X-Base-Revision`.
+2. The plugin sends the local bytes with the journal's true `baseRevision`.
+3. The DO uses the same text merge / conflict-note rules as web saves; binaries remain whole-object writes.
+4. The plugin applies any merged server result, updates its journal, then acknowledges the applied revision.
 
 ### Batch / seed
 
@@ -113,7 +109,7 @@ On reconnect, `syncNow` roughly:
 
 The notify WebSocket reconnecting alone does **not** replay the journal; an explicit sync pass does.
 
-Separately, the DO has its own **server WAL** (`pending_ops`) for “accepted but not yet on R2.” Do not confuse the two journals.
+Separately, the DO has a `pending_ops` queue used by binary/manifest flush and text indexing. It is not the text source of truth and is unrelated to the plugin journal.
 
 ---
 
@@ -127,7 +123,7 @@ Separately, the DO has its own **server WAL** (`pending_ops`) for “accepted bu
 Both upgrade into the same DO WebSocket room.
 
 - Clients send `{ type: "open", path }` / `{ type: "close_file" }`.
-- Server broadcasts `change`, `presence`, and `same_file_warning`.
+- Server broadcasts `change`, `conflict`, `conflict_resolved`, `presence`, and `same_file_warning`.
 - Peers ignore their own `author` echoes.
 
 Web clients try to apply an incoming patch onto a clean tab; if that fails they refetch the file. The plugin applies to disk the same way.
@@ -138,11 +134,17 @@ Web clients try to apply an incoming patch onto a clean tab; if that fails they 
 
 Concurrent typing is **not** realtime OT/CRDT. Two writers editing the same file from different bases hit **server-side three-way merge**.
 
-When merge cannot resolve overlapping hunks, Lapis writes a Markdown **Conflict Note** (both sides + context) under `.sync-conflicts/` and leaves the main file at the server head. That matches ADR 0002: visible, recoverable, never a silent clobber.
+When merge cannot resolve overlapping hunks—or the requested ancestor has been garbage-collected—Lapis writes a Markdown **Conflict Note** under `.sync-conflicts/`, stores structured server/client/base content in chunked SQLite rows, and leaves the main file at the server head. Binary conflicts follow the same record flow without text versions.
 
-**Current UX:** plugin status-bar count + open folder; web toast if a notify hits `.sync-conflicts/`. `Device.resolveConflict` is still a stub.
+The write response and `conflict` notification include the note path, original path, revisions, binary flag, and available versions. Open conflicts survive reloads and reconnects and can be listed through both web and device-authenticated APIs.
 
-**Target UX (ADR 0010):** structured `conflict` on write/notify; resolve API (keep-server / keep-client / use-merged); web banner + panel first, then plugin; **hard-delete** the Conflict Note on resolve.
+Web and plugin clients expose persistent conflict counts and a three-version review panel. Resolution is explicit:
+
+- `keep-server` preserves the current head;
+- `keep-client` commits the captured client version; or
+- `use-merged` commits edited text.
+
+Success updates the client revision/journal, broadcasts `conflict_resolved`, and hard-deletes the Conflict Note locally and on the server. If note deletion fails after the conflict is marked resolved, the alarm retries it.
 
 ---
 
@@ -150,12 +152,26 @@ When merge cannot resolve overlapping hunks, Lapis writes a Markdown **Conflict 
 
 | Alarm | Default | Effect |
 |---|---|---|
-| **Flush** | ~10s, or >250 pending ops | Materialize pending text/binaries to R2; refresh R2 manifest; update D1 FTS for touched text files |
+| **Flush** | ~10s, or >250 pending ops | Flush binary bytes, refresh the R2 manifest, clear applied pending rows, and update D1 FTS for touched text files; text bodies remain in SQLite |
 | **Seal** | ~5 min after dirty writes | `flushToR2` first, then commit dirty paths to **GitHub** (if configured) or **Artifacts** |
 
-Sealing is history, not the live truth. Live readers always go through the DO (which may read R2 underneath).
+Sealing is history, not the live truth. Live readers always go through the DO, which reads text from SQLite and binaries from R2.
 
 Zip export and snapshot listing read sealed history / vault content through the Worker → DO.
+
+---
+
+## Storage health metrics
+
+Each vault alarm emits a structured `lapis.storage_metrics` log event through Workers observability. It includes:
+
+- `doStorageBytes`: current SQLite database size;
+- `r2TextPuts`: cumulative instrumented text-body puts to R2 (must remain `0` for migrated vaults);
+- `textFileCount`, `textUpdateCount`, and `maxChainLength`;
+- `maxAckLagRevisions`: largest head-to-checkpoint revision gap;
+- open/resolved conflict counts and `conflictResolveRate`.
+
+The same snapshot is available from the coordinator's `getStorageMetrics()` RPC for tests and diagnostics. Alert on any post-migration `r2TextPuts`, sustained database growth, deep chains/ack lag, or conflict resolution regressions.
 
 ---
 
@@ -164,8 +180,9 @@ Zip export and snapshot listing read sealed history / vault content through the 
 | Concern | Where |
 |---|---|
 | DO writes, flush, seal, WS | `worker/src/vault/coordinator.ts` |
+| Text chunks, checkpoints, diffs, acks | `worker/src/vault/text-store.ts` |
 | Diff / patch / merge3 | `worker/src/vault/patch.ts` |
-| Conflict notes | `worker/src/vault/conflict.ts` |
+| Conflict note format | `worker/src/vault/conflict.ts` |
 | Web vault HTTP | `worker/src/vault/routes.ts` |
 | Plugin sync HTTP | `worker/src/sync/routes.ts` |
 | Notify upgrade | `worker/src/notify/routes.ts` |
@@ -182,7 +199,9 @@ Zip export and snapshot listing read sealed history / vault content through the 
 2. Clients never write R2 or D1 FTS directly.
 3. Text sync is patch-oriented; binaries are whole-object.
 4. Unresolvable overlap → Conflict Note, not last-write-wins on the main path.
-5. R2 can lag the DO head by seconds; that is intentional.
-6. Secrets (Artifacts tokens, GitHub PATs) stay server-side.
+5. Revision acknowledgement happens only after a client successfully applies the matching server content.
+6. R2 contains no text body after storage migration; it may lag binary heads by seconds.
+7. Conflict resolution is idempotence-protected by the open conflict row and hard-deletes its note.
+8. Secrets (Artifacts tokens, GitHub PATs) stay server-side.
 
-For *why* these choices exist, see [`adr/`](adr/), especially 0001–0004 and 0007.
+For *why* these choices exist, see [`adr/`](adr/), especially 0001–0004, 0007, 0010, and 0011.
