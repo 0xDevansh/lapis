@@ -7,6 +7,9 @@ export const R2_TEXT_STORAGE_VERSION = 1 as const;
 export const SQLITE_TEXT_STORAGE_VERSION = 2 as const;
 export const CURRENT_STORAGE_VERSION = SQLITE_TEXT_STORAGE_VERSION;
 export const STORAGE_VERSION_STATE_KEY = "storage_version";
+export const TEXT_MIGRATION_STATE_KEY = "text_migration_status";
+
+export type TextMigrationStatus = "pending" | "complete" | "failed";
 
 export type StorageVersion = number;
 

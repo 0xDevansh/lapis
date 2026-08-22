@@ -29,6 +29,7 @@ import {
   R2_TEXT_STORAGE_VERSION,
   SQLITE_TEXT_STORAGE_VERSION,
   STORAGE_VERSION_STATE_KEY,
+  TEXT_MIGRATION_STATE_KEY,
   isTextContentType,
   type AckRequest,
   type ConflictPayload,
@@ -852,12 +853,80 @@ export class VaultCoordinator extends DurableObject<Env> {
 
   private async ensureManifestLoaded(vaultId: string): Promise<void> {
     const existing = this.sql.exec(`SELECT path_lower FROM manifest_entries LIMIT 1`).toArray();
-    if (existing.length > 0) return;
-    const obj = await this.env.VAULT_BUCKET.get(manifestKey(vaultId));
-    if (!obj) return;
-    const manifest = (await obj.json()) as VaultManifest;
-    for (const entry of Object.values(manifest.entries)) {
-      this.upsertEntry(entry, entry.revision);
+    if (existing.length === 0) {
+      const obj = await this.env.VAULT_BUCKET.get(manifestKey(vaultId));
+      if (!obj) return;
+      const manifest = (await obj.json()) as VaultManifest;
+      for (const entry of Object.values(manifest.entries)) {
+        this.upsertEntry(entry, entry.revision);
+      }
+    }
+    await this.ensureTextStorageMigrated(vaultId);
+  }
+
+  private async ensureTextStorageMigrated(vaultId: string): Promise<void> {
+    if (this.getStorageVersion() >= SQLITE_TEXT_STORAGE_VERSION) return;
+
+    await this.setState(TEXT_MIGRATION_STATE_KEY, "pending");
+    const entries = Object.values(this.manifestFromSql(vaultId).entries).filter((entry) =>
+      isTextContentType(entry.contentType)
+    );
+
+    try {
+      for (const entry of entries) {
+        const text = await this.materializeText(vaultId, entry.path);
+        const existing = this.textStore.readFile(entry.path);
+        const existingMatches =
+          existing?.metadata.revision === entry.revision &&
+          existing.metadata.size === entry.size &&
+          existing.text === text;
+
+        if (!existingMatches) {
+          this.textStore.writeFile({
+            path: entry.path,
+            revision: entry.revision,
+            contentType: entry.contentType,
+            updatedAt: entry.updatedAt,
+            text,
+          });
+        }
+
+        const stored = this.textStore.readFile(entry.path);
+        const storedSize = stored
+          ? new TextEncoder().encode(stored.text).byteLength
+          : -1;
+        if (
+          !stored ||
+          stored.metadata.revision !== entry.revision ||
+          stored.metadata.contentType !== entry.contentType ||
+          stored.metadata.size !== entry.size ||
+          storedSize !== entry.size ||
+          stored.text !== text
+        ) {
+          await this.setState(TEXT_MIGRATION_STATE_KEY, "failed");
+          throw Object.assign(new Error(`Text migration verification failed for ${entry.path}`), {
+            status: 500,
+          });
+        }
+
+        this.textStore.writeCheckpoint({
+          path: entry.path,
+          revision: entry.revision,
+          text,
+          createdAt: entry.updatedAt,
+        });
+        await this.env.VAULT_BUCKET.delete(
+          contentKey(vaultId, this.r2BasePathFor(entry.path))
+        );
+        this.setR2Revision(entry.path, 0);
+        this.headContent.delete(lowerPath(entry.path));
+      }
+
+      await this.setState(STORAGE_VERSION_STATE_KEY, String(SQLITE_TEXT_STORAGE_VERSION));
+      await this.setState(TEXT_MIGRATION_STATE_KEY, "complete");
+    } catch (error) {
+      await this.setState(TEXT_MIGRATION_STATE_KEY, "failed");
+      throw error;
     }
   }
 

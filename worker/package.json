@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "migrate": "wrangler d1 migrations apply lapis-db --local",
     "migrate:remote": "wrangler d1 migrations apply lapis-db --remote",
-    "test": "vitest run",
+    "test": "vitest run --max-workers=1 --no-isolate",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

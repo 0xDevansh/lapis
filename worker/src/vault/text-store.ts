@@ -110,6 +110,14 @@ export function chunkUtf8(text: string, chunkSize = TEXT_CHUNK_SIZE): TextChunk[
 export class TextStore {
   constructor(private readonly storage: DurableObjectStorage) {}
 
+  hasHead(path: string): boolean {
+    const row = this.storage.sql.exec(
+      `SELECT path_lower FROM text_files WHERE path_lower = ?`,
+      lowerPath(path)
+    ).toArray()[0];
+    return Boolean(row);
+  }
+
   writeFile(input: {
     path: string;
     revision: number;
@@ -155,6 +163,40 @@ export class TextStore {
       size,
       chunkCount: chunks.length,
     };
+  }
+
+  writeCheckpoint(input: {
+    path: string;
+    revision: number;
+    text: string;
+    createdAt?: string;
+  }): void {
+    const pathLower = lowerPath(input.path);
+    const chunks = chunkUtf8(input.text);
+    const size = chunks.reduce((total, chunk) => total + chunk.data.byteLength, 0);
+
+    this.storage.transactionSync(() => {
+      const sql = this.storage.sql;
+      sql.exec(`DELETE FROM text_checkpoint_chunks WHERE path_lower = ?`, pathLower);
+      for (const chunk of chunks) {
+        sql.exec(
+          `INSERT INTO text_checkpoint_chunks (path_lower, chunk_idx, data) VALUES (?, ?, ?)`,
+          pathLower,
+          chunk.index,
+          chunk.data
+        );
+      }
+      sql.exec(
+        `INSERT OR REPLACE INTO text_checkpoints
+         (path_lower, revision, size, chunk_count, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        pathLower,
+        input.revision,
+        size,
+        chunks.length,
+        input.createdAt ?? new Date().toISOString()
+      );
+    });
   }
 
   readFile(path: string): { metadata: TextFileMetadata; text: string } | null {

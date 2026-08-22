@@ -260,4 +260,128 @@ describe("SQLite text heads", () => {
       Array.from(new Uint8Array(await storedBinary!.arrayBuffer()))
     ).toEqual(Array.from(binary));
   });
+
+  it("migrates legacy R2 text into SQLite and deletes only verified text keys", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const textPath = "legacy/note.md";
+    const binaryPath = "legacy/image.png";
+    const text = "legacy text\nwith unicode 😀";
+    const textBytes = new TextEncoder().encode(text);
+    const binary = new Uint8Array([9, 8, 7]);
+    const updatedAt = new Date().toISOString();
+
+    await runInDurableObject(stub, async (instance: VaultCoordinator, state) => {
+      const bucket = (
+        instance as unknown as { env: { VAULT_BUCKET: R2Bucket } }
+      ).env.VAULT_BUCKET;
+      await bucket.put(contentKey(vaultId, textPath), textBytes.buffer as ArrayBuffer, {
+        httpMetadata: { contentType: "text/markdown" },
+      });
+      await bucket.put(contentKey(vaultId, binaryPath), binary.buffer as ArrayBuffer, {
+        httpMetadata: { contentType: "image/png" },
+      });
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO do_state (key, value) VALUES ('storage_version', '1')`
+      );
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO manifest_entries
+         (path_lower, path, size, content_type, updated_at, revision, r2_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        textPath.toLowerCase(),
+        textPath,
+        textBytes.byteLength,
+        "text/markdown",
+        updatedAt,
+        3,
+        3
+      );
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO manifest_entries
+         (path_lower, path, size, content_type, updated_at, revision, r2_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        binaryPath.toLowerCase(),
+        binaryPath,
+        binary.byteLength,
+        "image/png",
+        updatedAt,
+        1,
+        1
+      );
+    });
+
+    const content = await stub.getContent(vaultId, textPath);
+    expect(new TextDecoder().decode(content?.bytes)).toBe(text);
+    expect(await stub.getStorageVersion()).toBe(SQLITE_TEXT_STORAGE_VERSION);
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, textPath))).toBeNull();
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, binaryPath))).not.toBeNull();
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const head = state.storage.sql
+        .exec(`SELECT revision, size FROM text_files WHERE path_lower = ?`, textPath.toLowerCase())
+        .toArray()[0];
+      const checkpoint = state.storage.sql
+        .exec(`SELECT revision, size FROM text_checkpoints WHERE path_lower = ?`, textPath.toLowerCase())
+        .toArray()[0];
+      const r2Revision = state.storage.sql
+        .exec<{ r2Revision: number }>(
+          `SELECT r2_revision AS r2Revision FROM manifest_entries WHERE path_lower = ?`,
+          textPath.toLowerCase()
+        )
+        .toArray()[0]?.r2Revision;
+
+      expect(head).toMatchObject({ revision: 3, size: textBytes.byteLength });
+      expect(checkpoint).toMatchObject({ revision: 3, size: textBytes.byteLength });
+      expect(r2Revision).toBe(0);
+    });
+  });
+
+  it("folds legacy pending text patches before migrating from R2", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const path = "legacy/pending.md";
+    const original = "alpha\nbeta\n";
+    const modified = "alpha\nbeta changed\n";
+    const originalBytes = new TextEncoder().encode(original);
+    const modifiedBytes = new TextEncoder().encode(modified);
+    const patch = createPatch(path, original, modified, 1);
+    const updatedAt = new Date().toISOString();
+
+    await runInDurableObject(stub, async (instance: VaultCoordinator, state) => {
+      const bucket = (
+        instance as unknown as { env: { VAULT_BUCKET: R2Bucket } }
+      ).env.VAULT_BUCKET;
+      await bucket.put(contentKey(vaultId, path), originalBytes.buffer as ArrayBuffer, {
+        httpMetadata: { contentType: "text/markdown" },
+      });
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO do_state (key, value) VALUES ('storage_version', '1')`
+      );
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO manifest_entries
+         (path_lower, path, size, content_type, updated_at, revision, r2_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        path.toLowerCase(),
+        path,
+        modifiedBytes.byteLength,
+        "text/markdown",
+        updatedAt,
+        2,
+        1
+      );
+      state.storage.sql.exec(
+        `INSERT INTO pending_ops
+         (path_lower, kind, path, patch, content_type, base_revision, new_revision, author, ts)
+         VALUES (?, 'patch', ?, ?, 'text/markdown', 1, 2, 'legacy', ?)`,
+        path.toLowerCase(),
+        path,
+        patch,
+        updatedAt
+      );
+    });
+
+    const content = await stub.getContent(vaultId, path);
+    expect(new TextDecoder().decode(content?.bytes)).toBe(modified);
+    expect(await env.VAULT_BUCKET.get(contentKey(vaultId, path))).toBeNull();
+  });
 });
