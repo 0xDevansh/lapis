@@ -1,6 +1,7 @@
 import { Modal, Notice, setIcon } from "obsidian";
 import type { App } from "obsidian";
 import { pollDeviceToken } from "../net/device-auth";
+import type { SyncProgress } from "../sync/engine";
 import type { DeviceAuthChallenge } from "../types";
 import { serverHostname, shortVaultId } from "../vault-link";
 
@@ -9,7 +10,10 @@ interface ConnectModalOptions {
   vaultId: string;
   challenge: DeviceAuthChallenge;
   fetchToken: (deviceCode: string) => Promise<{ status: "pending" } | { status: "approved"; token: string; deviceId: string } | { status: "denied" | "expired" | "not_found" }>;
-  onConnected: (connection: { token: string; deviceId: string }) => Promise<void>;
+  onConnected: (
+    connection: { token: string; deviceId: string },
+    onProgress: (progress: SyncProgress) => void
+  ) => Promise<void>;
   onDone?: () => void;
 }
 
@@ -53,6 +57,13 @@ export class ConnectModal extends Modal {
     const status = contentEl.createEl("p", { cls: "lapis-connect-status", text: "Waiting for approval…" });
     const spinner = contentEl.createDiv({ cls: "lapis-connecting-spinner" });
     setIcon(spinner, "loader");
+    const progressBar = contentEl.createEl("progress", {
+      cls: "lapis-connect-progress",
+      attr: { "aria-label": "Initial sync progress" },
+    });
+    progressBar.max = 1;
+    progressBar.value = 0;
+    progressBar.hide();
 
     void pollDeviceToken({
       deviceCode: this.options.challenge.deviceCode,
@@ -60,9 +71,31 @@ export class ConnectModal extends Modal {
       signal: this.controller.signal,
     })
       .then(async (connection) => {
-        status.setText("Approved — syncing…");
-        await this.options.onConnected(connection);
+        status.setText("Approved — preparing sync…");
+        progressBar.show();
+        progressBar.removeAttribute("value");
+        await this.options.onConnected(connection, (progress) => {
+          status.setText(`Approved — ${lowercaseFirst(progress.message)}`);
+          if (progress.total > 0 && progress.phase !== "sealing") {
+            progressBar.max = progress.total;
+            progressBar.value = progress.current;
+          } else {
+            progressBar.removeAttribute("value");
+          }
+          progressBar.setAttr(
+            "aria-valuetext",
+            progress.total > 0
+              ? `${progress.current} of ${progress.total} files`
+              : progress.message
+          );
+        });
+        progressBar.max = 1;
+        progressBar.value = 1;
+        status.setText("Synced");
+        spinner.empty();
+        setIcon(spinner, "check");
         new Notice("Lapis: connected");
+        await delay(600);
         this.close();
       })
       .catch((error: unknown) => {
@@ -71,6 +104,11 @@ export class ConnectModal extends Modal {
           new Notice(`Lapis: ${message.toLowerCase()}`);
         }
         status.setText(message);
+        progressBar.max = 1;
+        progressBar.value = 0;
+        progressBar.addClass("lapis-connect-progress--error");
+        spinner.empty();
+        setIcon(spinner, "circle-x");
       });
   }
 
@@ -99,4 +137,12 @@ export class ConnectModal extends Modal {
     }
     return `${this.options.serverUrl.replace(/\/$/, "")}${this.options.challenge.verificationUri}`;
   }
+}
+
+function lowercaseFirst(value: string): string {
+  return value.length === 0 ? value : value[0].toLowerCase() + value.slice(1);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }

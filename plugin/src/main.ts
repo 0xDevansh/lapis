@@ -3,7 +3,7 @@ import { LapisClient } from "./net/client";
 import { NotifyClient, type NotifyMessage } from "./net/notify";
 import { LapisSettingTab, normalizeSettings } from "./settings";
 import type { LapisSettings, PluginData, SyncJournal } from "./types";
-import { SyncEngine } from "./sync/engine";
+import { SyncEngine, type SyncProgress } from "./sync/engine";
 import { isValidJournal } from "./sync/journal";
 import { ConnectModal } from "./ui/connect-modal";
 import { countConflicts, LapisStatusBar } from "./ui/status";
@@ -45,6 +45,12 @@ export default class LapisPlugin extends Plugin {
       id: "sync-now",
       name: "Sync now",
       callback: () => void this.syncNow(),
+    });
+
+    this.addCommand({
+      id: "force-full-reconcile",
+      name: "Force full reconcile",
+      callback: () => void this.forceFullReconcile(),
     });
 
     this.addCommand({
@@ -114,14 +120,14 @@ export default class LapisPlugin extends Plugin {
         vaultId: this.settings.vaultId,
         challenge,
         fetchToken: (deviceCode) => client.pollDeviceToken(deviceCode),
-        onConnected: async ({ token, deviceId }) => {
+        onConnected: async ({ token, deviceId }, onProgress) => {
           this.settings.syncToken = token;
           this.settings.deviceId = deviceId;
           this.settings.lastConnectedAt = new Date().toISOString();
           await this.saveSettings();
           this.refreshSettingsTab();
+          await this.syncNow(onProgress);
           this.startNotify();
-          await this.syncNow();
         },
         onDone: () => this.updateStatus(),
       }).open();
@@ -161,12 +167,18 @@ export default class LapisPlugin extends Plugin {
     }
   }
 
-  async syncNow() {
+  async syncNow(onProgress?: (progress: SyncProgress) => void) {
     if (!this.settings.syncToken) {
       new Notice("Lapis: connect before syncing");
       return;
     }
 
+    onProgress?.({
+      phase: "scanning",
+      current: 0,
+      total: 0,
+      message: "Starting sync…",
+    });
     await this.enqueueSync(async () => {
       this.updateStatus("syncing");
       const previousSuppress = this.suppressWatcher;
@@ -177,6 +189,7 @@ export default class LapisPlugin extends Plugin {
         client: new LapisClient(this.settings.serverUrl),
         getJournal: () => this.journal,
         setJournal: (journal) => this.saveJournal(journal),
+        onProgress,
       });
       try {
         if (this.journal) {
@@ -196,6 +209,45 @@ export default class LapisPlugin extends Plugin {
         this.updateStatus("error");
         const message = error instanceof Error ? error.message : "Sync failed";
         new Notice(`Lapis: ${message}`);
+        if (onProgress) throw error;
+      } finally {
+        this.suppressWatcher = previousSuppress;
+      }
+    }, Boolean(onProgress));
+  }
+
+  async forceFullReconcile(): Promise<void> {
+    if (!this.settings.syncToken) {
+      new Notice("Lapis: connect before syncing");
+      return;
+    }
+
+    const progressNotice = new Notice("Lapis: starting full reconcile…", 0);
+    await this.enqueueSync(async () => {
+      this.updateStatus("syncing");
+      const previousSuppress = this.suppressWatcher;
+      this.suppressWatcher = true;
+      const engine = new SyncEngine({
+        app: this.app,
+        settings: this.settings,
+        client: new LapisClient(this.settings.serverUrl),
+        getJournal: () => this.journal,
+        setJournal: (journal) => this.saveJournal(journal),
+        onProgress: (progress) => {
+          progressNotice.setMessage(`Lapis: ${progress.message}`);
+        },
+      });
+      try {
+        await engine.forceReconcile();
+        this.updateStatus();
+        progressNotice.setMessage("Lapis: full reconcile complete");
+        window.setTimeout(() => progressNotice.hide(), 3_000);
+      } catch (error) {
+        this.updateStatus("error");
+        const message = error instanceof Error ? error.message : "Full reconcile failed";
+        progressNotice.setMessage(`Lapis: ${message}`);
+        window.setTimeout(() => progressNotice.hide(), 8_000);
+        console.error("[lapis] full reconcile failed", error);
       } finally {
         this.suppressWatcher = previousSuppress;
       }
@@ -381,11 +433,12 @@ export default class LapisPlugin extends Plugin {
     this.modifyTimers.set(path, timer);
   }
 
-  private enqueueSync(run: () => Promise<void>): Promise<void> {
-    this.syncChain = this.syncChain.then(run).catch((error) => {
+  private enqueueSync(run: () => Promise<void>, propagateError = false): Promise<void> {
+    const queued = this.syncChain.then(run);
+    this.syncChain = queued.catch((error) => {
       console.error("[lapis] sync chain error", error);
     });
-    return this.syncChain;
+    return propagateError ? queued : this.syncChain;
   }
 
   private async runSync(action: (engine: SyncEngine) => Promise<void>, suppressWatcher = false, onFailure?: (engine: SyncEngine) => Promise<void>) {

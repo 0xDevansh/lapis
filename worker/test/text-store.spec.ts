@@ -37,7 +37,10 @@ describe("SQLite text heads", () => {
 
   it("splits chunks only at valid UTF-8 boundaries", () => {
     const chunks = chunkUtf8("1234567😀abcdef", 8);
-    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const decoder = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: false,
+    });
     const decoded = chunks.map((chunk) => decoder.decode(chunk.data));
 
     expect(decoded.join("")).toBe("1234567😀abcdef");
@@ -73,7 +76,10 @@ describe("SQLite text heads", () => {
           )
           .toArray();
         expect(rows.length).toBeGreaterThan(1);
-        const decoder = new TextDecoder("utf-8", { fatal: true });
+        const decoder = new TextDecoder("utf-8", {
+          fatal: true,
+          ignoreBOM: false,
+        });
         for (let index = 0; index < rows.length; index++) {
           expect(rows[index].chunkIndex).toBe(index);
           expect(() => decoder.decode(rows[index].data)).not.toThrow();
@@ -185,8 +191,73 @@ describe("SQLite text heads", () => {
     expect(second.revision).toBe(first.revision + 1);
     const content = await stub.getContent(vaultId, path);
     expect(
-      new TextDecoder("utf-8", { ignoreBOM: true }).decode(content?.bytes)
+      new TextDecoder("utf-8", {
+        fatal: false,
+        ignoreBOM: true,
+      }).decode(content?.bytes)
     ).toBe(modified);
     expect(await env.VAULT_BUCKET.get(contentKey(vaultId, path))).toBeNull();
+  });
+
+  it("serves a mixed first seed through every coordinator read helper", async () => {
+    const vaultId = crypto.randomUUID();
+    const stub = await initialize(vaultId);
+    const files = [
+      { path: "notes/one.md", contentType: "text/markdown", text: "# One" },
+      { path: "data.json", contentType: "application/json", text: "{\"ok\":true}" },
+      { path: "diagram.svg", contentType: "image/svg+xml", text: "<svg></svg>" },
+    ];
+    const binaryPath = "attachments/pixel.png";
+    const binary = new Uint8Array([137, 80, 78, 71]);
+
+    for (const file of files) {
+      await stub.syncPutFile(
+        vaultId,
+        file.path,
+        new TextEncoder().encode(file.text).buffer as ArrayBuffer,
+        file.contentType
+      );
+    }
+    await stub.syncPutFile(
+      vaultId,
+      binaryPath,
+      binary.buffer as ArrayBuffer,
+      "image/png"
+    );
+    await stub.flushToR2(vaultId);
+
+    await runInDurableObject(stub, async (instance: VaultCoordinator) => {
+      (
+        instance as unknown as {
+          headContent: Map<string, string>;
+        }
+      ).headContent.clear();
+    });
+
+    const manifest = await stub.getManifest(vaultId);
+    expect(Object.keys(manifest.entries)).toHaveLength(files.length + 1);
+
+    const listed = await stub.listContent(vaultId);
+    const listedByPath = new Map(
+      listed.map((entry) => [entry.path, entry.data])
+    );
+    for (const file of files) {
+      expect(new TextDecoder().decode(listedByPath.get(file.path))).toBe(
+        file.text
+      );
+      expect(
+        await env.VAULT_BUCKET.get(contentKey(vaultId, file.path))
+      ).toBeNull();
+    }
+    expect(Array.from(listedByPath.get(binaryPath) ?? [])).toEqual(
+      Array.from(binary)
+    );
+    const storedBinary = await env.VAULT_BUCKET.get(
+      contentKey(vaultId, binaryPath)
+    );
+    expect(storedBinary).not.toBeNull();
+    expect(
+      Array.from(new Uint8Array(await storedBinary!.arrayBuffer()))
+    ).toEqual(Array.from(binary));
   });
 });

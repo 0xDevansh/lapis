@@ -3,7 +3,7 @@ import type { App, Vault } from "obsidian";
 import { LapisClient, StaleWriteError } from "../net/client";
 import type { LapisSettings, ManifestEntry, SyncJournal, VaultManifest } from "../types";
 import { applyPatch, createPatch } from "./diff";
-import { bytesToBase64, sha256Hex } from "./hash";
+import { base64ToBytes, bytesToBase64, sha256Hex } from "./hash";
 import { appendPendingOp, emptyJournal, removeEntry, setEntry } from "./journal";
 import { isVaultInternal, lowerPath, shouldSyncPath } from "./paths";
 
@@ -12,6 +12,13 @@ interface LocalFile {
   content: ArrayBuffer;
   contentType: string;
   hash: string;
+}
+
+export interface SyncProgress {
+  phase: "scanning" | "replaying" | "pushing" | "pulling" | "seeding" | "reconciling" | "sealing";
+  current: number;
+  total: number;
+  message: string;
 }
 
 export interface SyncDiagnostics {
@@ -32,10 +39,24 @@ export interface SyncEngineOptions {
   client: LapisClient;
   getJournal: () => SyncJournal | null;
   setJournal: (journal: SyncJournal) => Promise<void>;
+  onProgress?: (progress: SyncProgress) => void;
 }
 
 export class SyncEngine {
   constructor(private readonly options: SyncEngineOptions) {}
+
+  async forceReconcile(): Promise<void> {
+    if (!this.options.settings.syncToken) {
+      throw new Error("Connect before syncing");
+    }
+
+    await this.replayPending();
+    this.reportProgress("scanning", 0, 0, "Scanning every local file…");
+    const localFiles = await this.scanLocalFiles();
+    this.reportProgress("reconciling", 0, 0, "Loading the server manifest…");
+    const manifest = await this.client.getManifest(this.vaultId, this.token);
+    await this.reconcile(localFiles, manifest);
+  }
 
   async firstSync(): Promise<void> {
     if (!this.options.settings.syncToken) {
@@ -43,6 +64,7 @@ export class SyncEngine {
       return;
     }
 
+    this.reportProgress("scanning", 0, 0, "Scanning local vault…");
     const localFiles = await this.scanLocalFiles();
     const manifest = await this.client.getManifest(this.vaultId, this.token);
     const serverEntries = Object.values(manifest.entries);
@@ -65,11 +87,24 @@ export class SyncEngine {
       return;
     }
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    this.reportProgress("pulling", 0, 0, "Checking for server changes…");
     const manifest = await this.client.getManifest(this.vaultId, this.token);
-    for (const entry of Object.values(manifest.entries)) {
+    const changedEntries = Object.values(manifest.entries).filter((entry) => {
+      const key = lowerPath(entry.path);
+      return (journal.fileRevisions[key] ?? -1) < entry.revision;
+    });
+    let pulled = 0;
+    for (const entry of changedEntries) {
       const key = lowerPath(entry.path);
       if ((journal.fileRevisions[key] ?? -1) < entry.revision) {
         await this.pullEntry(entry, journal);
+        pulled += 1;
+        this.reportProgress(
+          "pulling",
+          pulled,
+          changedEntries.length,
+          `Downloading ${pulled} of ${changedEntries.length} changed files…`
+        );
       }
     }
     await this.options.setJournal(journal);
@@ -81,23 +116,40 @@ export class SyncEngine {
       return;
     }
 
-    const pendingOps = [...journal.pendingOps];
-    const response = await this.client.batchSync(this.vaultId, pendingOps, this.token);
-    const remaining = [...pendingOps];
-    for (const result of response.results) {
+    const total = journal.pendingOps.length;
+    this.reportProgress("replaying", 0, total, `Uploading 0 of ${total} queued changes…`);
+    for (let completed = 0; completed < total; completed += 1) {
+      const op = journal.pendingOps[0];
+      if (!op) break;
+      const response = await this.client.batchSync(this.vaultId, [op], this.token);
+      const result = response.results[0];
+      if (!result) {
+        throw new Error(`Queued sync returned no result for ${pendingOpPath(op)}`);
+      }
       if (result.entry) {
-        setEntry(journal, result.entry);
+        const hash =
+          op.op === "put"
+            ? await sha256Hex(base64ToBytes(op.contentBase64))
+            : undefined;
+        setEntry(journal, result.entry, hash);
       }
       if (result.status === "accepted" && result.op === "delete") {
         removeEntry(journal, result.path);
       }
-      if (result.status === "accepted") {
-        remaining.shift();
+      if (result.status !== "accepted") {
+        throw new Error(
+          `Queued sync failed for ${result.path}: ${result.error ?? result.status}`
+        );
       }
+      journal.pendingOps.shift();
+      await this.options.setJournal(journal);
+      this.reportProgress(
+        "replaying",
+        completed + 1,
+        total,
+        `Uploading ${completed + 1} of ${total} queued changes…`
+      );
     }
-    journal.pendingOps = remaining;
-    await this.options.setJournal(journal);
-    await this.pullChanged();
   }
 
   async pushLocalChanges(): Promise<{ pushed: number; deleted: number }> {
@@ -106,23 +158,43 @@ export class SyncEngine {
     }
 
     const journal = this.options.getJournal() ?? emptyJournal(this.vaultId);
+    this.reportProgress("scanning", 0, 0, "Scanning local vault…");
     const localFiles = await this.scanLocalFiles();
     const localByPath = new Map(localFiles.map((file) => [lowerPath(file.path), file]));
+    const changedFiles = localFiles.filter(
+      (file) => journal.fileHashes[lowerPath(file.path)] !== file.hash
+    );
+    const deletedPaths = Object.keys(journal.fileRevisions).filter(
+      (key) => !localByPath.has(key)
+    );
+    const total = changedFiles.length + deletedPaths.length;
     let pushed = 0;
     let deleted = 0;
+    let completed = 0;
 
-    for (const file of localFiles) {
-      if (journal.fileHashes[lowerPath(file.path)] !== file.hash) {
-        await this.pushPut(file.path);
-        pushed += 1;
-      }
+    this.reportProgress("pushing", 0, total, `Uploading 0 of ${total} local changes…`);
+    for (const file of changedFiles) {
+      await this.pushPut(file.path);
+      pushed += 1;
+      completed += 1;
+      this.reportProgress(
+        "pushing",
+        completed,
+        total,
+        `Uploading ${completed} of ${total} local changes…`
+      );
     }
 
-    for (const key of Object.keys(journal.fileRevisions)) {
-      if (!localByPath.has(key)) {
-        await this.pushDelete(key);
-        deleted += 1;
-      }
+    for (const key of deletedPaths) {
+      await this.pushDelete(key);
+      deleted += 1;
+      completed += 1;
+      this.reportProgress(
+        "pushing",
+        completed,
+        total,
+        `Uploading ${completed} of ${total} local changes…`
+      );
     }
 
     return { pushed, deleted };
@@ -326,6 +398,12 @@ export class SyncEngine {
   private async seedLocal(localFiles: LocalFile[]) {
     const journal = emptyJournal(this.vaultId);
     let count = 0;
+    this.reportProgress(
+      "seeding",
+      0,
+      localFiles.length,
+      `Uploading 0 of ${localFiles.length} files…`
+    );
     for (const file of localFiles) {
       count += 1;
       if (count === 1 || count % 20 === 0 || count === localFiles.length) {
@@ -334,11 +412,26 @@ export class SyncEngine {
       const entry = await this.client.seedFile(this.vaultId, file.path, file.content, file.contentType, this.token);
       if (entry) {
         setEntry(journal, entry, file.hash);
+        // Persist each accepted upload so a failed or slow initial seal does
+        // not make the next sync start the entire seed again.
+        await this.options.setJournal(journal);
       }
+      this.reportProgress(
+        "seeding",
+        count,
+        localFiles.length,
+        `Uploading ${count} of ${localFiles.length} files…`
+      );
     }
 
+    new Notice("Lapis: uploads complete — sealing initial history");
+    this.reportProgress(
+      "sealing",
+      localFiles.length,
+      localFiles.length,
+      "Uploads complete — sealing initial history…"
+    );
     await this.client.completeSeed(this.vaultId, this.token);
-    await this.options.setJournal(journal);
     new Notice("Lapis: seed complete — initial history sealed");
   }
 
@@ -346,6 +439,12 @@ export class SyncEngine {
     const journal = emptyJournal(this.vaultId);
     const entries = Object.values(manifest.entries);
     let count = 0;
+    this.reportProgress(
+      "pulling",
+      0,
+      entries.length,
+      `Downloading 0 of ${entries.length} files…`
+    );
     for (const entry of entries) {
       count += 1;
       if (count === 1 || count % 20 === 0 || count === entries.length) {
@@ -354,6 +453,12 @@ export class SyncEngine {
       const content = await this.client.getFile(this.vaultId, entry.path, this.token);
       await this.writeLocal(entry.path, content, entry.contentType);
       setEntry(journal, entry, await sha256Hex(content));
+      this.reportProgress(
+        "pulling",
+        count,
+        entries.length,
+        `Downloading ${count} of ${entries.length} files…`
+      );
     }
     await this.options.setJournal(journal);
     new Notice("Lapis: pull complete");
@@ -365,6 +470,7 @@ export class SyncEngine {
     const serverByPath = new Map(Object.values(manifest.entries).map((entry) => [lowerPath(entry.path), entry]));
     const keys = new Set([...localByPath.keys(), ...serverByPath.keys()]);
     let count = 0;
+    this.reportReconcileProgress(0, keys.size);
 
     for (const key of keys) {
       count += 1;
@@ -378,11 +484,13 @@ export class SyncEngine {
       if (local && !server) {
         const entry = await this.client.putFile(this.vaultId, local.path, local.content, local.contentType, this.token);
         setEntry(journal, entry, local.hash);
+        this.reportReconcileProgress(count, keys.size);
         continue;
       }
 
       if (!local && server) {
         await this.pullEntry(server, journal);
+        this.reportReconcileProgress(count, keys.size);
         continue;
       }
 
@@ -397,6 +505,7 @@ export class SyncEngine {
           setEntry(journal, result, local.hash);
         }
       }
+      this.reportReconcileProgress(count, keys.size);
     }
 
     await this.options.setJournal(journal);
@@ -544,6 +653,28 @@ export class SyncEngine {
   private get token(): string {
     return this.options.settings.syncToken;
   }
+
+  private reportReconcileProgress(current: number, total: number): void {
+    this.reportProgress(
+      "reconciling",
+      current,
+      total,
+      `Reconciling ${current} of ${total} files…`
+    );
+  }
+
+  private reportProgress(
+    phase: SyncProgress["phase"],
+    current: number,
+    total: number,
+    message: string
+  ): void {
+    this.options.onProgress?.({ phase, current, total, message });
+  }
+}
+
+function pendingOpPath(op: SyncJournal["pendingOps"][number]): string {
+  return op.op === "rename" ? op.oldPath : op.path;
 }
 
 function contentTypeFromPath(path: string): string {

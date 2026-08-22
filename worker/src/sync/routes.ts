@@ -250,8 +250,25 @@ syncRoutes.put("/:vaultId/seed/files/*", requireDevice, async (c) => {
   if (!isValidVaultPath(filePath)) return c.json({ error: "Invalid path" }, 400);
   const body = await c.req.arrayBuffer();
   const contentType = (c.req.header("Content-Type") ?? detectMime(filePath)).split(";")[0].trim();
-  const entry = await stubFor(c.env, vaultId).syncPutFile(vaultId, filePath, body, contentType, undefined, device.author, device.conflictPolicy);
-  return c.json(entry, 200);
+  try {
+    const entry = await stubFor(c.env, vaultId).syncPutFile(
+      vaultId,
+      filePath,
+      body,
+      contentType,
+      undefined,
+      device.author,
+      device.conflictPolicy
+    );
+    return c.json(entry, 200);
+  } catch (error: unknown) {
+    const err = error as { status?: number; message?: string };
+    console.error(`[lapis] Seed upload failed for vault ${vaultId}, path ${filePath}:`, error);
+    return c.json(
+      { error: err.message ?? "Seed upload failed" },
+      (err.status ?? 500) as 400 | 409 | 500
+    );
+  }
 });
 
 syncRoutes.post("/:vaultId/seed/complete", requireDevice, async (c) => {
