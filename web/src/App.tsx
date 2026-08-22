@@ -98,8 +98,8 @@ class RouteErrorBoundary extends Component<
   }
 }
 
-export default function App() {
-  const { user, loading, error, signIn, signUp, signOut } = useAuth();
+function AppRoutes() {
+  const { user, loading, error, signIn, signUp, signInWithGoogle, signOut } = useAuth();
 
   if (loading) {
     return <RouteFallback />;
@@ -115,6 +115,7 @@ export default function App() {
             <AuthPage
               onSignIn={signIn}
               onSignUp={signUp}
+              onSignInWithGoogle={signInWithGoogle}
               error={error}
               loading={loading}
             />
@@ -130,24 +131,30 @@ export default function App() {
   }
 
   return (
+    <RouteErrorBoundary>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route
+            path="/"
+            element={<VaultListPage user={user} onSignOut={signOut} />}
+          />
+          <Route path="/auth" element={<Navigate to="/" replace />} />
+          <Route path="/vault/:id/devices" element={<DevicesPage />} />
+          <Route path="/vault/:id/*" element={<VaultWorkspace />} />
+          <Route
+            path="*"
+            element={<div className="p-8 text-muted">Page not found.</div>}
+          />
+        </Routes>
+      </Suspense>
+    </RouteErrorBoundary>
+  );
+}
+
+export default function App() {
+  return (
     <ToastProvider>
-      <RouteErrorBoundary>
-        <Suspense fallback={<RouteFallback />}>
-          <Routes>
-            <Route
-              path="/"
-              element={<VaultListPage user={user} onSignOut={signOut} />}
-            />
-            <Route path="/auth" element={<Navigate to="/" replace />} />
-            <Route path="/vault/:id/devices" element={<DevicesPage />} />
-            <Route path="/vault/:id/*" element={<VaultWorkspace />} />
-            <Route
-              path="*"
-              element={<div className="p-8 text-muted">Page not found.</div>}
-            />
-          </Routes>
-        </Suspense>
-      </RouteErrorBoundary>
+      <AppRoutes />
     </ToastProvider>
   );
 }

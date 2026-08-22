@@ -42,10 +42,18 @@ export function useAuth() {
       loading: s.user != null || readSessionHint(),
       error: null,
     }));
-    const session = await api.getSession();
-    const user = session?.user ?? null;
-    writeSessionHint(user != null);
-    setState({ user, loading: false, error: null });
+    try {
+      const session = await api.getSession();
+      const user = session?.user ?? null;
+      writeSessionHint(user != null);
+      setState({ user, loading: false, error: null });
+    } catch (e) {
+      setState({
+        user: null,
+        loading: false,
+        error: (e as Error).message,
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -68,8 +76,7 @@ export function useAuth() {
     async (name: string, email: string, password: string) => {
       setState((s) => ({ ...s, loading: true, error: null }));
       try {
-        await api.signUp(name, email, password);
-        const user = await api.signIn(email, password);
+        const user = await api.signUp(name, email, password);
         writeSessionHint(true);
         setState({ user, loading: false, error: null });
       } catch (e) {
@@ -84,14 +91,30 @@ export function useAuth() {
     []
   );
 
-  const signOut = useCallback(async () => {
+  const signInWithGoogle = useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      await api.signOut();
-    } finally {
-      writeSessionHint(false);
-      setState({ user: null, loading: false, error: null });
+      await api.signInWithGoogle("/");
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: (e as Error).message }));
+      throw e;
     }
   }, []);
 
-  return { ...state, signIn, signUp, signOut, refresh };
+  const signOut = useCallback(async () => {
+    try {
+      await api.signOut();
+      writeSessionHint(false);
+      setState({ user: null, loading: false, error: null });
+    } catch (e) {
+      setState((s) => ({
+        ...s,
+        loading: false,
+        error: (e as Error).message,
+      }));
+      throw e;
+    }
+  }, []);
+
+  return { ...state, signIn, signUp, signInWithGoogle, signOut, refresh };
 }

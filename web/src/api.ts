@@ -2,6 +2,7 @@
  * Thin fetch wrapper for Lapis API calls.
  * All requests are same-origin and use cookie-based auth.
  */
+import { authClient } from "./lib/auth-client";
 
 async function apiFetch<T>(
   path: string,
@@ -19,8 +20,8 @@ async function apiFetch<T>(
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
     try {
-      const body = await res.json() as { error?: string };
-      if (body.error) message = body.error;
+      const body = await res.json() as { error?: string; message?: string };
+      message = body.error ?? body.message ?? message;
     } catch {
       // ignore parse errors
     }
@@ -38,22 +39,71 @@ export interface User {
   email: string;
 }
 
+export interface AuthProviders {
+  google: boolean;
+}
+
+export async function getAuthProviders(): Promise<AuthProviders> {
+  return apiFetch<AuthProviders>("/api/auth/providers");
+}
+
+type AuthClientError = {
+  code?: string;
+  message?: string;
+};
+
+function authError(error: AuthClientError | null, fallback: string): Error {
+  const code = error?.code?.toUpperCase();
+
+  if (code === "USER_ALREADY_EXISTS" || code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL") {
+    return new Error(
+      "An account already exists with this email. Sign in with the method you originally used."
+    );
+  }
+
+  if (code === "INVALID_EMAIL_OR_PASSWORD") {
+    return new Error(
+      "Incorrect email or password. If you registered with Google, continue with Google instead."
+    );
+  }
+
+  if (code === "ACCOUNT_NOT_LINKED") {
+    return new Error(
+      "This email already uses another sign-in method. Sign in with that method first."
+    );
+  }
+
+  return new Error(error?.message ?? fallback);
+}
+
 export async function signUp(name: string, email: string, password: string): Promise<User> {
-  return apiFetch<User>("/api/auth/sign-up/email", {
-    method: "POST",
-    body: JSON.stringify({ name, email, password }),
-  });
+  const { data, error } = await authClient.signUp.email({ name, email, password });
+  if (error || !data?.user) throw authError(error, "Could not create the account");
+  return data.user;
 }
 
 export async function signIn(email: string, password: string): Promise<User> {
-  return apiFetch<User>("/api/auth/sign-in/email", {
-    method: "POST",
-    body: JSON.stringify({ email, password }),
+  const { data, error } = await authClient.signIn.email({ email, password });
+  if (error || !data?.user) throw authError(error, "Could not sign in");
+  return data.user;
+}
+
+export async function signInWithGoogle(callbackURL = "/"): Promise<void> {
+  const { data, error } = await authClient.signIn.social({
+    provider: "google",
+    callbackURL,
+    errorCallbackURL: "/auth",
+    disableRedirect: true,
   });
+
+  if (error) throw authError(error, "Could not start Google sign-in");
+  if (!data?.url) throw new Error("Google sign-in did not return a redirect URL");
+  window.location.assign(data.url);
 }
 
 export async function signOut(): Promise<void> {
-  await apiFetch<unknown>("/api/auth/sign-out", { method: "POST" });
+  const { data, error } = await authClient.signOut();
+  if (error || !data?.success) throw authError(error, "Could not sign out");
 }
 
 export interface SessionInfo {
@@ -64,11 +114,9 @@ export interface SessionInfo {
 }
 
 export async function getSession(): Promise<SessionInfo | null> {
-  try {
-    return await apiFetch<SessionInfo>("/api/auth/get-session");
-  } catch {
-    return null;
-  }
+  const { data, error } = await authClient.getSession();
+  if (error) throw authError(error, "Could not check your session");
+  return data;
 }
 
 // ── Vaults ────────────────────────────────────────────────────────────────────

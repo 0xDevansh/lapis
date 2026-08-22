@@ -3,5 +3,10 @@ BETTER_AUTH_SECRET=changeme-use-openssl-rand-hex-32
 # Local dev URL — overrides wrangler.jsonc vars when running wrangler dev
 BETTER_AUTH_URL=http://localhost:8787
 
+# Optional Google login. Set the OAuth redirect URI to:
+# http://localhost:8787/api/auth/callback/google
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+
 # Required only for GitHub remote sync (encrypts stored PATs). Generate with: openssl rand -base64 32
 # GITHUB_PAT_ENCRYPTION_KEY=

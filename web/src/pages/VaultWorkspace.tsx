@@ -22,6 +22,7 @@ import StatusBar, { type SyncState } from "../components/layout/StatusBar";
 import MobileToolbar from "../components/layout/MobileToolbar";
 import {
   FilePlus,
+  FolderPlus,
   UploadSimple,
   PencilSimple,
   Eye,
@@ -81,6 +82,15 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function parentDir(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index === -1 ? "" : path.slice(0, index);
+}
+
+function joinPath(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name;
+}
+
 function applyUnifiedPatch(original: string, patch: string): string | null {
   const lines = patch.split("\n");
   const hunkIndex = lines.findIndex((line) => line.startsWith("@@"));
@@ -114,7 +124,8 @@ function applyUnifiedPatch(original: string, patch: string): string | null {
 
 type Modal =
   | { kind: "none" }
-  | { kind: "newNote"; value: string; error: string | null }
+  | { kind: "newNote"; value: string; parent: string; error: string | null }
+  | { kind: "newFolder"; value: string; parent: string; error: string | null }
   | { kind: "rename"; path: string; value: string; error: string | null }
   | { kind: "deleteConfirm"; path: string }
   | {
@@ -154,6 +165,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const [palette, setPalette] = useState<PaletteMode | null>(null);
+  const [createParent, setCreateParent] = useState("");
   const [conflicts, setConflicts] = useState<api.ConflictPayload[]>([]);
   const [selectedConflictNote, setSelectedConflictNote] = useState<string | null>(
     null
@@ -217,6 +229,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   const openFile = useCallback(
     (path: string) => {
+      setCreateParent(parentDir(path));
       dispatch({ type: "OPEN_FILE", path });
       // On mobile, close the file tree drawer after opening a file.
       if (isMobile && !state.left.collapsed) {
@@ -224,6 +237,30 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       }
     },
     [dispatch, isMobile, state.left.collapsed]
+  );
+
+  const openNewNoteModal = useCallback(
+    (parent?: string) => {
+      setModal({
+        kind: "newNote",
+        value: "",
+        parent: parent ?? createParent,
+        error: null,
+      });
+    },
+    [createParent]
+  );
+
+  const openNewFolderModal = useCallback(
+    (parent?: string) => {
+      setModal({
+        kind: "newFolder",
+        value: "",
+        parent: parent ?? createParent,
+        error: null,
+      });
+    },
+    [createParent]
   );
 
   // Handle initial deep link (/vault/:id/file/...) once manifest is loaded.
@@ -643,14 +680,36 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
 
   async function handleCreateNote() {
     if (modal.kind !== "newNote") return;
-    let path = modal.value.trim();
-    if (!path) return;
-    if (!path.endsWith(".md")) path += ".md";
+    let name = modal.value.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    if (name.toLowerCase().endsWith(".md")) name = name.slice(0, -3);
+    if (!name || name.includes("..")) {
+      setModal({ ...modal, error: "Invalid note name" });
+      return;
+    }
+    const path = joinPath(modal.parent, `${name}.md`);
     try {
       await api.putTextFile(vaultId, path, "");
       await refreshManifest();
       setModal({ kind: "none" });
       dispatch({ type: "OPEN_FILE", path });
+    } catch (e) {
+      setModal({ ...modal, error: (e as Error).message });
+    }
+  }
+
+  async function handleCreateFolder() {
+    if (modal.kind !== "newFolder") return;
+    const name = modal.value.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!name || name.includes("..") || name.includes("/")) {
+      setModal({ ...modal, error: "Invalid folder name" });
+      return;
+    }
+    const folderPath = joinPath(modal.parent, name);
+    try {
+      await api.putTextFile(vaultId, joinPath(folderPath, ".keep"), "");
+      await refreshManifest();
+      setCreateParent(folderPath);
+      setModal({ kind: "none" });
     } catch (e) {
       setModal({ ...modal, error: (e as Error).message });
     }
@@ -780,7 +839,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         hint: "⌘N",
         keywords: "create file add",
         icon: <FilePlus size={16} />,
-        run: () => setModal({ kind: "newNote", value: "", error: null }),
+        run: () => openNewNoteModal(),
       },
       {
         id: "quick-open",
@@ -945,6 +1004,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     dispatch,
     toggleTheme,
     openSearch,
+    openNewNoteModal,
     saveTab,
     closeTab,
     guardedNavigate,
@@ -985,7 +1045,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         dispatch({ type: "TOGGLE_RIGHT" });
       } else if (k === "n") {
         e.preventDefault();
-        setModal({ kind: "newNote", value: "", error: null });
+        openNewNoteModal();
       } else if (k === "w") {
         if (activeTabRef.current) {
           e.preventDefault();
@@ -995,7 +1055,15 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [palette, modal.kind, cycleTab, openSearch, dispatch, closeTab]);
+  }, [
+    palette,
+    modal.kind,
+    cycleTab,
+    openSearch,
+    openNewNoteModal,
+    dispatch,
+    closeTab,
+  ]);
 
   // ── Render ─────────────────────────────────────────────────────────────--
 
@@ -1045,7 +1113,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             isMd={activeIsMd}
             mode={activeTab?.mode ?? "preview"}
             onToggleLeft={() => dispatch({ type: "TOGGLE_LEFT" })}
-            onNewNote={() => setModal({ kind: "newNote", value: "", error: null })}
+            onNewNote={() => openNewNoteModal()}
             onSave={() => activeTab && saveTab(activeTab)}
             onToggleMode={toggleActiveMode}
             onToggleRight={() => dispatch({ type: "TOGGLE_RIGHT" })}
@@ -1058,9 +1126,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             manifest={manifest}
             manifestError={manifestError}
             activePath={activeTab?.path ?? null}
+            createParent={createParent}
             searchInputRef={searchInputRef}
             onOpenFile={openFile}
-            onNewNote={() => setModal({ kind: "newNote", value: "", error: null })}
+            onSelectFolder={setCreateParent}
+            onNewNote={openNewNoteModal}
+            onNewFolder={openNewFolderModal}
             onUpload={() => uploadRef.current?.click()}
             onRename={(p) => setModal({ kind: "rename", path: p, value: p, error: null })}
             onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
@@ -1097,7 +1168,14 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           onRename={(p) => setModal({ kind: "rename", path: p, value: p, error: null })}
           onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
           onOpenFile={openFile}
-          onCreateNote={(p) => setModal({ kind: "newNote", value: p, error: null })}
+          onCreateNote={(p) =>
+            setModal({
+              kind: "newNote",
+              value: p.split("/").pop()?.replace(/\.md$/i, "") ?? "",
+              parent: parentDir(p),
+              error: null,
+            })
+          }
         />
       </WorkspaceLayout>
 
@@ -1107,12 +1185,27 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           {modal.kind === "newNote" && (
             <ModalForm
               title="New note"
-              placeholder="path/to/note.md"
+              hint={modal.parent ? `in ${modal.parent}/` : "in vault root"}
+              placeholder="Note name"
+              value={modal.value}
+              error={modal.error}
+              submitLabel="Create"
+              ghostSuffix=".md"
+              onChange={(v) => setModal({ ...modal, value: v, error: null })}
+              onSubmit={handleCreateNote}
+              onCancel={() => setModal({ kind: "none" })}
+            />
+          )}
+          {modal.kind === "newFolder" && (
+            <ModalForm
+              title="New folder"
+              hint={modal.parent ? `in ${modal.parent}/` : "in vault root"}
+              placeholder="Folder name"
               value={modal.value}
               error={modal.error}
               submitLabel="Create"
               onChange={(v) => setModal({ ...modal, value: v, error: null })}
-              onSubmit={handleCreateNote}
+              onSubmit={handleCreateFolder}
               onCancel={() => setModal({ kind: "none" })}
             />
           )}
@@ -1214,9 +1307,12 @@ function SidebarContent({
   manifest,
   manifestError,
   activePath,
+  createParent,
   searchInputRef,
   onOpenFile,
+  onSelectFolder,
   onNewNote,
+  onNewFolder,
   onUpload,
   onRename,
   onDelete,
@@ -1226,51 +1322,83 @@ function SidebarContent({
   manifest: api.VaultManifest | null;
   manifestError: string | null;
   activePath: string | null;
+  createParent: string;
   searchInputRef: React.RefObject<HTMLInputElement>;
   onOpenFile: (path: string) => void;
-  onNewNote: () => void;
+  onSelectFolder: (path: string) => void;
+  onNewNote: (parent?: string) => void;
+  onNewFolder: (parent?: string) => void;
   onUpload: () => void;
   onRename: (path: string) => void;
   onDelete: (path: string) => void;
 }) {
+  const createHint = createParent || "vault root";
+
   return (
     <>
-      <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
-        <button
-          onClick={onNewNote}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded bg-accent px-2 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-soft"
-          title="New note (⌘N)"
+      <div className="flex items-center gap-2 border-b border-border px-1.5 py-1">
+        <div className="inline-flex items-center gap-0.5 rounded-md bg-elevated p-0.5">
+          <button
+            onClick={() => onNewNote(createParent)}
+            className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
+            title={`New note in ${createHint} (⌘N)`}
+            aria-label={`New note in ${createHint}`}
+          >
+            <FilePlus size={22} weight="bold" />
+          </button>
+          <button
+            onClick={() => onNewFolder(createParent)}
+            className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
+            title={`New folder in ${createHint}`}
+            aria-label={`New folder in ${createHint}`}
+          >
+            <FolderPlus size={22} weight="bold" />
+          </button>
+          <button
+            onClick={onUpload}
+            className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
+            title="Upload file"
+            aria-label="Upload file"
+          >
+            <UploadSimple size={22} weight="bold" />
+          </button>
+        </div>
+        <span
+          className="min-w-0 flex-1 truncate text-[11px] text-faint"
+          title={createParent || "/"}
         >
-          <FilePlus size={15} weight="bold" /> Note
-        </button>
-        <button
-          onClick={onUpload}
-          className="flex items-center justify-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
-          title="Upload file"
-        >
-          <UploadSimple size={15} /> Upload
-        </button>
+          {createParent ? `${createParent}/` : "/"}
+        </span>
       </div>
 
       <div className="border-b border-border px-2 py-2">
         <SearchPanel vaultId={vaultId} onSelect={onOpenFile} inputRef={searchInputRef} />
       </div>
 
-      <div className="custom-scroll min-h-0 flex-1 overflow-y-auto py-1">
+      <div className="custom-scroll relative min-h-0 flex-1 overflow-y-auto py-1">
         {manifestError ? (
           <p className="px-3 py-2 text-[13px] text-danger">{manifestError}</p>
         ) : !manifest ? (
           <p className="px-3 py-2 text-[13px] text-muted">Loading…</p>
-        ) : treeNodes.length === 0 ? (
-          <p className="px-3 py-2 text-[13px] text-muted">This vault is empty.</p>
         ) : (
-          <FolderTree
-            nodes={treeNodes}
-            selectedPath={activePath}
-            onSelect={onOpenFile}
-            onRename={onRename}
-            onDelete={onDelete}
-          />
+          <>
+            {treeNodes.length === 0 && (
+              <p className="pointer-events-none absolute px-3 py-2 text-[13px] text-muted">
+                This vault is empty.
+              </p>
+            )}
+            <FolderTree
+              nodes={treeNodes}
+              selectedPath={activePath}
+              focusedFolder={createParent}
+              onSelect={onOpenFile}
+              onSelectFolder={onSelectFolder}
+              onRename={onRename}
+              onDelete={onDelete}
+              onNewNote={onNewNote}
+              onNewFolder={onNewFolder}
+            />
+          </>
         )}
       </div>
 
@@ -1612,34 +1740,50 @@ function ModalRoot({
 
 function ModalForm({
   title,
+  hint,
   placeholder,
   value,
   error,
   submitLabel,
+  ghostSuffix,
   onChange,
   onSubmit,
   onCancel,
 }: {
   title: string;
+  hint?: string;
   placeholder?: string;
   value: string;
   error: string | null;
   submitLabel: string;
+  ghostSuffix?: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
 }) {
   return (
     <div className="w-[400px] rounded-lg border border-border bg-surface p-5 shadow-2xl">
-      <h3 className="mb-3 text-base font-semibold text-ink">{title}</h3>
-      <input
-        autoFocus
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-        className="mb-2 w-full rounded border border-border bg-canvas px-3 py-2 font-mono text-sm text-ink outline-none focus:border-accent"
-      />
+      <h3 className="mb-1 text-base font-semibold text-ink">{title}</h3>
+      {hint && <p className="mb-3 text-[12px] text-muted">{hint}</p>}
+      <div
+        className={`mb-2 flex items-center rounded border border-border bg-canvas focus-within:border-accent ${
+          ghostSuffix ? "pr-3" : ""
+        }`}
+      >
+        <input
+          autoFocus
+          placeholder={placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+          className="min-w-0 flex-1 bg-transparent px-3 py-2 font-sans text-sm text-ink outline-none"
+        />
+        {ghostSuffix && (
+          <span aria-hidden className="shrink-0 select-none font-sans text-sm text-faint">
+            {ghostSuffix}
+          </span>
+        )}
+      </div>
       {error && <p className="mb-2 text-sm text-danger">{error}</p>}
       <div className="mt-3 flex justify-end gap-2">
         <button

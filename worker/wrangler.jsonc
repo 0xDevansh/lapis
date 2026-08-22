@@ -51,6 +51,8 @@
 
   // Secrets (set via wrangler secret or .dev.vars)
   // BETTER_AUTH_SECRET
+  // GOOGLE_CLIENT_ID
+  // GOOGLE_CLIENT_SECRET
   // GITHUB_PAT_ENCRYPTION_KEY — secret for encrypting stored GitHub PATs (Slice 25)
 
   // Public URL for better-auth (cookies, redirects). Overridden locally by .dev.vars.

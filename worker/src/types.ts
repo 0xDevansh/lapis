@@ -25,6 +25,8 @@ export interface Env {
   // Secrets
   BETTER_AUTH_SECRET: string;
   BETTER_AUTH_URL: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
   /** Secret used to encrypt GitHub PATs at rest before storing in D1 (Slice 25) */
   GITHUB_PAT_ENCRYPTION_KEY?: string;
 }

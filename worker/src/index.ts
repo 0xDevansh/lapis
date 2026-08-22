@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import type { Env } from "./types";
-import { createAuth } from "./auth";
+import { createAuth, getTrustedOrigins } from "./auth";
 import { vaultRoutes } from "./vault/routes";
 import { searchRoutes } from "./search/routes";
 import { deviceRoutes } from "./device/routes";
@@ -18,12 +18,24 @@ app.use("*", logger());
 app.use(
   "/api/*",
   cors({
-    origin: (origin) => origin, // reflect origin; auth is cookie-based
+    origin: (origin, c) =>
+      getTrustedOrigins(c.env.BETTER_AUTH_URL).includes(origin)
+        ? origin
+        : undefined,
     credentials: true,
   })
 );
 
 // ── better-auth handler ──────────────────────────────────────────────────────
+app.get("/api/auth/providers", (c) =>
+  c.json(
+    {
+      google: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET),
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  )
+);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 app.all("/api/auth/*", (c): any => {
   const auth = createAuth(c.env);
@@ -48,7 +60,10 @@ app.get("*", async (c) => {
   const lastSegment = url.pathname.split("/").pop() ?? "";
   const looksLikeAsset = lastSegment.includes(".");
   if (!looksLikeAsset) {
-    const indexUrl = new URL("/index.html", c.req.url);
+    // Fetch the canonical root document. Cloudflare Static Assets redirects
+    // /index.html to /, which would otherwise erase SPA routes such as /auth
+    // (including OAuth error query parameters).
+    const indexUrl = new URL("/", c.req.url);
     return c.env.ASSETS.fetch(new Request(indexUrl, c.req.raw) as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
   }
 
@@ -57,7 +72,7 @@ app.get("*", async (c) => {
     return assetResponse;
   }
 
-  const indexUrl = new URL("/index.html", c.req.url);
+  const indexUrl = new URL("/", c.req.url);
   return c.env.ASSETS.fetch(new Request(indexUrl, c.req.raw) as unknown as Parameters<typeof c.env.ASSETS.fetch>[0]);
 });
 

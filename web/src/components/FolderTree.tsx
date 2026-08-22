@@ -348,7 +348,7 @@ export function FolderTree({
     <div
       role="tree"
       aria-label="Vault files"
-      className="select-none px-1 text-[13px] outline-none"
+      className="min-h-full select-none px-1 text-[13px] outline-none"
       onKeyDown={handleKeyDown}
       onContextMenu={(e) => {
         // Empty area → root context menu
