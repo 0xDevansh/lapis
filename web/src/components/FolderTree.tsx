@@ -146,6 +146,7 @@ interface FolderTreeProps {
   onSelect: (path: string) => void;
   onSelectFolder?: (path: string) => void;
   onRename?: (path: string) => void;
+  onRenameFolder?: (path: string) => void;
   onDelete?: (path: string) => void;
   onNewNote?: (parentFolder: string) => void;
   onNewFolder?: (parentFolder: string) => void;
@@ -166,6 +167,7 @@ export function FolderTree({
   onSelect,
   onSelectFolder,
   onRename,
+  onRenameFolder,
   onDelete,
   onNewNote,
   onNewFolder,
@@ -292,9 +294,13 @@ export function FolderTree({
         focusRow(rows[rows.length - 1]?.node.path);
         break;
       case "F2":
-        if (node.type === "file" && onRename) {
+        if (
+          (node.type === "file" && onRename) ||
+          (node.type === "folder" && onRenameFolder)
+        ) {
           e.preventDefault();
-          onRename(node.path);
+          if (node.type === "folder") onRenameFolder?.(node.path);
+          else onRename?.(node.path);
         }
         break;
       case "Delete":
@@ -551,6 +557,17 @@ export function FolderTree({
                 shortcut="F2"
                 onClick={() => {
                   onRename(menu.path);
+                  setMenu(null);
+                }}
+              />
+            )}
+            {menu.type === "folder" && onRenameFolder && (
+              <MenuItem
+                icon={<PencilSimple size={22} />}
+                label="Rename"
+                shortcut="F2"
+                onClick={() => {
+                  onRenameFolder(menu.path);
                   setMenu(null);
                 }}
               />

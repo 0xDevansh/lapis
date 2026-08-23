@@ -126,7 +126,13 @@ type Modal =
   | { kind: "none" }
   | { kind: "newNote"; value: string; parent: string; error: string | null }
   | { kind: "newFolder"; value: string; parent: string; error: string | null }
-  | { kind: "rename"; path: string; value: string; error: string | null }
+  | {
+      kind: "rename";
+      type: "file" | "folder";
+      path: string;
+      value: string;
+      error: string | null;
+    }
   | { kind: "deleteConfirm"; path: string }
   | {
       kind: "confirm";
@@ -742,6 +748,83 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
       setModal({ kind: "none" });
       return;
     }
+
+    if (modal.type === "folder") {
+      if (
+        !manifest ||
+        newPath.includes("..") ||
+        newPath.startsWith(`${modal.path}/`)
+      ) {
+        setModal({ ...modal, error: "Invalid folder path" });
+        return;
+      }
+
+      const oldPrefix = `${modal.path}/`;
+      const entries = Object.values(manifest.entries).filter((entry) =>
+        entry.path.startsWith(oldPrefix)
+      );
+      const renames = entries.map((entry) => ({
+        oldPath: entry.path,
+        newPath: `${newPath}/${entry.path.slice(oldPrefix.length)}`,
+      }));
+      const sourcePaths = new Set(renames.map(({ oldPath }) => oldPath.toLowerCase()));
+      const occupiedPaths = new Set(Object.keys(manifest.entries));
+      const collision = renames.find(
+        ({ newPath: destination }) =>
+          occupiedPaths.has(destination.toLowerCase()) &&
+          !sourcePaths.has(destination.toLowerCase())
+      );
+      if (collision) {
+        setModal({
+          ...modal,
+          error: `A file already exists at ${collision.newPath}`,
+        });
+        return;
+      }
+
+      const completed: typeof renames = [];
+      try {
+        for (const rename of renames) {
+          await api.renameFile(vaultId, rename.oldPath, rename.newPath);
+          completed.push(rename);
+          dispatch({
+            type: "RENAME_PATH",
+            oldPath: rename.oldPath,
+            newPath: rename.newPath,
+          });
+        }
+        setCreateParent((current) =>
+          current === modal.path || current.startsWith(oldPrefix)
+            ? `${newPath}${current.slice(modal.path.length)}`
+            : current
+        );
+        await refreshManifest();
+        setModal({ kind: "none" });
+      } catch (error) {
+        let rollbackFailed = false;
+        for (const rename of completed.reverse()) {
+          try {
+            await api.renameFile(vaultId, rename.newPath, rename.oldPath);
+            dispatch({
+              type: "RENAME_PATH",
+              oldPath: rename.newPath,
+              newPath: rename.oldPath,
+            });
+          } catch {
+            rollbackFailed = true;
+          }
+        }
+        await refreshManifest();
+        setModal({
+          ...modal,
+          error: rollbackFailed
+            ? "Folder rename partially failed. Refresh before making more changes."
+            : (error as Error).message,
+        });
+      }
+      return;
+    }
+
     try {
       await api.renameFile(vaultId, modal.path, newPath);
       await refreshManifest();
@@ -982,7 +1065,13 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           keywords: "move path",
           icon: <PencilSimple size={16} />,
           run: () =>
-            setModal({ kind: "rename", path: tab.path, value: tab.path, error: null }),
+            setModal({
+              kind: "rename",
+              type: "file",
+              path: tab.path,
+              value: tab.path,
+              error: null,
+            }),
         },
         {
           id: "delete",
@@ -1133,7 +1222,12 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             onNewNote={openNewNoteModal}
             onNewFolder={openNewFolderModal}
             onUpload={() => uploadRef.current?.click()}
-            onRename={(p) => setModal({ kind: "rename", path: p, value: p, error: null })}
+            onRename={(p) =>
+              setModal({ kind: "rename", type: "file", path: p, value: p, error: null })
+            }
+            onRenameFolder={(p) =>
+              setModal({ kind: "rename", type: "folder", path: p, value: p, error: null })
+            }
             onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
           />
         }
@@ -1165,7 +1259,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           onSetMode={(mode) =>
             activeTab && dispatch({ type: "SET_TAB_MODE", id: activeTab.id, mode })
           }
-          onRename={(p) => setModal({ kind: "rename", path: p, value: p, error: null })}
+          onRename={(p) =>
+            setModal({ kind: "rename", type: "file", path: p, value: p, error: null })
+          }
           onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
           onOpenFile={openFile}
           onCreateNote={(p) =>
@@ -1211,7 +1307,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           )}
           {modal.kind === "rename" && (
             <ModalForm
-              title="Rename / move"
+              title={modal.type === "folder" ? "Rename folder" : "Rename / move"}
               value={modal.value}
               error={modal.error}
               submitLabel="Rename"
@@ -1315,6 +1411,7 @@ function SidebarContent({
   onNewFolder,
   onUpload,
   onRename,
+  onRenameFolder,
   onDelete,
 }: {
   vaultId: string;
@@ -1330,6 +1427,7 @@ function SidebarContent({
   onNewFolder: (parent?: string) => void;
   onUpload: () => void;
   onRename: (path: string) => void;
+  onRenameFolder: (path: string) => void;
   onDelete: (path: string) => void;
 }) {
   const createHint = createParent || "vault root";
@@ -1394,6 +1492,7 @@ function SidebarContent({
               onSelect={onOpenFile}
               onSelectFolder={onSelectFolder}
               onRename={onRename}
+              onRenameFolder={onRenameFolder}
               onDelete={onDelete}
               onNewNote={onNewNote}
               onNewFolder={onNewFolder}
