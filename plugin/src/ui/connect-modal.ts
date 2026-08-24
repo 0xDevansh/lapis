@@ -9,9 +9,9 @@ interface ConnectModalOptions {
   serverUrl: string;
   vaultId: string;
   challenge: DeviceAuthChallenge;
-  fetchToken: (deviceCode: string) => Promise<{ status: "pending" } | { status: "approved"; token: string; deviceId: string } | { status: "denied" | "expired" | "not_found" }>;
+  fetchToken: (deviceCode: string) => Promise<{ status: "pending" } | { status: "approved"; token: string; deviceId: string; writable?: boolean; role?: "owner" | "editor" | "viewer" } | { status: "denied" | "expired" | "not_found" }>;
   onConnected: (
-    connection: { token: string; deviceId: string },
+    connection: { token: string; deviceId: string; writable?: boolean; role?: "owner" | "editor" | "viewer" },
     onProgress: (progress: SyncProgress) => void
   ) => Promise<void>;
   onDone?: () => void;

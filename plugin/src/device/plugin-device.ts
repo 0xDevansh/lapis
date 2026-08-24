@@ -18,7 +18,7 @@ import type {
   Resolution,
   SendResult,
 } from "./types";
-import { DEFAULT_PLUGIN_CAPABILITIES } from "./types";
+import { assertDeviceWritable, DEFAULT_PLUGIN_CAPABILITIES } from "./types";
 
 export interface PluginDeviceOptions {
   app: App;
@@ -29,7 +29,6 @@ export interface PluginDeviceOptions {
 }
 
 export class PluginDevice implements Device {
-  readonly capabilities: DeviceCapabilities = DEFAULT_PLUGIN_CAPABILITIES;
   readonly conflictPolicy = "rebase" as const;
   readonly identity: DeviceIdentity;
   private readonly client: LapisClient;
@@ -52,7 +51,20 @@ export class PluginDevice implements Device {
     });
   }
 
+  get writable(): boolean {
+    return this.options.settings.writable !== false;
+  }
+
+  get capabilities(): DeviceCapabilities {
+    return {
+      ...DEFAULT_PLUGIN_CAPABILITIES,
+      writable: this.writable,
+      bidirectional: this.writable,
+    };
+  }
+
   async sendEdit(op: EditOp): Promise<SendResult> {
+    assertDeviceWritable(this);
     if (op.kind === "put") {
       await this.engine.pushPut(op.path);
       const journal = this.options.getJournal();
@@ -84,6 +96,7 @@ export class PluginDevice implements Device {
   async resolveConflict(
     request: ConflictResolutionRequest
   ): Promise<Resolution> {
+    assertDeviceWritable(this);
     const result = await this.client.resolveConflict(
       this.options.settings.vaultId,
       request,

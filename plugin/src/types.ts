@@ -7,6 +7,8 @@ export interface LapisSettings {
   receiveInternals: boolean;
   debugLogging: boolean;
   lastConnectedAt: string | null;
+  writable: boolean;
+  role?: "owner" | "editor" | "viewer";
 }
 
 export interface ManifestEntry {
@@ -175,6 +177,7 @@ export const DEFAULT_SETTINGS: LapisSettings = {
   receiveInternals: false,
   debugLogging: false,
   lastConnectedAt: null,
+  writable: true,
 };
 
 export interface DeviceAuthRequest {
@@ -191,7 +194,7 @@ export interface DeviceAuthChallenge {
 
 export type DeviceTokenResponse =
   | { status: "pending" }
-  | { status: "approved"; token: string; deviceId: string }
+  | { status: "approved"; token: string; deviceId: string; writable?: boolean; role?: LapisSettings["role"] }
   | { status: "denied" | "expired" | "not_found" };
 
 export interface LapisRequestOptions {

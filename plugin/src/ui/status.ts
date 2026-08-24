@@ -40,7 +40,8 @@ export class LapisStatusBar {
     }
 
     if (settings.syncToken && settings.vaultId) {
-      this.element.setText(`${connectedLabel} · ${shortVaultId(settings.vaultId)}${conflicts}`);
+      const access = settings.writable === false ? " · read-only" : "";
+      this.element.setText(`${connectedLabel} · ${shortVaultId(settings.vaultId)}${access}${conflicts}`);
       return;
     }
 

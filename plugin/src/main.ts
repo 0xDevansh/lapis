@@ -88,6 +88,7 @@ export default class LapisPlugin extends Plugin {
     this.addSettingTab(this.settingTab);
     this.registerWatcher();
     this.registerEditorChangeFallback();
+    await this.refreshDeviceAccess();
     this.startNotify();
     this.refreshConflictsQuietly();
     this.registerInterval(window.setInterval(() => void this.pullChanged(), 5 * 60 * 1000));
@@ -140,10 +141,12 @@ export default class LapisPlugin extends Plugin {
         vaultId: this.settings.vaultId,
         challenge,
         fetchToken: (deviceCode) => client.pollDeviceToken(deviceCode),
-        onConnected: async ({ token, deviceId }, onProgress) => {
+        onConnected: async ({ token, deviceId, writable, role }, onProgress) => {
           this.settings.syncToken = token;
           this.settings.deviceId = deviceId;
           this.settings.lastConnectedAt = new Date().toISOString();
+          this.settings.writable = writable !== false;
+          this.settings.role = role;
           await this.saveSettings();
           this.refreshSettingsTab();
           await this.syncNow(onProgress);
@@ -162,6 +165,8 @@ export default class LapisPlugin extends Plugin {
     this.settings.syncToken = "";
     this.settings.deviceId = "";
     this.settings.lastConnectedAt = null;
+    this.settings.writable = true;
+    this.settings.role = undefined;
     this.journal = null;
     this.conflicts = [];
     this.notifyClient?.close();
@@ -422,6 +427,7 @@ export default class LapisPlugin extends Plugin {
       onOpen: (reconnected) => {
         this.updateStatus();
         if (reconnected) this.debug("notify reconnected");
+        void this.refreshDeviceAccess();
         this.reportOpenFile(true);
         this.refreshConflictsQuietly();
       },
@@ -571,6 +577,7 @@ export default class LapisPlugin extends Plugin {
   }
 
   private scheduleLocalFlush(path: string, source: string) {
+    if (this.settings.writable === false) return;
     const previous = this.modifyTimers.get(path);
     if (previous) {
       window.clearTimeout(previous);
@@ -642,6 +649,25 @@ export default class LapisPlugin extends Plugin {
   private debug(...args: unknown[]) {
     if (this.settings.debugLogging) {
       console.info("[lapis]", ...args);
+    }
+  }
+
+  private async refreshDeviceAccess() {
+    if (!this.settings.syncToken || !this.settings.vaultId) return;
+    try {
+      const info = await new LapisClient(this.settings.serverUrl).getDevice(
+        this.settings.vaultId,
+        this.settings.syncToken
+      );
+      const writable = info.writable !== false;
+      if (this.settings.writable !== writable || this.settings.role !== info.role) {
+        this.settings.writable = writable;
+        this.settings.role = info.role;
+        await this.saveSettings();
+        this.refreshSettingsTab();
+      }
+    } catch (error) {
+      this.debug("device access refresh failed", error);
     }
   }
 

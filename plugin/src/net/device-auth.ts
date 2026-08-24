@@ -9,13 +9,23 @@ export interface PollDeviceTokenOptions {
   signal?: AbortSignal;
 }
 
-export async function pollDeviceToken(options: PollDeviceTokenOptions): Promise<{ token: string; deviceId: string }> {
+export async function pollDeviceToken(options: PollDeviceTokenOptions): Promise<{
+  token: string;
+  deviceId: string;
+  writable?: boolean;
+  role?: "owner" | "editor" | "viewer";
+}> {
   const intervalMs = options.intervalMs ?? 3000;
 
   while (!options.signal?.aborted) {
     const result = await options.fetchToken(options.deviceCode);
     if (result.status === "approved") {
-      return { token: result.token, deviceId: result.deviceId };
+      return {
+        token: result.token,
+        deviceId: result.deviceId,
+        writable: result.writable,
+        role: result.role,
+      };
     }
     if (result.status === "denied") {
       throw new Error("Connection denied");

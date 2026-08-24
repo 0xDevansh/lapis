@@ -23,6 +23,11 @@ export function normalizeSettings(data: unknown): LapisSettings {
     receiveInternals: partial.receiveInternals ?? false,
     debugLogging: partial.debugLogging ?? false,
     lastConnectedAt: partial.lastConnectedAt ?? null,
+    writable: partial.writable !== false,
+    role:
+      partial.role === "owner" || partial.role === "editor" || partial.role === "viewer"
+        ? partial.role
+        : undefined,
   };
 }
 
@@ -115,12 +120,16 @@ export class LapisSettingTab extends PluginSettingTab {
 
     const status = containerEl.createDiv({ cls: "lapis-settings-status lapis-settings-status--connected" });
     status.createSpan({ cls: "lapis-settings-status-dot" });
-    status.createSpan({ text: " Connected" });
+    status.createSpan({ text: settings.writable === false ? " Connected · read-only" : " Connected" });
 
     const card = containerEl.createDiv({ cls: "lapis-settings-card" });
     card.createEl("div", { cls: "lapis-settings-card-row", text: `Server: ${host}` });
     card.createEl("div", { cls: "lapis-settings-card-row", text: `Vault: ${vault}` });
     card.createEl("div", { cls: "lapis-settings-card-row", text: `Device: ${settings.deviceName}` });
+    card.createEl("div", {
+      cls: "lapis-settings-card-row",
+      text: settings.writable === false ? "Access: read-only" : "Access: read and write",
+    });
     card.createEl("div", { cls: "lapis-settings-card-row lapis-settings-card-muted", text: `Since ${since}` });
 
     if (settings.serverUrl && settings.vaultId) {

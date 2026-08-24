@@ -51,21 +51,30 @@ export interface SyncEngineOptions {
 export class SyncEngine {
   constructor(private readonly options: SyncEngineOptions) {}
 
+  private get canWrite(): boolean {
+    return this.options.settings.writable !== false;
+  }
+
   async forceReconcile(): Promise<void> {
     if (!this.options.settings.syncToken) {
       throw new Error("Connect before syncing");
     }
 
-    await this.replayPending();
+    if (this.canWrite) {
+      await this.replayPending();
+    }
     this.reportProgress("scanning", 0, 0, "Scanning every local file…");
     const localFiles = await this.scanLocalFiles();
     this.reportProgress("reconciling", 0, 0, "Loading the server manifest…");
     const manifest = await this.client.getManifest(this.vaultId, this.token);
     await this.reconcile(localFiles, manifest);
-    await this.completePendingSeed();
+    if (this.canWrite) {
+      await this.completePendingSeed();
+    }
   }
 
   async completePendingSeed(): Promise<void> {
+    if (!this.canWrite) return;
     const journal = this.options.getJournal();
     if (!journal?.initialSeedPending) return;
     await this.client.completeSeed(this.vaultId, this.token);
@@ -85,6 +94,10 @@ export class SyncEngine {
     const serverEntries = Object.values(manifest.entries);
 
     if (serverEntries.length === 0) {
+      if (!this.canWrite) {
+        await this.options.setJournal(emptyJournal(this.vaultId));
+        return;
+      }
       await this.seedLocal(localFiles);
       return;
     }
@@ -131,6 +144,7 @@ export class SyncEngine {
   }
 
   async replayPending(): Promise<void> {
+    if (!this.canWrite) return;
     const journal = this.options.getJournal();
     if (!journal || journal.pendingOps.length === 0) {
       return;
@@ -180,7 +194,7 @@ export class SyncEngine {
   }
 
   async pushLocalChanges(): Promise<{ pushed: number; deleted: number }> {
-    if (!this.options.settings.syncToken) {
+    if (!this.options.settings.syncToken || !this.canWrite) {
       return { pushed: 0, deleted: 0 };
     }
 
@@ -258,6 +272,7 @@ export class SyncEngine {
   }
 
   async pushPut(path: string): Promise<void> {
+    if (!this.canWrite) return;
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
     }
@@ -297,6 +312,7 @@ export class SyncEngine {
   }
 
   async pushRename(oldPath: string, newPath: string): Promise<void> {
+    if (!this.canWrite) return;
     if (!shouldSyncPath(oldPath, this.options.settings.receiveInternals) || !shouldSyncPath(newPath, this.options.settings.receiveInternals)) {
       return;
     }
@@ -310,6 +326,7 @@ export class SyncEngine {
   }
 
   async pushDelete(path: string): Promise<void> {
+    if (!this.canWrite) return;
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
     }
@@ -320,6 +337,7 @@ export class SyncEngine {
   }
 
   async queuePut(path: string): Promise<void> {
+    if (!this.canWrite) return;
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
     }
@@ -337,6 +355,7 @@ export class SyncEngine {
   }
 
   async queueRename(oldPath: string, newPath: string): Promise<void> {
+    if (!this.canWrite) return;
     if (!shouldSyncPath(oldPath, this.options.settings.receiveInternals) || !shouldSyncPath(newPath, this.options.settings.receiveInternals)) {
       return;
     }
@@ -346,6 +365,7 @@ export class SyncEngine {
   }
 
   async queueDelete(path: string): Promise<void> {
+    if (!this.canWrite) return;
     if (!shouldSyncPath(path, this.options.settings.receiveInternals)) {
       return;
     }
@@ -513,6 +533,10 @@ export class SyncEngine {
       const server = serverByPath.get(key);
 
       if (local && !server) {
+        if (!this.canWrite) {
+          this.reportReconcileProgress(count, keys.size);
+          continue;
+        }
         const entry = await this.client.putFile(this.vaultId, local.path, local.content, local.contentType, this.token);
         setEntry(journal, entry, local.hash);
         await this.options.setJournal(journal);
@@ -533,6 +557,10 @@ export class SyncEngine {
         const serverHash = await this.hashServerFile(server);
         if (serverHash === local.hash) {
           setEntry(journal, server, local.hash);
+          await this.ackEntry(server);
+        } else if (!this.canWrite) {
+          await this.pullEntry(server, journal);
+          await this.options.setJournal(journal);
           await this.ackEntry(server);
         } else {
           const baseRevision = journal.fileRevisions[key] ?? -1;

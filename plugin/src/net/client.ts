@@ -5,6 +5,7 @@ import type {
   DeviceTokenResponse,
   LapisRequestOptions,
   LapisResponse,
+  LapisSettings,
   ManifestEntry,
   BatchSyncResponse,
   ConflictPayload,
@@ -71,7 +72,14 @@ export class LapisClient {
   }
 
   async pollDeviceToken(deviceCode: string): Promise<DeviceTokenResponse> {
-    const response = await this.request<{ token?: string; deviceId?: string; status?: string; error?: string }>({
+    const response = await this.request<{
+      token?: string;
+      deviceId?: string;
+      status?: string;
+      error?: string;
+      writable?: boolean;
+      role?: LapisSettings["role"];
+    }>({
       method: "POST",
       path: "/api/device-auth/token",
       body: JSON.stringify({ deviceCode }),
@@ -82,7 +90,13 @@ export class LapisClient {
       return { status: "pending" };
     }
     if (response.status === 200 && response.data?.token) {
-      return { status: "approved", token: response.data.token, deviceId: response.data.deviceId ?? "" };
+      return {
+        status: "approved",
+        token: response.data.token,
+        deviceId: response.data.deviceId ?? "",
+        writable: response.data.writable,
+        role: response.data.role,
+      };
     }
 
     const error = response.data?.error;
@@ -335,6 +349,26 @@ export class LapisClient {
     if (response.status !== 200) {
       throw new Error(response.text || `Device update failed (${response.status})`);
     }
+  }
+
+  async getDevice(
+    vaultId: string,
+    token: string
+  ): Promise<{ deviceId: string; kind: string; role: LapisSettings["role"]; writable: boolean; receiveInternals: boolean }> {
+    const response = await this.request<{
+      deviceId: string;
+      kind: string;
+      role: LapisSettings["role"];
+      writable: boolean;
+      receiveInternals: boolean;
+    }>({
+      path: `/api/sync/${encodeURIComponent(vaultId)}/device`,
+      token,
+    });
+    if (response.status !== 200 || !response.data) {
+      throw new Error(response.text || `Device lookup failed (${response.status})`);
+    }
+    return response.data;
   }
 
   private url(path: string): string {
