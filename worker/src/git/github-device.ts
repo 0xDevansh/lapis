@@ -14,12 +14,14 @@ export const DEFAULT_GITHUB_CAPABILITIES: DeviceCapabilities = {
   offlineQueue: false,
   receiveInternals: false,
   transport: "git",
+  writable: true,
 };
 
 export class GitHubDevice implements Device {
   readonly capabilities = DEFAULT_GITHUB_CAPABILITIES;
   readonly conflictPolicy: ConflictPolicy;
   readonly identity: DeviceIdentity;
+  readonly writable = true;
 
   constructor(
     private readonly remoteId: string,

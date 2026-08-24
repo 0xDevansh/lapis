@@ -9,22 +9,9 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
+import { denyAccess, resolveVaultAccess } from "../vault/access";
 
 const searchRoutes = new Hono<{ Bindings: Env }>();
-
-// ── Helper: verify vault ownership ───────────────────────────────────────────
-
-async function resolveVault(
-  db: D1Database,
-  vaultId: string,
-  userId: string
-): Promise<boolean> {
-  const row = await db
-    .prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`)
-    .bind(vaultId, userId)
-    .first<{ id: string }>();
-  return row !== null;
-}
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
@@ -47,8 +34,9 @@ searchRoutes.get("/:id/search", requireSession, async (c) => {
 
   if (!q) return c.json<SearchResult[]>([]);
 
-  const owned = await resolveVault(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   // Sanitize query: strip characters unsafe in FTS5 queries, add * for prefix search
   const safeQuery = sanitizeFtsQuery(q);
@@ -110,8 +98,9 @@ searchRoutes.get("/:id/backlinks", requireSession, async (c) => {
 
   if (!path) return c.json<BacklinkResult[]>([]);
 
-  const owned = await resolveVault(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   const { results } = await c.env.DB.prepare(
     `SELECT source_path AS sourcePath
@@ -152,8 +141,9 @@ searchRoutes.get("/:id/tags", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const owned = await resolveVault(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   const { results } = await c.env.DB.prepare(
     `SELECT tag, COUNT(*) AS count

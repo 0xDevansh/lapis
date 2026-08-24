@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../types";
-import { requireDevice } from "../middleware/syncAuth";
+import { requireDevice, denyDeviceWrite } from "../middleware/syncAuth";
 import {
   isOsJunk,
   isValidSyncPath,
@@ -74,10 +74,31 @@ function staleResponse(c: Context, err: { message?: string; serverRevision?: num
   return c.json({ error: err.message ?? "Revision conflict", headRevision, serverRevision: headRevision }, 409);
 }
 
+function denyForeignVault(c: Context, vaultId: string): Response | null {
+  if (c.get("device").vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  return null;
+}
+
+syncRoutes.get("/:vaultId/device", requireDevice, async (c) => {
+  const device = c.get("device");
+  const { vaultId } = c.req.param();
+  const denied = denyForeignVault(c, vaultId);
+  if (denied) return denied;
+
+  return c.json({
+    deviceId: device.id,
+    kind: device.kind,
+    role: device.role,
+    writable: device.writable,
+    receiveInternals: device.receiveInternals,
+  });
+});
+
 syncRoutes.patch("/:vaultId/device", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId);
+  if (denied) return denied;
 
   const body = await c.req.json<{ receiveInternals?: boolean }>();
   const receiveInternals = body.receiveInternals === true ? 1 : 0;
@@ -91,7 +112,8 @@ syncRoutes.patch("/:vaultId/device", requireDevice, async (c) => {
 syncRoutes.get("/:vaultId/manifest", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId);
+  if (denied) return denied;
   const manifest = await stubFor(c.env, vaultId).getManifest(vaultId);
   if (device.receiveInternals) return c.json(manifest);
   return c.json({
@@ -107,7 +129,8 @@ syncRoutes.get("/:vaultId/manifest", requireDevice, async (c) => {
 syncRoutes.post("/:vaultId/acks", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId);
+  if (denied) return denied;
 
   let body: { acks?: Array<{ path?: string; revision?: number }> };
   try {
@@ -132,7 +155,8 @@ syncRoutes.post("/:vaultId/acks", requireDevice, async (c) => {
 syncRoutes.get("/:vaultId/conflicts", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId);
+  if (denied) return denied;
   const conflicts = await stubFor(c.env, vaultId).listConflicts(vaultId);
   return c.json({
     conflicts: device.receiveInternals
@@ -144,7 +168,8 @@ syncRoutes.get("/:vaultId/conflicts", requireDevice, async (c) => {
 syncRoutes.post("/:vaultId/conflicts/resolve", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   let body: Partial<ResolveConflictRequest>;
   try {
@@ -184,7 +209,8 @@ syncRoutes.post("/:vaultId/conflicts/resolve", requireDevice, async (c) => {
 syncRoutes.get("/:vaultId/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId);
+  if (denied) return denied;
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
@@ -206,7 +232,8 @@ syncRoutes.get("/:vaultId/files/*", requireDevice, async (c) => {
 syncRoutes.put("/:vaultId/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
@@ -246,7 +273,8 @@ syncRoutes.put("/:vaultId/files/*", requireDevice, async (c) => {
 syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   const url = new URL(c.req.url);
   const prefix = `/api/sync/${vaultId}/files/`;
@@ -285,7 +313,8 @@ syncRoutes.post("/:vaultId/files/*", requireDevice, async (c) => {
 syncRoutes.patch("/:vaultId/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
@@ -311,7 +340,8 @@ syncRoutes.patch("/:vaultId/files/*", requireDevice, async (c) => {
 syncRoutes.delete("/:vaultId/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   const filePath = extractFilePath(new URL(c.req.url), vaultId);
   if (!filePath) return c.json({ error: "Path required" }, 400);
@@ -335,7 +365,8 @@ syncRoutes.delete("/:vaultId/files/*", requireDevice, async (c) => {
 syncRoutes.post("/:vaultId/batch", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   let body: BatchSyncRequest;
   try {
@@ -415,7 +446,8 @@ syncRoutes.post("/:vaultId/batch", requireDevice, async (c) => {
 syncRoutes.put("/:vaultId/seed/files/*", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   const url = new URL(c.req.url);
   const prefix = `/api/sync/${vaultId}/seed/files/`;
@@ -460,7 +492,8 @@ syncRoutes.put("/:vaultId/seed/files/*", requireDevice, async (c) => {
 syncRoutes.post("/:vaultId/seed/complete", requireDevice, async (c) => {
   const device = c.get("device");
   const { vaultId } = c.req.param();
-  if (device.vaultId !== vaultId) return c.json({ error: "Forbidden" }, 403);
+  const denied = denyForeignVault(c, vaultId) ?? denyDeviceWrite(c);
+  if (denied) return denied;
 
   try {
     const result = await stubFor(c.env, vaultId).sealNow(`seed by ${device.deviceName}`);

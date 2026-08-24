@@ -6,23 +6,117 @@ import { deviceAuthor } from "./identity";
 import { buildZip, type ZipEntry } from "./zip";
 import { isTextContentType, type ResolveConflictRequest } from "./contracts";
 import { contentTypeForUpload, detectMimeFromPath } from "./mime";
+import {
+  backfillVaultOwners,
+  denyAccess,
+  insertOwnerMember,
+  publicVault,
+  resolveVaultAccess,
+  type VaultCapability,
+  type VaultWithRole,
+} from "./access";
 
 const vaultRoutes = new Hono<{ Bindings: Env }>();
 const SAFE_DO_RPC_UPLOAD_BYTES = 24 * 1024 * 1024;
 
-// ── Helper: resolve vault and verify ownership ─────────────────────────────
+interface McpPolicyRow {
+  vaultId: string;
+  ownerId: string;
+  enabled: number;
+  mode: string;
+  allowGrep: number;
+  allowDelete: number;
+  allowInternals: number;
+  pathAllow: string | null;
+  pathDeny: string | null;
+  maxReadBytes: number;
+  maxWriteBytes: number;
+  maxResults: number;
+}
 
-async function resolveVault(
+interface McpPolicyResponse {
+  vaultId: string;
+  enabled: boolean;
+  mode: "read-only" | "read-write";
+  allowGrep: boolean;
+  allowDelete: boolean;
+  allowInternals: boolean;
+  pathAllow: string[];
+  pathDeny: string[];
+  maxReadBytes: number;
+  maxWriteBytes: number;
+  maxResults: number;
+}
+
+async function requireVault(
+  c: Parameters<typeof denyAccess>[0],
+  vaultId: string,
+  userId: string,
+  cap: VaultCapability,
+  options?: { allowArchived?: boolean }
+) {
+  const access = await resolveVaultAccess(c.env.DB, vaultId, userId);
+  const denied = denyAccess(c, access, cap, options);
+  if (denied) return { denied, access: null };
+  return { denied: null, access: access! };
+}
+
+function parseJsonList(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function policyResponse(row: McpPolicyRow): McpPolicyResponse {
+  return {
+    vaultId: row.vaultId,
+    enabled: Boolean(row.enabled),
+    mode: row.mode === "read-write" ? "read-write" : "read-only",
+    allowGrep: Boolean(row.allowGrep),
+    allowDelete: Boolean(row.allowDelete),
+    allowInternals: Boolean(row.allowInternals),
+    pathAllow: parseJsonList(row.pathAllow),
+    pathDeny: parseJsonList(row.pathDeny),
+    maxReadBytes: row.maxReadBytes,
+    maxWriteBytes: row.maxWriteBytes,
+    maxResults: row.maxResults,
+  };
+}
+
+async function getOrCreateMcpPolicy(
   db: D1Database,
   vaultId: string,
-  userId: string
-): Promise<{ id: string; name: string; createdAt: string } | null> {
-  return db
-    .prepare(
-      `SELECT id, name, created_at AS createdAt FROM vaults WHERE id = ? AND owner_id = ?`
-    )
-    .bind(vaultId, userId)
-    .first<{ id: string; name: string; createdAt: string }>();
+  ownerId: string
+): Promise<McpPolicyRow> {
+  const existing = await db.prepare(
+    `SELECT vault_id AS vaultId, owner_id AS ownerId, enabled, mode,
+            allow_grep AS allowGrep, allow_delete AS allowDelete,
+            allow_internals AS allowInternals, path_allow AS pathAllow,
+            path_deny AS pathDeny, max_read_bytes AS maxReadBytes,
+            max_write_bytes AS maxWriteBytes, max_results AS maxResults
+     FROM vault_mcp_policies WHERE vault_id = ? AND owner_id = ?`
+  )
+    .bind(vaultId, ownerId)
+    .first<McpPolicyRow>();
+  if (existing) return existing;
+
+  const now = new Date().toISOString();
+  await db.prepare(
+    `INSERT INTO vault_mcp_policies
+     (vault_id, owner_id, enabled, mode, allow_grep, allow_delete,
+      allow_internals, path_allow, path_deny, max_read_bytes, max_write_bytes,
+      max_results, created_at, updated_at)
+     VALUES (?, ?, 0, 'read-only', 1, 0, 0, NULL, NULL, 131072, 131072, 100, ?, ?)`
+  )
+    .bind(vaultId, ownerId, now, now)
+    .run();
+  return (await getOrCreateMcpPolicy(db, vaultId, ownerId))!;
 }
 
 async function putWebBytes(
@@ -87,36 +181,196 @@ vaultRoutes.post("/", requireSession, async (c) => {
   )
     .bind(vaultId, session.userId, name, now)
     .run();
+  await insertOwnerMember(c.env.DB, vaultId, session.userId, now);
 
   // Initialize the Durable Object for this vault
   const doId = c.env.VAULT_COORDINATOR.idFromName(vaultId);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
   await stub.initialize({ id: vaultId, ownerId: session.userId, name, createdAt: now });
 
-  return c.json({ id: vaultId, name, createdAt: now }, 201);
+  return c.json({ id: vaultId, name, createdAt: now, archivedAt: null, role: "owner" } satisfies VaultWithRole, 201);
 });
 
 /** GET /api/vaults — list authenticated user's vaults */
 vaultRoutes.get("/", requireSession, async (c) => {
   const session = c.get("session");
+  await backfillVaultOwners(c.env.DB);
 
   const { results } = await c.env.DB.prepare(
-    `SELECT id, name, created_at AS createdAt FROM vaults WHERE owner_id = ? ORDER BY created_at DESC`
+    `SELECT v.id, v.name, v.created_at AS createdAt, v.archived_at AS archivedAt, m.role AS role
+     FROM vaults v
+     JOIN vault_members m ON m.vault_id = v.id
+     WHERE m.user_id = ? AND v.archived_at IS NULL
+     ORDER BY v.created_at DESC`
   )
     .bind(session.userId)
-    .all<{ id: string; name: string; createdAt: string }>();
+    .all<VaultWithRole>();
 
   return c.json(results);
 });
 
-/** GET /api/vaults/:id — get a single vault (must be owner) */
+/** GET /api/vaults/archived — list authenticated user's archived vaults */
+vaultRoutes.get("/archived", requireSession, async (c) => {
+  const session = c.get("session");
+  const { results } = await c.env.DB.prepare(
+    `SELECT v.id, v.name, v.created_at AS createdAt, v.archived_at AS archivedAt, 'owner' AS role
+     FROM vaults v
+     WHERE v.owner_id = ? AND v.archived_at IS NOT NULL
+     ORDER BY v.archived_at DESC`
+  )
+    .bind(session.userId)
+    .all<VaultWithRole>();
+  return c.json(results);
+});
+
+/** GET /api/vaults/:id — get a single vault (must be a member) */
 vaultRoutes.get("/:id", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
-  return c.json(vault);
+  const { denied, access } = await requireVault(c, id, session.userId, "read");
+  if (denied) return denied;
+  return c.json(publicVault(access));
+});
+
+/** PATCH /api/vaults/:id — rename a vault */
+vaultRoutes.patch("/:id", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const { denied, access } = await requireVault(c, id, session.userId, "admin");
+  if (denied) return denied;
+
+  const body = await c.req.json<{ name?: string }>();
+  const name = (body.name ?? "").trim();
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  await c.env.DB.prepare(
+    `UPDATE vaults SET name = ? WHERE id = ? AND owner_id = ?`
+  )
+    .bind(name, id, session.userId)
+    .run();
+  const stub = c.env.VAULT_COORDINATOR.get(
+    c.env.VAULT_COORDINATOR.idFromName(id)
+  );
+  await stub.renameVault(name);
+  return c.json({
+    id,
+    name,
+    createdAt: access.vault.createdAt,
+    archivedAt: null,
+    role: access.role,
+  } satisfies VaultWithRole);
+});
+
+/** POST /api/vaults/:id/archive — pause access without deleting data */
+vaultRoutes.post("/:id/archive", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const { denied, access } = await requireVault(c, id, session.userId, "admin", {
+    allowArchived: true,
+  });
+  if (denied) return denied;
+  if (access.vault.archivedAt) return c.json({ ok: true, archivedAt: access.vault.archivedAt });
+
+  const archivedAt = new Date().toISOString();
+  await c.env.DB.prepare(
+    `UPDATE vaults SET archived_at = ? WHERE id = ? AND owner_id = ?`
+  )
+    .bind(archivedAt, id, session.userId)
+    .run();
+  return c.json({ ok: true, archivedAt });
+});
+
+/** POST /api/vaults/:id/restore — restore an archived vault */
+vaultRoutes.post("/:id/restore", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const { denied, access } = await requireVault(c, id, session.userId, "admin", {
+    allowArchived: true,
+  });
+  if (denied) return denied;
+
+  await c.env.DB.prepare(
+    `UPDATE vaults SET archived_at = NULL WHERE id = ? AND owner_id = ?`
+  )
+    .bind(id, session.userId)
+    .run();
+  return c.json({
+    id,
+    name: access.vault.name,
+    createdAt: access.vault.createdAt,
+    archivedAt: null,
+    role: access.role,
+  } satisfies VaultWithRole);
+});
+
+/** GET /api/vaults/:id/mcp-policy — per-vault MCP exposure policy */
+vaultRoutes.get("/:id/mcp-policy", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const { denied, access } = await requireVault(c, id, session.userId, "admin");
+  if (denied) return denied;
+
+  const row = await getOrCreateMcpPolicy(c.env.DB, id, access.vault.ownerId);
+  return c.json(policyResponse(row));
+});
+
+/** PATCH /api/vaults/:id/mcp-policy — update per-vault MCP policy */
+vaultRoutes.patch("/:id/mcp-policy", requireSession, async (c) => {
+  const session = c.get("session");
+  const { id } = c.req.param();
+  const { denied, access } = await requireVault(c, id, session.userId, "admin");
+  if (denied) return denied;
+
+  const current = await getOrCreateMcpPolicy(c.env.DB, id, access.vault.ownerId);
+  const body = await c.req.json<Partial<McpPolicyResponse>>();
+  const next: McpPolicyResponse = {
+    ...policyResponse(current),
+    ...body,
+    mode: body.mode === "read-write" ? "read-write" : body.mode === "read-only" ? "read-only" : policyResponse(current).mode,
+    pathAllow: Array.isArray(body.pathAllow) ? body.pathAllow : policyResponse(current).pathAllow,
+    pathDeny: Array.isArray(body.pathDeny) ? body.pathDeny : policyResponse(current).pathDeny,
+    maxReadBytes: Number.isFinite(body.maxReadBytes)
+      ? Math.min(Math.max(Number(body.maxReadBytes), 1024), 1024 * 1024)
+      : current.maxReadBytes,
+    maxWriteBytes: Number.isFinite(body.maxWriteBytes)
+      ? Math.min(Math.max(Number(body.maxWriteBytes), 1024), 1024 * 1024)
+      : current.maxWriteBytes,
+    maxResults: Number.isFinite(body.maxResults)
+      ? Math.min(Math.max(Number(body.maxResults), 1), 1000)
+      : current.maxResults,
+  };
+
+  if (next.mode === "read-only") next.allowDelete = false;
+
+  await c.env.DB.prepare(
+    `UPDATE vault_mcp_policies
+     SET enabled = ?, mode = ?, allow_grep = ?, allow_delete = ?,
+         allow_internals = ?, path_allow = ?, path_deny = ?,
+         max_read_bytes = ?, max_write_bytes = ?, max_results = ?,
+         updated_at = ?
+     WHERE vault_id = ? AND owner_id = ?`
+  )
+    .bind(
+      next.enabled ? 1 : 0,
+      next.mode,
+      next.allowGrep ? 1 : 0,
+      next.allowDelete ? 1 : 0,
+      next.allowInternals ? 1 : 0,
+      JSON.stringify(next.pathAllow.filter(Boolean)),
+      JSON.stringify(next.pathDeny.filter(Boolean)),
+      next.maxReadBytes,
+      next.maxWriteBytes,
+      next.maxResults,
+      new Date().toISOString(),
+      id,
+      access.vault.ownerId
+    )
+    .run();
+
+  return c.json(
+    policyResponse(await getOrCreateMcpPolicy(c.env.DB, id, access.vault.ownerId))
+  );
 });
 
 // ── Manifest ───────────────────────────────────────────────────────────────
@@ -129,8 +383,8 @@ vaultRoutes.get("/:id/manifest", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied } = await requireVault(c, id, session.userId, "read");
+  if (denied) return denied;
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
@@ -150,8 +404,8 @@ vaultRoutes.post("/:id/acks", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: acksInactive } = await requireVault(c, id, session.userId, "read");
+  if (acksInactive) return acksInactive;
 
   let body: { acks?: Array<{ path?: string; revision?: number }> };
   try {
@@ -179,8 +433,8 @@ vaultRoutes.post("/:id/acks", requireSession, async (c) => {
 vaultRoutes.get("/:id/conflicts", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: conflictsInactive } = await requireVault(c, id, session.userId, "read");
+  if (conflictsInactive) return conflictsInactive;
   const stub = c.env.VAULT_COORDINATOR.get(
     c.env.VAULT_COORDINATOR.idFromName(id)
   );
@@ -194,8 +448,8 @@ vaultRoutes.get("/:id/conflicts", requireSession, async (c) => {
 vaultRoutes.post("/:id/conflicts/resolve", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: resolveInactive } = await requireVault(c, id, session.userId, "write");
+  if (resolveInactive) return resolveInactive;
 
   let body: Partial<ResolveConflictRequest>;
   try {
@@ -260,9 +514,8 @@ vaultRoutes.get("/:id/files/*", requireSession, async (c) => {
     return c.json({ error: "Not found" }, 404);
   }
 
-  // Verify vault ownership
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: contentInactive } = await requireVault(c, id, session.userId, "read");
+  if (contentInactive) return contentInactive;
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
@@ -292,8 +545,8 @@ vaultRoutes.put("/:id/files/*", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: putInactive } = await requireVault(c, id, session.userId, "write");
+  if (putInactive) return putInactive;
 
   const url = new URL(c.req.url);
   const prefix = `/api/vaults/${id}/files/`;
@@ -354,8 +607,8 @@ vaultRoutes.patch("/:id/files/*", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: renameInactive } = await requireVault(c, id, session.userId, "write");
+  if (renameInactive) return renameInactive;
 
   const url = new URL(c.req.url);
   const prefix = `/api/vaults/${id}/files/`;
@@ -387,8 +640,8 @@ vaultRoutes.delete("/:id/files/*", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: deleteInactive } = await requireVault(c, id, session.userId, "write");
+  if (deleteInactive) return deleteInactive;
 
   const url = new URL(c.req.url);
   const prefix = `/api/vaults/${id}/files/`;
@@ -420,8 +673,8 @@ vaultRoutes.get("/:id/snapshots", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: snapshotsInactive } = await requireVault(c, id, session.userId, "read");
+  if (snapshotsInactive) return snapshotsInactive;
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
@@ -435,8 +688,8 @@ vaultRoutes.post("/:id/seal", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: sealInactive } = await requireVault(c, id, session.userId, "write");
+  if (sealInactive) return sealInactive;
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
@@ -464,8 +717,8 @@ vaultRoutes.post("/:id/files/*/restore", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: restoreInactive } = await requireVault(c, id, session.userId, "write");
+  if (restoreInactive) return restoreInactive;
 
   const url = new URL(c.req.url);
   // Strip /restore suffix to get the file path
@@ -520,8 +773,9 @@ vaultRoutes.get("/:id/export", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const vault = await resolveVault(c.env.DB, id, session.userId);
-  if (!vault) return c.json({ error: "Not found" }, 404);
+  const { denied: exportInactive, access } = await requireVault(c, id, session.userId, "read");
+  if (exportInactive) return exportInactive;
+  const activeVault = access.vault;
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const stub = c.env.VAULT_COORDINATOR.get(doId);
@@ -555,7 +809,7 @@ vaultRoutes.get("/:id/export", requireSession, async (c) => {
   const zipBytes = buildZip(zipEntries);
 
   // Sanitize vault name for the filename
-  const safeName = vault.name.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64);
+  const safeName = activeVault.name.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64);
   const filename = `${safeName}-export.zip`;
 
   return new Response(zipBytes, {

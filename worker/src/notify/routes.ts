@@ -21,22 +21,11 @@ import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
 import { requireDevice } from "../middleware/syncAuth";
 import { deviceAuthor } from "../vault/identity";
+import { denyAccess, resolveVaultAccess } from "../vault/access";
 
 const notifyRoutes = new Hono<{ Bindings: Env }>();
 
 // ── Helper ─────────────────────────────────────────────────────────────────
-
-async function resolveVaultOwner(
-  db: D1Database,
-  vaultId: string,
-  userId: string
-): Promise<boolean> {
-  const row = await db
-    .prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`)
-    .bind(vaultId, userId)
-    .first<{ id: string }>();
-  return !!row;
-}
 
 function upgradeToWebSocket(
   request: Request,
@@ -67,8 +56,9 @@ notifyRoutes.get("/vaults/:id/notify", requireSession, async (c) => {
   const session = c.get("session");
   const { id: vaultId } = c.req.param();
 
-  const owned = await resolveVaultOwner(c.env.DB, vaultId, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, vaultId, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   const identity = deviceAuthor("web", session.sessionId);
 

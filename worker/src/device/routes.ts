@@ -6,21 +6,23 @@
  *      ← { deviceCode, userCode, verificationUri, expiresIn }
  *   2. Plugin: polls POST /api/device-auth/token  { deviceCode }
  *      ← 202 { status: 'pending' } | 200 { token, deviceId } | 400 { error: 'denied'|'expired' }
- *   3. Vault Owner: GET /api/vaults/:id/devices/pending  → pending user codes
- *   4. Vault Owner: POST /api/vaults/:id/devices/approve  { userCode }
- *      ← Device created, poll resolves with token
+ *   3. Any vault member: GET /api/vaults/:id/devices/pending  → pending user codes
+ *   4. Any vault member: POST /api/vaults/:id/devices/approve  { userCode }
+ *      ← Device created, poll resolves with token (writable follows the approver's role)
  *   5. Plugin uses Authorization: Bearer <token> for all sync requests
  *
- * Device management (authenticated as vault owner):
+ * Device management (authenticated as a vault member):
  *   GET    /api/vaults/:id/devices
- *   DELETE /api/vaults/:id/devices/:deviceId   (revoke)
+ *   DELETE /api/vaults/:id/devices/:deviceId   (revoke own device, or any as owner)
  *   PATCH  /api/vaults/:id/devices/:deviceId   { receiveInternals: boolean }
  */
 
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
-import { createAgentDevice, createPluginDevice } from "../devices/record";
+import { createAgentDevice, createPluginDevice, getDeviceById } from "../devices/record";
+import { capabilitiesForAccess } from "../devices/types";
+import { denyAccess, resolveVaultAccess, roleCanWrite } from "../vault/access";
 
 const deviceRoutes = new Hono<{ Bindings: Env }>();
 
@@ -44,9 +46,15 @@ deviceRoutes.post("/device-auth/request", async (c) => {
 
   // Verify vault exists
   const vault = await c.env.DB.prepare(
-    `SELECT id, owner_id FROM vaults WHERE id = ?`
-  ).bind(vaultId).first<{ id: string; owner_id: string }>();
+    `SELECT id, owner_id, archived_at FROM vaults WHERE id = ?`
+  ).bind(vaultId).first<{ id: string; owner_id: string; archived_at: string | null }>();
   if (!vault) return c.json({ error: "Vault not found" }, 404);
+  if (vault.archived_at) {
+    return c.json(
+      { error: "Vault is archived", archivedAt: vault.archived_at },
+      423 as 400
+    );
+  }
 
   const deviceCode = generateSecret(32);
   const userCode = generateUserCode();
@@ -89,13 +97,14 @@ deviceRoutes.post("/device-auth/token", async (c) => {
     user_code: string;
     vault_id: string;
     owner_id: string;
+    approved_by: string | null;
     device_name: string;
     status: string;
     expires_at: string;
   };
 
   const row = await c.env.DB.prepare(
-    `SELECT device_code, user_code, vault_id, owner_id, device_name, status, expires_at
+    `SELECT device_code, user_code, vault_id, owner_id, approved_by, device_name, status, expires_at
      FROM device_codes WHERE device_code = ?`
   ).bind(deviceCode).first<DeviceCodeRow>();
 
@@ -119,17 +128,43 @@ deviceRoutes.post("/device-auth/token", async (c) => {
 
   // status === "approved" — create device record and return token
   if (row.status === "approved") {
+    const vault = await c.env.DB.prepare(
+      `SELECT archived_at AS archivedAt FROM vaults WHERE id = ?`
+    )
+      .bind(row.vault_id)
+      .first<{ archivedAt: string | null }>();
+    if (vault?.archivedAt) {
+      return c.json(
+        { error: "Vault is archived", archivedAt: vault.archivedAt },
+        423 as 400
+      );
+    }
+
     // Check if device was already created (idempotent poll)
-    type DeviceRow = { id: string; sync_token: string };
+    type DeviceRow = { id: string; sync_token: string; user_id: string | null };
     const existing = await c.env.DB.prepare(
-      `SELECT id, sync_token FROM devices WHERE vault_id = ? AND device_name = ? AND revoked = 0`
+      `SELECT id, sync_token, user_id FROM devices WHERE vault_id = ? AND device_name = ? AND revoked = 0`
     ).bind(row.vault_id, row.device_name).first<DeviceRow>();
 
     if (existing) {
       await c.env.DB.prepare(`DELETE FROM device_codes WHERE device_code = ?`)
         .bind(deviceCode).run();
-      return c.json({ token: existing.sync_token, deviceId: existing.id });
+      const userId = existing.user_id || row.owner_id;
+      const access = await resolveVaultAccess(c.env.DB, row.vault_id, userId);
+      return c.json({
+        token: existing.sync_token,
+        deviceId: existing.id,
+        writable: access ? roleCanWrite(access.role) : false,
+        role: access?.role ?? "viewer",
+      });
     }
+
+    const userId = row.approved_by || row.owner_id;
+    const access = await resolveVaultAccess(c.env.DB, row.vault_id, userId);
+    if (!access) {
+      return c.json({ error: "not_found" }, 400);
+    }
+    const writable = roleCanWrite(access.role);
 
     const deviceId = crypto.randomUUID();
     const syncToken = generateSecret(40);
@@ -137,14 +172,16 @@ deviceRoutes.post("/device-auth/token", async (c) => {
       id: deviceId,
       vaultId: row.vault_id,
       ownerId: row.owner_id,
+      userId,
       deviceName: row.device_name,
       syncToken,
+      capabilities: capabilitiesForAccess(writable),
     });
 
     await c.env.DB.prepare(`DELETE FROM device_codes WHERE device_code = ?`)
       .bind(deviceCode).run();
 
-    return c.json({ token: syncToken, deviceId });
+    return c.json({ token: syncToken, deviceId, writable, role: access.role });
   }
 
   return c.json({ error: "not_found" }, 400);
@@ -167,8 +204,9 @@ deviceRoutes.get("/vaults/:id/devices/pending", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   // Clean up expired codes
   await c.env.DB.prepare(
@@ -194,8 +232,9 @@ deviceRoutes.post("/vaults/:id/devices/approve", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   const body = await c.req.json<{ userCode?: string }>();
   const userCode = (body.userCode ?? "").trim().toUpperCase();
@@ -214,8 +253,8 @@ deviceRoutes.post("/vaults/:id/devices/approve", requireSession, async (c) => {
   }
 
   await c.env.DB.prepare(
-    `UPDATE device_codes SET status = 'approved' WHERE device_code = ?`
-  ).bind(row.device_code).run();
+    `UPDATE device_codes SET status = 'approved', approved_by = ? WHERE device_code = ?`
+  ).bind(session.userId, row.device_code).run();
 
   return c.json({ ok: true });
 });
@@ -229,8 +268,9 @@ deviceRoutes.post("/vaults/:id/devices/deny", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   const body = await c.req.json<{ userCode?: string }>();
   const userCode = (body.userCode ?? "").trim().toUpperCase();
@@ -250,6 +290,7 @@ export interface Device {
   id: string;
   deviceName: string;
   kind: string;
+  userId?: string | null;
   receiveInternals: boolean;
   revoked: boolean;
   createdAt: string;
@@ -266,11 +307,12 @@ deviceRoutes.get("/vaults/:id/devices", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
 
   const { results } = await c.env.DB.prepare(
-    `SELECT id, device_name AS deviceName, kind,
+    `SELECT id, device_name AS deviceName, kind, user_id AS userId,
             receive_internals AS receiveInternals,
             capabilities,
             conflict_policy AS conflictPolicy,
@@ -301,8 +343,9 @@ deviceRoutes.post("/vaults/:id/agents", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "write");
+  if (denied) return denied;
 
   const body = await c.req.json<{ name?: string }>();
   const name = (body.name ?? "Agent").trim();
@@ -313,7 +356,8 @@ deviceRoutes.post("/vaults/:id/agents", requireSession, async (c) => {
   const { record } = await createAgentDevice(c.env.DB, {
     id: agentId,
     vaultId: id,
-    ownerId: session.userId,
+    ownerId: access!.vault.ownerId,
+    userId: session.userId,
     name,
     syncToken,
   });
@@ -329,8 +373,16 @@ deviceRoutes.delete("/vaults/:id/devices/:deviceId", requireSession, async (c) =
   const session = c.get("session");
   const { id, deviceId } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
+
+  const device = await getDeviceById(c.env.DB, id, deviceId);
+  if (!device) return c.json({ error: "Not found" }, 404);
+  const ownsDevice = (device.userId || device.ownerId) === session.userId;
+  if (access!.role !== "owner" && !ownsDevice) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
 
   await c.env.DB.prepare(
     `UPDATE devices SET revoked = 1 WHERE id = ? AND vault_id = ?`
@@ -348,8 +400,16 @@ deviceRoutes.patch("/vaults/:id/devices/:deviceId", requireSession, async (c) =>
   const session = c.get("session");
   const { id, deviceId } = c.req.param();
 
-  const owned = await verifyVaultOwner(c.env.DB, id, session.userId);
-  if (!owned) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "read");
+  if (denied) return denied;
+
+  const device = await getDeviceById(c.env.DB, id, deviceId);
+  if (!device) return c.json({ error: "Not found" }, 404);
+  const ownsDevice = (device.userId || device.ownerId) === session.userId;
+  if (access!.role !== "owner" && !ownsDevice) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
 
   const body = await c.req.json<{ receiveInternals?: boolean }>();
   const receiveInternals = body.receiveInternals === true ? 1 : 0;
@@ -362,18 +422,6 @@ deviceRoutes.patch("/vaults/:id/devices/:deviceId", requireSession, async (c) =>
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-async function verifyVaultOwner(
-  db: D1Database,
-  vaultId: string,
-  userId: string
-): Promise<boolean> {
-  const row = await db
-    .prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`)
-    .bind(vaultId, userId)
-    .first<{ id: string }>();
-  return row !== null;
-}
 
 /** Generate a cryptographically random hex string of given byte length. */
 function generateSecret(bytes: number): string {

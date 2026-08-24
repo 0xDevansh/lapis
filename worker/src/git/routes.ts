@@ -7,18 +7,16 @@ import type { Env } from "../types";
 import { requireSession } from "../middleware/auth";
 import { encryptPat, patLast4 } from "./crypto";
 import { deleteGitRemote, getGitRemote, publicGitRemoteMeta, updateGitRemoteState, upsertGitRemote } from "./store";
+import { denyAccess, resolveVaultAccess } from "../vault/access";
 
 const gitRoutes = new Hono<{ Bindings: Env }>();
-
-async function verifyVaultOwner(db: D1Database, vaultId: string, userId: string): Promise<boolean> {
-  const row = await db.prepare(`SELECT id FROM vaults WHERE id = ? AND owner_id = ?`).bind(vaultId, userId).first();
-  return !!row;
-}
 
 gitRoutes.put("/vaults/:id/git-remote", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
-  if (!(await verifyVaultOwner(c.env.DB, id, session.userId))) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "admin");
+  if (denied) return denied;
 
   const body = await c.req.json<{ repoUrl?: string; branch?: string; subdir?: string; pat?: string }>();
   const repoUrl = (body.repoUrl ?? "").trim();
@@ -58,7 +56,9 @@ gitRoutes.put("/vaults/:id/git-remote", requireSession, async (c) => {
 gitRoutes.get("/vaults/:id/git-remote", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
-  if (!(await verifyVaultOwner(c.env.DB, id, session.userId))) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "admin");
+  if (denied) return denied;
 
   const row = await getGitRemote(c.env.DB, id);
   if (!row) return c.json({ connected: false });
@@ -68,7 +68,9 @@ gitRoutes.get("/vaults/:id/git-remote", requireSession, async (c) => {
 gitRoutes.delete("/vaults/:id/git-remote", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
-  if (!(await verifyVaultOwner(c.env.DB, id, session.userId))) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "admin");
+  if (denied) return denied;
   await deleteGitRemote(c.env.DB, id);
   return c.json({ ok: true });
 });
@@ -76,7 +78,9 @@ gitRoutes.delete("/vaults/:id/git-remote", requireSession, async (c) => {
 gitRoutes.post("/vaults/:id/git-remote/push", requireSession, async (c) => {
   const session = c.get("session");
   const { id } = c.req.param();
-  if (!(await verifyVaultOwner(c.env.DB, id, session.userId))) return c.json({ error: "Not found" }, 404);
+  const access = await resolveVaultAccess(c.env.DB, id, session.userId);
+  const denied = denyAccess(c, access, "admin");
+  if (denied) return denied;
 
   const doId = c.env.VAULT_COORDINATOR.idFromName(id);
   const result = await c.env.VAULT_COORDINATOR.get(doId).sealNow("manual push");

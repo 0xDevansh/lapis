@@ -18,6 +18,7 @@ type DeviceRow = {
   id: string;
   vault_id: string;
   owner_id: string;
+  user_id: string | null;
   device_name: string;
   kind: string;
   capabilities: string | null;
@@ -34,6 +35,7 @@ function rowToRecord(row: DeviceRow): DeviceRecord {
     id: row.id,
     vaultId: row.vault_id,
     ownerId: row.owner_id,
+    userId: row.user_id,
     deviceName: row.device_name,
     kind: (row.kind || "plugin") as DeviceKind,
     capabilities: parseCapabilitiesJson(row.capabilities),
@@ -46,13 +48,25 @@ function rowToRecord(row: DeviceRow): DeviceRecord {
   };
 }
 
-const DEVICE_COLUMNS = `id, vault_id, owner_id, device_name, kind, capabilities,
+const DEVICE_COLUMNS = `id, vault_id, owner_id, user_id, device_name, kind, capabilities,
   conflict_policy, sync_cursor, receive_internals, revoked, created_at, last_seen_at`;
 
 export async function getDeviceByToken(db: D1Database, token: string): Promise<DeviceRecord | null> {
   const row = await db
     .prepare(`SELECT ${DEVICE_COLUMNS} FROM devices WHERE sync_token = ? AND revoked = 0`)
     .bind(token)
+    .first<DeviceRow>();
+  return row ? rowToRecord(row) : null;
+}
+
+export async function getDeviceById(
+  db: D1Database,
+  vaultId: string,
+  deviceId: string
+): Promise<DeviceRecord | null> {
+  const row = await db
+    .prepare(`SELECT ${DEVICE_COLUMNS} FROM devices WHERE id = ? AND vault_id = ? AND revoked = 0`)
+    .bind(deviceId, vaultId)
     .first<DeviceRow>();
   return row ? rowToRecord(row) : null;
 }
@@ -67,23 +81,32 @@ export async function listVaultDevices(db: D1Database, vaultId: string): Promise
 
 export async function createPluginDevice(
   db: D1Database,
-  input: { id: string; vaultId: string; ownerId: string; deviceName: string; syncToken: string }
+  input: {
+    id: string;
+    vaultId: string;
+    ownerId: string;
+    userId: string;
+    deviceName: string;
+    syncToken: string;
+    capabilities?: DeviceCapabilities;
+  }
 ): Promise<DeviceRecord> {
   const now = new Date().toISOString();
   await db
     .prepare(
       `INSERT INTO devices
-       (id, vault_id, owner_id, device_name, sync_token, kind, capabilities, conflict_policy,
+       (id, vault_id, owner_id, user_id, device_name, sync_token, kind, capabilities, conflict_policy,
         receive_internals, revoked, created_at)
-       VALUES (?, ?, ?, ?, ?, 'plugin', ?, 'rebase', 0, 0, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, 'plugin', ?, 'rebase', 0, 0, ?)`
     )
     .bind(
       input.id,
       input.vaultId,
       input.ownerId,
+      input.userId,
       input.deviceName,
       input.syncToken,
-      capabilitiesToJson(DEFAULT_PLUGIN_CAPABILITIES),
+      capabilitiesToJson(input.capabilities ?? DEFAULT_PLUGIN_CAPABILITIES),
       now
     )
     .run();
@@ -97,20 +120,21 @@ export async function createPluginDevice(
 
 export async function createAgentDevice(
   db: D1Database,
-  input: { id: string; vaultId: string; ownerId: string; name: string; syncToken: string }
+  input: { id: string; vaultId: string; ownerId: string; userId: string; name: string; syncToken: string }
 ): Promise<{ record: DeviceRecord; token: string }> {
   const now = new Date().toISOString();
   await db
     .prepare(
       `INSERT INTO devices
-       (id, vault_id, owner_id, device_name, sync_token, kind, capabilities, conflict_policy,
+       (id, vault_id, owner_id, user_id, device_name, sync_token, kind, capabilities, conflict_policy,
         receive_internals, revoked, created_at)
-       VALUES (?, ?, ?, ?, ?, 'agent', ?, 'conflict-note', 0, 0, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, 'agent', ?, 'conflict-note', 0, 0, ?)`
     )
     .bind(
       input.id,
       input.vaultId,
       input.ownerId,
+      input.userId,
       input.name,
       input.syncToken,
       capabilitiesToJson(DEFAULT_AGENT_CAPABILITIES),

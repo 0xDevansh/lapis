@@ -595,6 +595,31 @@ export class VaultCoordinator extends DurableObject<Env> {
     };
   }
 
+  renameVault(name: string): VaultMeta | null {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw Object.assign(new Error("name is required"), { status: 400 });
+    }
+    const meta = this.sql.exec<VaultMetaRow>(
+      `SELECT id, owner_id AS ownerId, name, created_at AS createdAt,
+              artifacts_remote AS artifactsRemote
+       FROM vault_meta LIMIT 1`
+    ).toArray()[0];
+    if (!meta) return null;
+    this.sql.exec(
+      `UPDATE vault_meta SET name = ? WHERE id = ?`,
+      trimmed,
+      String(meta.id)
+    );
+    return {
+      id: String(meta.id),
+      ownerId: String(meta.ownerId),
+      name: trimmed,
+      createdAt: String(meta.createdAt),
+      artifactsRemote: meta.artifactsRemote != null ? String(meta.artifactsRemote) : null,
+    };
+  }
+
   setArtifactsRemote(remote: string): void {
     this.sql.exec(
       `UPDATE vault_meta SET artifacts_remote = ? WHERE id = (SELECT id FROM vault_meta LIMIT 1)`,

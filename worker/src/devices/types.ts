@@ -13,6 +13,8 @@ export interface DeviceCapabilities {
   offlineQueue: boolean;
   receiveInternals: boolean;
   transport: "rest" | "git";
+  /** When false, sendEdit/resolveConflict must refuse. Defaults to true. */
+  writable: boolean;
 }
 
 export interface DeviceIdentity {
@@ -78,6 +80,7 @@ export interface Device {
   readonly identity: DeviceIdentity;
   readonly capabilities: DeviceCapabilities;
   readonly conflictPolicy: ConflictPolicy;
+  readonly writable: boolean;
   sendEdit(op: EditOp): Promise<SendResult>;
   receiveEdit(change: ChangeNotification): Promise<void>;
   resolveConflict(request: ConflictResolutionRequest): Promise<Resolution>;
@@ -90,6 +93,7 @@ export interface DeviceRecord {
   id: string;
   vaultId: string;
   ownerId: string;
+  userId: string | null;
   deviceName: string;
   kind: DeviceKind;
   capabilities: DeviceCapabilities;
@@ -107,6 +111,7 @@ export const DEFAULT_PLUGIN_CAPABILITIES: DeviceCapabilities = {
   offlineQueue: true,
   receiveInternals: false,
   transport: "rest",
+  writable: true,
 };
 
 export const DEFAULT_AGENT_CAPABILITIES: DeviceCapabilities = {
@@ -115,7 +120,24 @@ export const DEFAULT_AGENT_CAPABILITIES: DeviceCapabilities = {
   offlineQueue: false,
   receiveInternals: false,
   transport: "rest",
+  writable: true,
 };
+
+export const READ_ONLY_DEVICE_ERROR = "This vault connection is read-only";
+
+export function assertDeviceWritable(device: Pick<Device, "writable">): void {
+  if (!device.writable) {
+    throw new Error(READ_ONLY_DEVICE_ERROR);
+  }
+}
+
+export function capabilitiesForAccess(writable: boolean): DeviceCapabilities {
+  return {
+    ...DEFAULT_PLUGIN_CAPABILITIES,
+    writable,
+    bidirectional: writable,
+  };
+}
 
 export function identityFromRecord(record: Pick<DeviceRecord, "id" | "kind" | "deviceName">): DeviceIdentity {
   return {
