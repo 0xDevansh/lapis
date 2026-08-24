@@ -12,12 +12,18 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "@better-auth/kysely-adapter": "^1.6.16",
-    "better-auth": "^1.6.16",
+    "@better-auth/cimd": "^1.7.1",
+    "@better-auth/kysely-adapter": "^1.7.1",
+    "@better-auth/mcp": "^1.7.1",
+    "@better-auth/oauth-provider": "^1.7.1",
+    "@modelcontextprotocol/hono": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "better-auth": "^1.7.1",
     "hono": "^4.7.11",
     "isomorphic-git": "^1.38.4",
     "kysely": "^0.29.2",
-    "kysely-d1": "^0.4.0"
+    "kysely-d1": "^0.4.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.4",

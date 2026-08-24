@@ -2,13 +2,18 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import type { Env } from "./types";
-import { createAuth, getTrustedOrigins } from "./auth";
+import { createAuth, getMcpResourceURL, getTrustedOrigins } from "./auth";
+import { requireMcpAuth } from "@better-auth/mcp";
 import { vaultRoutes } from "./vault/routes";
+import { inviteInboxRoutes, vaultMemberRoutes } from "./vault/invites";
 import { searchRoutes } from "./search/routes";
 import { deviceRoutes } from "./device/routes";
 import { syncRoutes } from "./sync/routes";
 import { notifyRoutes } from "./notify/routes";
 import { gitRoutes } from "./git/routes";
+import { createLapisMcpHandler } from "./mcp/server";
+import { mcpTokenRoutes } from "./mcp/routes";
+import { extractBearerToken, isMcpPersonalToken, resolveMcpBearerToken, touchMcpToken } from "./mcp/tokens";
 
 export { VaultCoordinator } from "./vault/coordinator";
 
@@ -42,8 +47,45 @@ app.all("/api/auth/*", (c): any => {
   return auth.handler(c.req.raw);
 });
 
+// RFC 8414 / RFC 9728 discovery lives at the issuer origin, not under /api/auth.
+app.use("/.well-known/*", cors({ origin: "*" }));
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+app.all("/.well-known/*", (c): any => {
+  const auth = createAuth(c.env);
+  return auth.handler(c.req.raw);
+});
+
 // ── API routes ───────────────────────────────────────────────────────────────
+app.route("/api/mcp/tokens", mcpTokenRoutes);
+
+app.all("/api/mcp", async (c) => {
+  const bearer = extractBearerToken(c.req.header("Authorization"));
+  if (bearer && isMcpPersonalToken(bearer)) {
+    const record = await resolveMcpBearerToken(c.env.DB, bearer);
+    if (!record) return c.json({ error: "Unauthorized" }, 401);
+    c.executionCtx.waitUntil(touchMcpToken(c.env.DB, record.id));
+    return createLapisMcpHandler(c.env, {
+      sub: record.userId,
+      client_id: `token:${record.id}`,
+    }).fetch(c.req.raw);
+  }
+
+  const auth = createAuth(c.env);
+  const resource = getMcpResourceURL(c.env.BETTER_AUTH_URL);
+  const protectedHandler = requireMcpAuth(
+    auth,
+    async (request, claims) => createLapisMcpHandler(c.env, claims).fetch(request),
+    {
+      resource,
+      challengeScopes: ["openid", "profile", "offline_access", "mcp:read"],
+    }
+  );
+  return protectedHandler(c.req.raw);
+});
+
 app.route("/api/vaults", vaultRoutes);
+app.route("/api/vaults", vaultMemberRoutes);
+app.route("/api/invites", inviteInboxRoutes);
 app.route("/api/vaults", searchRoutes);
 app.route("/api", deviceRoutes);
 app.route("/api/sync", syncRoutes);
