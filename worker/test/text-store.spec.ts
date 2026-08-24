@@ -22,6 +22,7 @@ async function initialize(vaultId: string) {
       id TEXT PRIMARY KEY,
       vault_id TEXT NOT NULL,
       owner_id TEXT NOT NULL,
+      user_id TEXT,
       device_name TEXT NOT NULL,
       sync_token TEXT NOT NULL UNIQUE,
       receive_internals INTEGER NOT NULL DEFAULT 0,
@@ -34,6 +35,7 @@ async function initialize(vaultId: string) {
       sync_cursor TEXT
     )`
   ).run();
+  await env.DB.prepare("ALTER TABLE devices ADD COLUMN user_id TEXT").run().catch(() => {});
   const stub = coordinator(vaultId);
   await stub.initialize({
     id: vaultId,
