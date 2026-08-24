@@ -121,14 +121,51 @@ export async function getSession(): Promise<SessionInfo | null> {
 
 // ── Vaults ────────────────────────────────────────────────────────────────────
 
+export type VaultRole = "owner" | "editor" | "viewer";
+
 export interface Vault {
   id: string;
+  name: string;
+  createdAt: string;
+  archivedAt?: string | null;
+  role?: VaultRole;
+}
+
+export function canEditVault(role?: VaultRole | null): boolean {
+  return role === "owner" || role === "editor";
+}
+
+export function isVaultOwner(role?: VaultRole | null): boolean {
+  return role === "owner";
+}
+
+export interface VaultInvite {
+  id: string;
+  vaultId: string;
+  vaultName: string;
+  email: string;
+  role: "editor" | "viewer";
+  invitedBy: string;
+  invitedByEmail: string | null;
+  invitedByName: string | null;
+  status: string;
+  createdAt: string;
+}
+
+export interface VaultMember {
+  userId: string;
+  role: VaultRole;
+  email: string;
   name: string;
   createdAt: string;
 }
 
 export async function listVaults(): Promise<Vault[]> {
   return apiFetch<Vault[]>("/api/vaults");
+}
+
+export async function listArchivedVaults(): Promise<Vault[]> {
+  return apiFetch<Vault[]>("/api/vaults/archived");
 }
 
 export async function createVault(name: string): Promise<Vault> {
@@ -140,6 +177,138 @@ export async function createVault(name: string): Promise<Vault> {
 
 export async function getVault(id: string): Promise<Vault> {
   return apiFetch<Vault>(`/api/vaults/${id}`);
+}
+
+export async function renameVault(id: string, name: string): Promise<Vault> {
+  return apiFetch<Vault>(`/api/vaults/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function archiveVault(id: string): Promise<{ ok: true; archivedAt: string }> {
+  return apiFetch<{ ok: true; archivedAt: string }>(`/api/vaults/${id}/archive`, {
+    method: "POST",
+  });
+}
+
+export async function restoreVault(id: string): Promise<Vault> {
+  return apiFetch<Vault>(`/api/vaults/${id}/restore`, {
+    method: "POST",
+  });
+}
+
+export async function listInvites(): Promise<VaultInvite[]> {
+  return apiFetch<VaultInvite[]>("/api/invites");
+}
+
+export async function acceptInvite(
+  id: string
+): Promise<{ ok: true; vaultId: string; vaultName: string; role: VaultRole }> {
+  return apiFetch(`/api/invites/${id}/accept`, { method: "POST" });
+}
+
+export async function rejectInvite(id: string): Promise<{ ok: true }> {
+  return apiFetch(`/api/invites/${id}/reject`, { method: "POST" });
+}
+
+export async function listVaultMembers(vaultId: string): Promise<VaultMember[]> {
+  return apiFetch<VaultMember[]>(`/api/vaults/${vaultId}/members`);
+}
+
+export async function inviteVaultMember(
+  vaultId: string,
+  email: string,
+  role: "editor" | "viewer"
+): Promise<VaultInvite> {
+  return apiFetch<VaultInvite>(`/api/vaults/${vaultId}/invites`, {
+    method: "POST",
+    body: JSON.stringify({ email, role }),
+  });
+}
+
+export async function listVaultInvites(vaultId: string): Promise<VaultInvite[]> {
+  return apiFetch<VaultInvite[]>(`/api/vaults/${vaultId}/invites`);
+}
+
+export async function cancelVaultInvite(
+  vaultId: string,
+  inviteId: string
+): Promise<{ ok: true }> {
+  return apiFetch(`/api/vaults/${vaultId}/invites/${inviteId}`, { method: "DELETE" });
+}
+
+export async function updateVaultMemberRole(
+  vaultId: string,
+  userId: string,
+  role: "editor" | "viewer"
+): Promise<{ ok: true; userId: string; role: string }> {
+  return apiFetch(`/api/vaults/${vaultId}/members/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export async function removeVaultMember(
+  vaultId: string,
+  userId: string
+): Promise<{ ok: true }> {
+  return apiFetch(`/api/vaults/${vaultId}/members/${userId}`, { method: "DELETE" });
+}
+
+export interface McpVaultPolicy {
+  vaultId: string;
+  enabled: boolean;
+  mode: "read-only" | "read-write";
+  allowGrep: boolean;
+  allowDelete: boolean;
+  allowInternals: boolean;
+  pathAllow: string[];
+  pathDeny: string[];
+  maxReadBytes: number;
+  maxWriteBytes: number;
+  maxResults: number;
+}
+
+export async function getMcpPolicy(vaultId: string): Promise<McpVaultPolicy> {
+  return apiFetch<McpVaultPolicy>(`/api/vaults/${vaultId}/mcp-policy`);
+}
+
+export async function updateMcpPolicy(
+  vaultId: string,
+  updates: Partial<McpVaultPolicy>
+): Promise<McpVaultPolicy> {
+  return apiFetch<McpVaultPolicy>(`/api/vaults/${vaultId}/mcp-policy`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+}
+
+export interface McpToken {
+  id: string;
+  name: string;
+  last4: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface CreatedMcpToken extends McpToken {
+  token: string;
+}
+
+export async function listMcpTokens(): Promise<McpToken[]> {
+  return apiFetch<McpToken[]>("/api/mcp/tokens");
+}
+
+export async function createMcpToken(name: string): Promise<CreatedMcpToken> {
+  return apiFetch<CreatedMcpToken>("/api/mcp/tokens", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function revokeMcpToken(id: string): Promise<void> {
+  await apiFetch<{ ok: true }>(`/api/mcp/tokens/${id}`, { method: "DELETE" });
 }
 
 // ── Vault Content ─────────────────────────────────────────────────────────────
@@ -432,6 +601,7 @@ export interface Device {
   id: string;
   deviceName: string;
   kind?: string;
+  userId?: string | null;
   receiveInternals: boolean;
   revoked: boolean;
   createdAt: string;

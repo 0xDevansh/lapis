@@ -20,9 +20,9 @@ interface MobileToolbarProps {
   /** Current display mode of the active tab. */
   mode: TabMode;
   onToggleLeft: () => void;
-  onNewNote: () => void;
-  onSave: () => void;
-  onToggleMode: () => void;
+  onNewNote?: () => void;
+  onSave?: () => void;
+  onToggleMode?: () => void;
   onToggleRight: () => void;
 }
 
@@ -86,23 +86,23 @@ export default function MobileToolbar({
         <FolderSimple size={22} weight="duotone" />
       </ToolbarButton>
 
-      <ToolbarButton label="New" onClick={onNewNote}>
+      <ToolbarButton label="New" onClick={onNewNote ?? (() => {})} disabled={!onNewNote}>
         <FilePlus size={22} weight="duotone" />
       </ToolbarButton>
 
       <ToolbarButton
         label={saving ? "Saving…" : "Save"}
-        onClick={onSave}
-        disabled={!hasActiveTab || !dirty || saving}
-        badge={hasActiveTab && dirty && !saving}
+        onClick={onSave ?? (() => {})}
+        disabled={!onSave || !hasActiveTab || !dirty || saving}
+        badge={Boolean(onSave) && hasActiveTab && dirty && !saving}
       >
         <FloppyDisk size={22} weight="duotone" />
       </ToolbarButton>
 
       <ToolbarButton
         label={mode === "preview" ? "Edit" : "Preview"}
-        onClick={onToggleMode}
-        disabled={!hasActiveTab || !isMd}
+        onClick={onToggleMode ?? (() => {})}
+        disabled={!onToggleMode || !hasActiveTab || !isMd}
       >
         {mode === "preview" ? (
           <PencilSimple size={22} weight="duotone" />

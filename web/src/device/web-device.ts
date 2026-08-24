@@ -14,18 +14,18 @@ import type {
   Resolution,
   SendResult,
 } from "./types";
-import { DEFAULT_WEB_CAPABILITIES } from "./types";
+import { assertDeviceWritable, DEFAULT_WEB_CAPABILITIES } from "./types";
 
 export interface WebDeviceOptions {
   vaultId: string;
   sessionId: string;
+  writable?: boolean;
   getTabRevision: (path: string) => number | undefined;
   setTabContent: (path: string, content: string, revision: number) => void;
   onRemoteChange: (change: ChangeNotification) => Promise<void>;
 }
 
 export class WebDevice implements Device {
-  readonly capabilities: DeviceCapabilities = DEFAULT_WEB_CAPABILITIES;
   readonly conflictPolicy = "rebase" as const;
   readonly identity: DeviceIdentity;
 
@@ -38,7 +38,20 @@ export class WebDevice implements Device {
     };
   }
 
+  get writable(): boolean {
+    return this.options.writable !== false;
+  }
+
+  get capabilities(): DeviceCapabilities {
+    return {
+      ...DEFAULT_WEB_CAPABILITIES,
+      writable: this.writable,
+      bidirectional: this.writable,
+    };
+  }
+
   async sendEdit(op: EditOp): Promise<SendResult> {
+    assertDeviceWritable(this);
     if (op.kind !== "put" || op.content === undefined) {
       throw new Error("Web device only supports put edits");
     }
@@ -57,6 +70,7 @@ export class WebDevice implements Device {
   async resolveConflict(
     request: ConflictResolutionRequest
   ): Promise<Resolution> {
+    assertDeviceWritable(this);
     const result = await api.resolveConflict(this.options.vaultId, request);
     const content =
       request.action === "keep-server"

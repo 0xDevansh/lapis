@@ -166,6 +166,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   const isMobile = useIsMobile();
 
   const [vault, setVault] = useState<api.Vault | null>(null);
+  const [vaultError, setVaultError] = useState<string | null>(null);
   const [manifest, setManifest] = useState<api.VaultManifest | null>(null);
   const [manifestError, setManifestError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -198,6 +199,8 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   }, [state.tabs]);
 
   const anyDirty = state.tabs.some((t) => t.dirty);
+  const canEdit = api.canEditVault(vault?.role);
+  const isOwner = api.isVaultOwner(vault?.role);
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
@@ -225,7 +228,13 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   }, [vaultId]);
 
   useEffect(() => {
-    api.getVault(vaultId).then(setVault).catch(() => {});
+    api
+      .getVault(vaultId)
+      .then((next) => {
+        setVault(next);
+        setVaultError(null);
+      })
+      .catch((error) => setVaultError((error as Error).message));
     api.getSession().then((session) => setSessionId(session?.session?.id ?? null)).catch(() => setSessionId(null));
     refreshManifest();
     refreshConflicts();
@@ -915,15 +924,18 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
   // ── Command palette actions ────────────────────────────────────────────--
 
   const commands: Command[] = useMemo(() => {
-    const list: Command[] = [
-      {
+    const list: Command[] = [];
+    if (canEdit) {
+      list.push({
         id: "new-note",
         title: "New note",
         hint: "⌘N",
         keywords: "create file add",
         icon: <FilePlus size={16} />,
         run: () => openNewNoteModal(),
-      },
+      });
+    }
+    list.push(
       {
         id: "quick-open",
         title: "Go to file…",
@@ -932,13 +944,17 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         icon: <FileMagnifyingGlass size={16} />,
         run: () => setPalette("files"),
       },
-      {
+    );
+    if (canEdit) {
+      list.push({
         id: "upload",
         title: "Upload file…",
         keywords: "attach import",
         icon: <UploadSimple size={16} />,
         run: () => uploadRef.current?.click(),
-      },
+      });
+    }
+    list.push(
       {
         id: "search",
         title: "Search vault",
@@ -980,24 +996,26 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         keywords: "download backup zip",
         icon: <DownloadSimple size={16} />,
         run: () => window.open(api.exportUrl(vaultId), "_blank"),
-      },
-      {
+      }
+    );
+    if (vault) {
+      list.push({
         id: "devices",
         title: "Manage devices",
         keywords: "sync plugin connect",
         icon: <DeviceMobile size={16} />,
         run: () => guardedNavigate(`/vault/${vaultId}/devices`),
-      },
-      {
-        id: "home",
-        title: "Back to vaults",
-        keywords: "list home exit",
-        icon: <House size={16} />,
-        run: () => guardedNavigate("/"),
-      },
-    ];
+      });
+    }
+    list.push({
+      id: "home",
+      title: "Back to vaults",
+      keywords: "list home exit",
+      icon: <House size={16} />,
+      run: () => guardedNavigate("/"),
+    });
 
-    if (conflicts.length > 0) {
+    if (canEdit && conflicts.length > 0) {
       list.push({
         id: "review-conflicts",
         title: `Review sync conflicts (${conflicts.length})`,
@@ -1025,7 +1043,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         manifest?.entries[tab.path.toLowerCase()]?.contentType ?? "",
         tab.path
       );
-      if (isMd) {
+      if (isMd && canEdit) {
         list.push({
           id: "toggle-mode",
           title: tab.mode === "preview" ? "Edit mode" : "Preview mode",
@@ -1039,7 +1057,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             }),
         });
       }
-      if (tab.dirty) {
+      if (tab.dirty && canEdit) {
         list.push({
           id: "save",
           title: "Save file",
@@ -1049,38 +1067,40 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           run: () => void saveTab(tab),
         });
       }
-      list.push(
-        {
-          id: "close-tab",
-          title: "Close tab",
-          hint: "⌘W",
-          keywords: "dismiss",
-          icon: <XIcon size={16} />,
-          run: () => closeTab(tab.id),
-        },
-        {
-          id: "rename",
-          title: "Rename / move file",
-          hint: "F2",
-          keywords: "move path",
-          icon: <PencilSimple size={16} />,
-          run: () =>
-            setModal({
-              kind: "rename",
-              type: "file",
-              path: tab.path,
-              value: tab.path,
-              error: null,
-            }),
-        },
-        {
-          id: "delete",
-          title: "Delete file",
-          keywords: "remove trash",
-          icon: <Trash size={16} />,
-          run: () => setModal({ kind: "deleteConfirm", path: tab.path }),
-        }
-      );
+      list.push({
+        id: "close-tab",
+        title: "Close tab",
+        hint: "⌘W",
+        keywords: "dismiss",
+        icon: <XIcon size={16} />,
+        run: () => closeTab(tab.id),
+      });
+      if (canEdit) {
+        list.push(
+          {
+            id: "rename",
+            title: "Rename / move file",
+            hint: "F2",
+            keywords: "move path",
+            icon: <PencilSimple size={16} />,
+            run: () =>
+              setModal({
+                kind: "rename",
+                type: "file",
+                path: tab.path,
+                value: tab.path,
+                error: null,
+              }),
+          },
+          {
+            id: "delete",
+            title: "Delete file",
+            keywords: "remove trash",
+            icon: <Trash size={16} />,
+            run: () => setModal({ kind: "deleteConfirm", path: tab.path }),
+          }
+        );
+      }
     }
     return list;
   }, [
@@ -1099,6 +1119,8 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     guardedNavigate,
     conflicts,
     reviewConflicts,
+    canEdit,
+    isOwner,
   ]);
 
   // ── Global hotkeys ─────────────────────────────────────────────────────--
@@ -1133,6 +1155,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         e.preventDefault();
         dispatch({ type: "TOGGLE_RIGHT" });
       } else if (k === "n") {
+        if (!canEdit) return;
         e.preventDefault();
         openNewNoteModal();
       } else if (k === "w") {
@@ -1152,9 +1175,30 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
     openNewNoteModal,
     dispatch,
     closeTab,
+    canEdit,
   ]);
 
   // ── Render ─────────────────────────────────────────────────────────────--
+
+  if (vaultError === "Vault is archived") {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-canvas px-6 text-ink">
+        <Warning size={32} className="mb-3 text-accent-soft" />
+        <h1 className="text-xl font-bold">This vault is archived</h1>
+        <p className="mt-2 max-w-md text-center text-sm text-muted">
+          Web workspace, plugin sync, and MCP access are paused. Restore it
+          from the vault list to continue.
+        </p>
+        <button
+          type="button"
+          onClick={() => navigate("/")}
+          className="mt-5 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-on-accent"
+        >
+          Back to vaults
+        </button>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -1181,6 +1225,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             onToggleTheme={toggleTheme}
             onNavigateGuard={navigateGuard}
             exportUrl={api.exportUrl(vaultId)}
+            vaultRole={vault?.role}
+            onVaultRenamed={setVault}
+            onVaultArchived={() => navigate("/")}
           />
         }
         tabBar={<TabBar contentTypeFor={contentTypeFor} onCloseTab={closeTab} />}
@@ -1202,9 +1249,9 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             isMd={activeIsMd}
             mode={activeTab?.mode ?? "preview"}
             onToggleLeft={() => dispatch({ type: "TOGGLE_LEFT" })}
-            onNewNote={() => openNewNoteModal()}
-            onSave={() => activeTab && saveTab(activeTab)}
-            onToggleMode={toggleActiveMode}
+            onNewNote={canEdit ? () => openNewNoteModal() : undefined}
+            onSave={canEdit ? () => activeTab && saveTab(activeTab) : undefined}
+            onToggleMode={canEdit ? toggleActiveMode : undefined}
             onToggleRight={() => dispatch({ type: "TOGGLE_RIGHT" })}
           />
         }
@@ -1219,16 +1266,32 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
             searchInputRef={searchInputRef}
             onOpenFile={openFile}
             onSelectFolder={setCreateParent}
-            onNewNote={openNewNoteModal}
-            onNewFolder={openNewFolderModal}
-            onUpload={() => uploadRef.current?.click()}
-            onRename={(p) =>
-              setModal({ kind: "rename", type: "file", path: p, value: p, error: null })
+            onNewNote={canEdit ? openNewNoteModal : undefined}
+            onNewFolder={canEdit ? openNewFolderModal : undefined}
+            onUpload={canEdit ? () => uploadRef.current?.click() : undefined}
+            onRename={
+              canEdit
+                ? (p) =>
+                    setModal({ kind: "rename", type: "file", path: p, value: p, error: null })
+                : undefined
             }
-            onRenameFolder={(p) =>
-              setModal({ kind: "rename", type: "folder", path: p, value: p, error: null })
+            onRenameFolder={
+              canEdit
+                ? (p) =>
+                    setModal({
+                      kind: "rename",
+                      type: "folder",
+                      path: p,
+                      value: p,
+                      error: null,
+                    })
+                : undefined
             }
-            onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
+            onDelete={
+              canEdit
+                ? (p) => setModal({ kind: "deleteConfirm", path: p })
+                : undefined
+            }
           />
         }
         right={
@@ -1240,7 +1303,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           />
         }
       >
-        {conflicts.length > 0 && (
+        {canEdit && conflicts.length > 0 && (
           <ConflictBanner count={conflicts.length} onReview={reviewConflicts} />
         )}
         <EditorArea
@@ -1250,27 +1313,41 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
           load={load}
           saving={saving}
           vaultPaths={vaultPaths}
+          canEdit={canEdit}
           onEdit={(buf) =>
+            canEdit &&
             activeTab &&
             dispatch({ type: "EDIT_TAB_BUFFER", id: activeTab.id, editBuffer: buf })
           }
-          onSave={() => activeTab && saveTab(activeTab)}
-          onRevert={() => activeTab && revertTab(activeTab)}
+          onSave={() => canEdit && activeTab && saveTab(activeTab)}
+          onRevert={() => canEdit && activeTab && revertTab(activeTab)}
           onSetMode={(mode) =>
-            activeTab && dispatch({ type: "SET_TAB_MODE", id: activeTab.id, mode })
+            canEdit &&
+            activeTab &&
+            dispatch({ type: "SET_TAB_MODE", id: activeTab.id, mode })
           }
-          onRename={(p) =>
-            setModal({ kind: "rename", type: "file", path: p, value: p, error: null })
+          onRename={
+            canEdit
+              ? (p) =>
+                  setModal({ kind: "rename", type: "file", path: p, value: p, error: null })
+              : undefined
           }
-          onDelete={(p) => setModal({ kind: "deleteConfirm", path: p })}
+          onDelete={
+            canEdit
+              ? (p) => setModal({ kind: "deleteConfirm", path: p })
+              : undefined
+          }
           onOpenFile={openFile}
-          onCreateNote={(p) =>
-            setModal({
-              kind: "newNote",
-              value: p.split("/").pop()?.replace(/\.md$/i, "") ?? "",
-              parent: parentDir(p),
-              error: null,
-            })
+          onCreateNote={
+            canEdit
+              ? (p) =>
+                  setModal({
+                    kind: "newNote",
+                    value: p.split("/").pop()?.replace(/\.md$/i, "") ?? "",
+                    parent: parentDir(p),
+                    error: null,
+                  })
+              : undefined
           }
         />
       </WorkspaceLayout>
@@ -1377,7 +1454,7 @@ function WorkspaceInner({ vaultId }: { vaultId: string }) {
         />
       )}
 
-      {selectedConflict && (
+      {canEdit && selectedConflict && (
         <ConflictResolutionPanel
           conflict={selectedConflict}
           resolving={resolvingConflict}
@@ -1423,21 +1500,23 @@ function SidebarContent({
   searchInputRef: React.RefObject<HTMLInputElement>;
   onOpenFile: (path: string) => void;
   onSelectFolder: (path: string) => void;
-  onNewNote: (parent?: string) => void;
-  onNewFolder: (parent?: string) => void;
-  onUpload: () => void;
-  onRename: (path: string) => void;
-  onRenameFolder: (path: string) => void;
-  onDelete: (path: string) => void;
+  onNewNote?: (parent?: string) => void;
+  onNewFolder?: (parent?: string) => void;
+  onUpload?: () => void;
+  onRename?: (path: string) => void;
+  onRenameFolder?: (path: string) => void;
+  onDelete?: (path: string) => void;
 }) {
   const createHint = createParent || "vault root";
+  const canEdit = Boolean(onNewNote && onNewFolder && onUpload);
 
   return (
     <>
       <div className="flex items-center gap-2 border-b border-border px-1.5 py-1">
+        {canEdit && (
         <div className="inline-flex items-center gap-0.5 rounded-md bg-elevated p-0.5">
           <button
-            onClick={() => onNewNote(createParent)}
+            onClick={() => onNewNote?.(createParent)}
             className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
             title={`New note in ${createHint} (⌘N)`}
             aria-label={`New note in ${createHint}`}
@@ -1445,7 +1524,7 @@ function SidebarContent({
             <FilePlus size={22} weight="bold" />
           </button>
           <button
-            onClick={() => onNewFolder(createParent)}
+            onClick={() => onNewFolder?.(createParent)}
             className="flex h-9 w-9 items-center justify-center rounded text-ink transition-colors hover:bg-hover"
             title={`New folder in ${createHint}`}
             aria-label={`New folder in ${createHint}`}
@@ -1461,6 +1540,7 @@ function SidebarContent({
             <UploadSimple size={22} weight="bold" />
           </button>
         </div>
+        )}
         <span
           className="min-w-0 flex-1 truncate text-[11px] text-faint"
           title={createParent || "/"}
@@ -1517,6 +1597,7 @@ function EditorArea({
   load,
   saving,
   vaultPaths,
+  canEdit,
   onEdit,
   onSave,
   onRevert,
@@ -1532,17 +1613,19 @@ function EditorArea({
   load: { tabId: string; status: "loading" | "error"; message?: string } | null;
   saving: boolean;
   vaultPaths: string[];
+  canEdit: boolean;
   onEdit: (buffer: string) => void;
   onSave: () => void;
   onRevert: () => void;
   onSetMode: (mode: "live" | "preview") => void;
-  onRename: (path: string) => void;
-  onDelete: (path: string) => void;
+  onRename?: (path: string) => void;
+  onDelete?: (path: string) => void;
   onOpenFile: (path: string) => void;
-  onCreateNote: (path: string) => void;
+  onCreateNote?: (path: string) => void;
 }) {
   // Cmd/Ctrl+S to save the active tab.
   useEffect(() => {
+    if (!canEdit) return;
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -1551,7 +1634,7 @@ function EditorArea({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [activeTab?.dirty, onSave]);
+  }, [activeTab?.dirty, onSave, canEdit]);
 
   if (!activeTab) {
     return (
@@ -1614,7 +1697,7 @@ function EditorArea({
   // Text / markdown
   const md = isMarkdown(entry.contentType, activeTab.path);
   const buffer = activeTab.editBuffer ?? "";
-  const previewMode = md && activeTab.mode === "preview";
+  const previewMode = !canEdit || (md && activeTab.mode === "preview");
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1623,7 +1706,7 @@ function EditorArea({
         onRename={onRename}
         onDelete={onDelete}
         right={
-          md ? (
+          md && canEdit ? (
             <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
               <ModeButton
                 active={activeTab.mode === "live"}
@@ -1641,9 +1724,9 @@ function EditorArea({
           ) : undefined
         }
         saving={saving}
-        dirty={activeTab.dirty}
-        onSave={onSave}
-        onRevert={onRevert}
+        dirty={canEdit && activeTab.dirty}
+        onSave={canEdit ? onSave : undefined}
+        onRevert={canEdit ? onRevert : undefined}
       />
       {previewMode ? (
         <div className="custom-scroll min-h-0 flex-1 overflow-y-auto">
@@ -1711,7 +1794,7 @@ function FileHeader({
 }: {
   path: string;
   onRename?: (path: string) => void;
-  onDelete: (path: string) => void;
+  onDelete?: (path: string) => void;
   right?: React.ReactNode;
   saving?: boolean;
   dirty?: boolean;
@@ -1742,6 +1825,7 @@ function FileHeader({
           {saving ? "Saving…" : "Save"}
         </button>
       )}
+      {onDelete && (
       <button
         onClick={() => onDelete(path)}
         title="Delete"
@@ -1750,6 +1834,7 @@ function FileHeader({
       >
         <Trash size={14} />
       </button>
+      )}
     </div>
   );
 }

@@ -91,10 +91,10 @@ export function useAuth() {
     []
   );
 
-  const signInWithGoogle = useCallback(async () => {
+  const signInWithGoogle = useCallback(async (callbackURL = "/") => {
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      await api.signInWithGoogle("/");
+      await api.signInWithGoogle(callbackURL);
     } catch (e) {
       setState((s) => ({ ...s, loading: false, error: (e as Error).message }));
       throw e;

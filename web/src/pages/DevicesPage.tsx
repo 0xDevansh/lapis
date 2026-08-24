@@ -161,7 +161,7 @@ export default function DevicesPage() {
         </button>
       </section>
 
-      {vaultId && <GitHubRemotePanel vaultId={vaultId} />}
+      {api.isVaultOwner(vault?.role) && vaultId && <GitHubRemotePanel vaultId={vaultId} />}
 
       {error && (
         <p className="mb-6 rounded border border-danger/30 bg-danger/10 px-4 py-3 text-danger">

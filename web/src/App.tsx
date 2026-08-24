@@ -1,13 +1,35 @@
 import { Component, Suspense, lazy, type ErrorInfo, type ReactNode } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useSearchParams } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import AuthPage from "./pages/AuthPage";
 import LandingPage from "./pages/LandingPage";
 import { ToastProvider } from "./components/ui/Toast";
 
+function safeInternalPath(value: string | null): string | null {
+  if (!value || !value.startsWith("/") || value.startsWith("//")) return null;
+  return value;
+}
+
+function PostAuthRedirect() {
+  const [params] = useSearchParams();
+  return <Navigate to={safeInternalPath(params.get("redirect")) ?? "/"} replace />;
+}
+
+function McpConsentSignInRedirect() {
+  const [params] = useSearchParams();
+  const next = `/mcp/consent${params.toString() ? `?${params.toString()}` : ""}`;
+  return (
+    <Navigate
+      to={`/auth?mode=signin&redirect=${encodeURIComponent(next)}`}
+      replace
+    />
+  );
+}
+
 const VaultListPage = lazy(() => import("./pages/VaultListPage"));
 const VaultWorkspace = lazy(() => import("./pages/VaultWorkspace"));
 const DevicesPage = lazy(() => import("./pages/DevicesPage"));
+const McpConsentPage = lazy(() => import("./pages/McpConsentPage"));
 
 function RouteFallback() {
   return (
@@ -121,6 +143,7 @@ function AppRoutes() {
             />
           }
         />
+        <Route path="/mcp/consent" element={<McpConsentSignInRedirect />} />
         <Route
           path="/invites/:token"
           element={<Navigate to="/auth?mode=signin" replace />}
@@ -138,9 +161,14 @@ function AppRoutes() {
             path="/"
             element={<VaultListPage user={user} onSignOut={signOut} />}
           />
-          <Route path="/auth" element={<Navigate to="/" replace />} />
+          <Route path="/auth" element={<PostAuthRedirect />} />
+          <Route path="/mcp/consent" element={<McpConsentPage user={user} />} />
           <Route path="/vault/:id/devices" element={<DevicesPage />} />
           <Route path="/vault/:id/*" element={<VaultWorkspace />} />
+          <Route
+            path="/invites/:token"
+            element={<Navigate to="/" replace />}
+          />
           <Route
             path="*"
             element={<div className="p-8 text-muted">Page not found.</div>}

@@ -8,7 +8,7 @@ import * as api from "../api";
 interface AuthPageProps {
   onSignIn: (email: string, password: string) => Promise<void>;
   onSignUp: (name: string, email: string, password: string) => Promise<void>;
-  onSignInWithGoogle: () => Promise<void>;
+  onSignInWithGoogle: (callbackURL?: string) => Promise<void>;
   error: string | null;
   loading: boolean;
 }
@@ -88,7 +88,12 @@ export default function AuthPage({
   async function handleGoogleSignIn() {
     setLocalError(null);
     try {
-      await onSignInWithGoogle();
+      const redirect = params.get("redirect");
+      await onSignInWithGoogle(
+        redirect && redirect.startsWith("/") && !redirect.startsWith("//")
+          ? redirect
+          : "/"
+      );
     } catch (err) {
       const message = (err as Error).message;
       setLocalError(message);

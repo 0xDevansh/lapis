@@ -9,8 +9,9 @@ import {
   CaretRight,
   GearSix,
 } from "@phosphor-icons/react";
+import type * as api from "../../api";
 import type { Theme } from "../../hooks/useTheme";
-import SettingsPopover from "../overlays/SettingsPopover";
+import SettingsDialog from "../overlays/SettingsDialog";
 
 interface TitleBarProps {
   vaultId: string;
@@ -28,6 +29,9 @@ interface TitleBarProps {
   /** Guard navigation away when there are unsaved edits. Return false to block. */
   onNavigateGuard: () => boolean;
   exportUrl: string;
+  vaultRole?: api.VaultRole;
+  onVaultRenamed?: (vault: api.Vault) => void;
+  onVaultArchived?: () => void;
 }
 
 function IconButton({
@@ -105,6 +109,9 @@ export default function TitleBar({
   onToggleTheme,
   onNavigateGuard,
   exportUrl,
+  vaultRole,
+  onVaultRenamed,
+  onVaultArchived,
 }: TitleBarProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsBtnRef = useRef<HTMLButtonElement>(null);
@@ -168,14 +175,18 @@ export default function TitleBar({
         </IconButton>
       </div>
 
-      <SettingsPopover
+      <SettingsDialog
         vaultId={vaultId}
+        vaultName={vaultName}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         theme={theme}
         onToggleTheme={onToggleTheme}
         exportUrl={exportUrl}
-        anchorRef={settingsBtnRef}
+        vaultRole={vaultRole}
+        onVaultRenamed={onVaultRenamed}
+        onVaultArchived={onVaultArchived}
+        onNavigateGuard={onNavigateGuard}
       />
     </header>
   );
