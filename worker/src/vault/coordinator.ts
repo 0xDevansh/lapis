@@ -1036,7 +1036,9 @@ export class VaultCoordinator extends DurableObject<Env> {
     const changes = this.dirtyChanges();
     if (changes.length === 0) {
       const remoteUrl = gitConfig?.repoUrl ?? meta.artifactsRemote;
-      if (remoteUrl) await this.scheduleNextSeal();
+      // Always push the deadline forward. Leaving a past seal_deadline makes
+      // alarm() re-arm immediately and busy-loop with no-op seals.
+      await this.scheduleNextSeal();
       return { fileCount: 0, remote: remoteUrl ?? undefined };
     }
 
@@ -2317,8 +2319,17 @@ export class VaultCoordinator extends DurableObject<Env> {
   }
 
   private async armAlarm(): Promise<void> {
-    const deadlines = [this.numberState("flush_deadline"), this.numberState("seal_deadline")]
-      .filter((value): value is number => value !== null);
+    const now = Date.now();
+    let sealDeadline = this.numberState("seal_deadline");
+    if (sealDeadline !== null && sealDeadline <= now) {
+      sealDeadline = now + DEFAULT_SEAL_INTERVAL_MS;
+      await this.setState("seal_deadline", String(sealDeadline));
+    }
+
+    const flushDeadline = this.numberState("flush_deadline");
+    const deadlines = [flushDeadline, sealDeadline].filter(
+      (value): value is number => value !== null && value > now
+    );
     if (deadlines.length === 0) return;
     await this.ctx.storage.setAlarm(Math.min(...deadlines));
   }
