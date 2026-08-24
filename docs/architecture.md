@@ -15,9 +15,10 @@ Lapis does **not** use CRDTs or Yjs. Sync is **per-file revisions**, **unified-d
 | **Worker** (`worker/`) | HTTP API: session auth for the web, device-token auth for the plugin. |
 | **VaultCoordinator** | One Cloudflare Durable Object per vault. Single writer. Owns the live manifest, chunked text, retained merge history, acknowledgements, conflicts, presence, and flush/seal alarms. |
 | **R2** | Immutable content-addressed **binary blobs** plus `_manifest.json`. Text bodies never use R2 after storage migration. |
-| **D1** | Auth, devices, search/FTS, tags/backlinks, GitHub remote config. Not the live file store. |
+| **D1** | Auth/OAuth, devices, vault registry/lifecycle, vault membership and invites, MCP policy, search/FTS, tags/backlinks, GitHub remote config. Not the live file store. |
 | **Artifacts** | Default sealed Git history (append-only snapshots). |
 | **GitHub** (optional) | If configured, seal prefers GitHub; inbound reconcile runs before push. |
+| **MCP clients** | Cursor, Claude, VS Code, OpenCode, and generic coding agents connect to `/api/mcp` through OAuth or an account-wide personal token, and only see vaults explicitly enabled in settings. |
 
 Authority for “what is the current text of `note.md`?” is always the **Durable Object’s head** for that vault—not the browser buffer, not the plugin disk copy, and not a stale R2 object that has not been flushed yet.
 
@@ -34,6 +35,7 @@ Authority for “what is the current text of `note.md`?” is always the **Durab
 ```
   Obsidian disk ◄──patch/put/notify──► Worker ──► VaultCoordinator
   Browser editor ◄──PUT + WS──────────┘                 │
+  MCP client ──OAuth or PAT + /api/mcp──┘                │
                                                         │
                               DO SQLite
                        manifest + chunked text heads
@@ -170,6 +172,66 @@ Zip export and snapshot listing read sealed history / vault content through the 
 
 ---
 
+## Vault lifecycle
+
+Vault rows have an optional `archived_at` timestamp. Active vault lists exclude archived rows, while the vault list page exposes a separate restore area.
+
+Archiving is a pause, not deletion:
+
+- D1 vault rows, device credentials, GitHub config, R2 blobs, Artifacts history, and Durable Object state are preserved.
+- Web workspace routes, notify WebSockets, plugin/device sync, GitHub push routes, and MCP access return a clear `Vault is archived` error.
+- Restoring clears `archived_at`; the same vault id, file revisions, devices, and history continue from their existing state.
+
+Vault rename updates both D1 and the coordinator's `vault_meta` so UI lists, export filenames, and coordinator metadata stay aligned.
+
+---
+
+## Vault sharing
+
+Web vaults are no longer owner-only. Better Auth users can be invited as **editor** or **viewer**:
+
+- Owner and editors send in-app email invites. There is no outbound mailer; pending invites appear on the invitee's vault list when they sign in with that email.
+- Accepting writes a `vault_members` row. Rejecting or cancelling leaves them out.
+- Editors can read/write vault content and invite others. Viewers can read (including search, notify, export) but cannot use edit mode or mutate files.
+- Archive, rename, MCP policy, and GitHub remotes stay owner-only. Any member can pair an Obsidian plugin; the device inherits that member's read/write role at request time.
+- MCP personal tokens stay account-wide; vault visibility is membership plus the owner's per-vault MCP policy. Viewer MCP sessions are forced read-only even when the vault policy is read-write.
+
+---
+
+## MCP access
+
+Lapis exposes one account-wide Streamable HTTP MCP resource at `/api/mcp`. Clients authenticate with either Better Auth's OAuth 2.1 MCP provider or a personal access token:
+
+1. An MCP client connects to `/api/mcp`.
+2. `Authorization: Bearer lapis_…` tokens are resolved first. The secret is stored as a SHA-256 hash, shown once at creation, and can be revoked from Settings → MCP. Writes are attributed as `mcp:token:<id>`.
+3. Other unauthenticated requests receive an RFC 9728 protected-resource challenge.
+4. Better Auth handles OAuth discovery, PKCE, browser login, consent, access tokens, refresh tokens, revocation, CIMD, and DCR fallback.
+5. The MCP tool handler resolves the user (`sub`) and client (`client_id`) for every call.
+6. Only active vaults with `vault_mcp_policies.enabled = 1` that the authenticated user is a member of are visible. Viewer members are forced to read-only even when the owner enabled read-write MCP.
+
+Plugin sync tokens are not accepted on `/api/mcp`. MCP tokens do not grant plugin sync.
+
+MCP tools use coding-agent-style names and structured outputs:
+
+- `list_vaults`
+- `read`, `write`, `edit`, `apply_patch`
+- `grep`, `find`, `ls`, `stat`
+- `mv`, `rm`, `mkdir`
+
+There is intentionally no `bash` tool. Vault content is virtual storage, not a sandboxed filesystem, and shell execution would target the Worker runtime rather than the user's notes. Redundant Unix tools such as `cat`, `head`, `tail`, and `sed` are also omitted because `read` and `edit` provide LLM-optimized equivalents with line numbers, truncation metadata, exact-match edits, and revision conflict checks.
+
+Per-vault MCP policy controls:
+
+- enabled/disabled visibility;
+- read-only vs read-write mode;
+- `grep`, delete, and internals toggles;
+- path allow/deny globs;
+- max read/write/result limits.
+
+Every MCP mutation goes through the same `VaultCoordinator` revision path as web and plugin writes, attributed as `mcp:<client_id>`.
+
+---
+
 ## Storage health metrics
 
 Each vault alarm emits a structured `lapis.storage_metrics` log event through Workers observability. It includes:
@@ -194,8 +256,11 @@ The same snapshot is available from the coordinator's `getStorageMetrics()` RPC 
 | Diff / patch / merge3 | `worker/src/vault/patch.ts` |
 | Conflict note format | `worker/src/vault/conflict.ts` |
 | Web vault HTTP | `worker/src/vault/routes.ts` |
-| Plugin sync HTTP | `worker/src/sync/routes.ts` |
+| Vault membership / invites | `worker/src/vault/access.ts`, `worker/src/vault/invites.ts` |
+| Plugin sync HTTP | `worker/src/sync/routes.ts`, `worker/src/devices/types.ts` |
 | Notify upgrade | `worker/src/notify/routes.ts` |
+| MCP OAuth/resource server | `worker/src/auth/index.ts`, `worker/src/mcp/server.ts`, `web/src/pages/McpConsentPage.tsx` |
+| Settings and MCP onboarding | `web/src/components/overlays/SettingsDialog.tsx` |
 | Artifacts seal | `worker/src/artifacts/sealer.ts` |
 | GitHub remote | `worker/src/git/*` |
 | Plugin engine + journal | `plugin/src/sync/engine.ts`, `journal.ts` |
@@ -213,5 +278,8 @@ The same snapshot is available from the coordinator's `getStorageMetrics()` RPC 
 6. R2 contains no text body after storage migration; binary manifest entries point at immutable SHA-256 blob objects.
 7. Conflict resolution is idempotence-protected by the open conflict row and hard-deletes its note.
 8. Secrets (Artifacts tokens, GitHub PATs) stay server-side.
+9. Archived vaults preserve data but reject web, sync, GitHub, and MCP access until restored.
+10. MCP clients only see active vaults explicitly enabled by the vault owner, and only for users who are members of that vault. Viewer members cannot write through MCP.
+11. Plugin and agent device tokens inherit the paired member's current role: viewers can pull and ack, but `Device.writable` is false and sync writes return 403.
 
 For *why* these choices exist, see [`adr/`](adr/), especially 0001–0004, 0007, and 0010–0012.

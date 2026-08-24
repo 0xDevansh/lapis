@@ -33,5 +33,11 @@ A selected vault page exposed outside the private web vault experience. Publishi
 _Avoid_: Public vault, share link
 
 **Vault Owner**:
-The single person who owns and uses a private web vault across the web product and their local vaults. The first product slice optimizes for this solo user, not teams or public publishing.
+The person who created a web vault and retains admin control: archive, MCP policy, GitHub remotes, and member roles.
+
+**Editor**:
+A Better Auth user invited to a web vault who can read and write vault content, invite other editors and viewers, and pair a plugin or MCP client with write access.
+
+**Viewer**:
+A Better Auth user invited to a web vault who can read vault content and pair a read-only plugin or MCP client, but cannot edit, invite, or change vault settings.
 _Avoid_: Team member, collaborator, publisher
